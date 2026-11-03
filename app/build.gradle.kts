@@ -37,5 +37,8 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
 
+    // Used by the throwaway Wi-Fi Direct prototype (sockets, StateFlow).
+    implementation(libs.kotlinx.coroutines.android)
+
     testImplementation(libs.junit)
 }
