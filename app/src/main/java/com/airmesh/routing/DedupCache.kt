@@ -8,6 +8,9 @@ package com.airmesh.routing
  * forever would grow without bound on a phone that runs for days, so this is a
  * fixed-capacity LRU cache (1024 entries by default).
  *
+ * [seen] is synchronized, so its check-and-record step is atomic even when
+ * frames arrive from several transport threads at once.
+ *
  * Trade-off: if more than [capacity] distinct frames arrive before a duplicate
  * of a very old frame shows up, that duplicate can be delivered again.
  */
@@ -42,8 +45,8 @@ class DedupCache(private val capacity: Int = DEFAULT_CAPACITY) {
      * Records the frame identity and returns whether it had already been seen.
      *
      * A hit also refreshes the entry's LRU position, so busy originators are not
-     * evicted while idle ones age out. Thread-safe: receive and originate paths
-     * may call this from different coroutines.
+     * evicted while idle ones age out. Thread-safe: the check-and-record is
+     * atomic, so exactly one of several concurrent callers sees a new key.
      */
     @Synchronized
     fun seen(nodeId: Int, seq: Int): Boolean {

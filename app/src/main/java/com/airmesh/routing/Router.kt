@@ -19,6 +19,11 @@ import com.airmesh.protocol.FrameType
  * Callbacks are synchronous and must not block; the transport adapter is
  * responsible for queueing sends on its own coroutine. They must not throw.
  *
+ * Thread-safe: [originate] may be called concurrently because sequence
+ * allocation is synchronized, and [onFrameReceived] may be called from several
+ * receive threads. Callbacks can therefore run concurrently, so they must be
+ * thread-safe in the caller.
+ *
  * @property localNodeId this node's 16-bit address, used as the origin of
  *   frames created by [originate].
  * @property dedup duplicate-suppression cache shared by all received frames.
@@ -121,7 +126,10 @@ class Router(
         return frame
     }
 
-    /** Allocates the next 16-bit sequence number, wrapping 65535 -> 0. */
+    /**
+     * Allocates the next 16-bit sequence number, wrapping 65535 -> 0.
+     * Synchronized so concurrent [originate] calls cannot share a sequence.
+     */
     @Synchronized
     private fun nextSeq(): Int {
         lastSeq = (lastSeq + 1) and MAX_SEQ

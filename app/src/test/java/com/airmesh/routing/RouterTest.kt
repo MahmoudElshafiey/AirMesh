@@ -7,6 +7,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class RouterTest {
 
@@ -227,6 +231,45 @@ class RouterTest {
         assertEquals(1, harness.sent.size)
         assertEquals(2, harness.sent.single().first)
         assertEquals(1, harness.sent.single().second.ttl)
+    }
+
+    @Test
+    fun concurrentOriginateAssignsEveryFrameAUniqueSeq() {
+        val threadCount = 8
+        val framesPerThread = 1_000
+        val router = Router(
+            localNodeId = 99,
+            dedup = DedupCache(),
+            neighbors = { emptySet() },
+            send = { _, _ -> },
+        )
+        val frames = ConcurrentLinkedQueue<Frame>()
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(threadCount)
+
+        try {
+            val futures = (0 until threadCount).map {
+                executor.submit {
+                    // Release all threads together to force concurrent
+                    // originate() calls against the sequence counter.
+                    start.await()
+                    repeat(framesPerThread) {
+                        frames.add(router.originate(FrameType.MSG, ByteArray(0)))
+                    }
+                }
+            }
+
+            start.countDown()
+            futures.forEach { it.get(30, TimeUnit.SECONDS) }
+        } finally {
+            executor.shutdownNow()
+        }
+
+        assertEquals(threadCount * framesPerThread, frames.size)
+        assertEquals(
+            (1..(threadCount * framesPerThread)).toSet(),
+            frames.map { it.seq }.toSet(),
+        )
     }
 
     @Test
