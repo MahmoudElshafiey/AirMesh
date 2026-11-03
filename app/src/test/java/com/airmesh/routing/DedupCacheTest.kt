@@ -1,5 +1,6 @@
 package com.airmesh.routing
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -46,6 +47,27 @@ class DedupCacheTest {
 
         // B was evicted, so it is reported as new again.
         assertFalse(cache.seen(nodeId = 1, seq = 2))
+    }
+
+    @Test
+    fun defaultCapacityIs1024() {
+        assertEquals(1024, DedupCache.DEFAULT_CAPACITY)
+
+        val cache = DedupCache()
+
+        // Fill exactly the documented default capacity.
+        repeat(DedupCache.DEFAULT_CAPACITY) { seq ->
+            assertFalse(cache.seen(nodeId = 1, seq = seq))
+        }
+
+        // Nothing has been evicted yet.
+        assertTrue(cache.seen(nodeId = 1, seq = 0))
+
+        // The next distinct frame evicts the least recently used entry (seq 1,
+        // because seq 0 was just refreshed). That proves the bound is 1024.
+        assertFalse(cache.seen(nodeId = 1, seq = DedupCache.DEFAULT_CAPACITY))
+        assertTrue(cache.seen(nodeId = 1, seq = 0))
+        assertFalse(cache.seen(nodeId = 1, seq = 1))
     }
 
     @Test

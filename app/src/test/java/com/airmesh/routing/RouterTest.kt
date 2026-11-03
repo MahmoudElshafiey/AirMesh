@@ -106,6 +106,26 @@ class RouterTest {
     }
 
     @Test
+    fun ttlZeroIsDeliveredButNotForwarded() {
+        val harness = Harness(neighborIds = setOf(1, 2, 3))
+
+        harness.router.onFrameReceived(
+            harness.frame(type = FrameType.MSG, seq = 1, ttl = 0),
+            fromNeighbor = 1,
+        )
+        harness.router.onFrameReceived(
+            harness.frame(type = FrameType.LOCATION, seq = 2, ttl = 0),
+            fromNeighbor = 1,
+        )
+
+        assertEquals(
+            listOf(FrameType.MSG, FrameType.LOCATION),
+            harness.delivered.map { it.type },
+        )
+        assertTrue(harness.sent.isEmpty())
+    }
+
+    @Test
     fun senderIsExcludedFromForwarding() {
         val harness = Harness(neighborIds = setOf(1, 2, 3, 4))
 
@@ -126,7 +146,8 @@ class RouterTest {
         assertEquals(1, first.seq)
         assertEquals(8, first.ttl)
         assertEquals(FrameType.MSG, first.type)
-        assertEquals(Router.PROTOCOL_VERSION, first.version)
+        // Current wire version, stated independently of the Router constant.
+        assertEquals(1, first.version)
         assertEquals(0, first.flags)
         assertArrayEquals(payload, first.payload)
 
