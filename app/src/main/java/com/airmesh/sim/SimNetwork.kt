@@ -20,6 +20,10 @@ import kotlin.random.Random
  * and a radio radius with [configureRadioRange]. Mobility, when enabled, uses a
  * simple random-waypoint model and recomputes range links on every fixed step.
  *
+ * An optional slotted CSMA/CA model can be enabled with [enableCsmaCa]. It is
+ * off by default: in that mode frames are handed over immediately, no
+ * collisions are modeled, and the CSMA metrics stay zero.
+ *
  * Node ids must fit the 16-bit router address space. The network is intended to
  * be driven from one thread; the single event loop is what makes seeded runs
  * reproducible.
@@ -78,6 +82,40 @@ class SimNetwork(
 
     private var rangeConfig: RangeConfig? = null
     private var mobilityConfig: MobilityConfig? = null
+    private var mediumAccess: SimMediumAccess? = null
+    private var transmittedAnything = false
+
+    /**
+     * Enables the optional slotted CSMA/CA medium access model.
+     *
+     * It is off by default, and when off the simulator does not model
+     * collisions at all: [transmit] keeps its original immediate-handoff path.
+     * Enabling it must happen before any frame is sent so one run never mixes
+     * the two medium-access models.
+     *
+     * The model uses the network's seeded [random] generator, so backoff draws
+     * stay reproducible for a fixed seed.
+     */
+    fun enableCsmaCa(config: CsmaCaConfig = CsmaCaConfig()) {
+        require(mediumAccess == null) { "CSMA/CA is already enabled" }
+        require(!transmittedAnything) {
+            "CSMA/CA must be enabled before any frame is transmitted"
+        }
+
+        mediumAccess = SimMediumAccess(
+            clock = clock,
+            events = events,
+            random = random,
+            config = config,
+            neighborsOf = ::neighborsOf,
+            recordAttempt = { collector.recordOnAir() },
+            deliver = { from, to, bytes -> handoff(from, to, bytes) },
+        )
+    }
+
+    /** True when the optional CSMA/CA medium access model is active. */
+    val csmaCaEnabled: Boolean
+        get() = mediumAccess != null
 
     /**
      * Adds one node at an optional position. Positions only matter in radio
@@ -256,13 +294,13 @@ class SimNetwork(
     /** Immutable snapshot of the current run. */
     fun metrics(): SimMetrics {
         val duplicates = nodes.values.sumOf { it.dedup.duplicateCount }
-        return collector.snapshot(nodeCount = nodes.size, duplicatesDropped = duplicates)
+        return collector.snapshot(
+            nodeCount = nodes.size,
+            duplicatesDropped = duplicates,
+            mediumAccess = mediumAccess?.metrics(),
+        )
     }
 
-    /**
-     * Called by [SimTransport]. Returns false only when the link does not exist,
-     * so the routing layer can store the frame for a later replay.
-     */
     /** Current link neighbors of [nodeId], used when a transport restarts. */
     internal fun neighborsOf(nodeId: Int): Set<Int> {
         val result = sortedSetOf<Int>()
@@ -273,11 +311,28 @@ class SimNetwork(
         return result
     }
 
+    /**
+     * Called by [SimTransport]. Returns false only when the link does not exist,
+     * so the routing layer can store the frame for a later replay.
+     *
+     * With CSMA/CA off this is the original immediate-handoff path, and no
+     * collisions are modeled. With CSMA/CA on the frame is queued for slotted
+     * channel access and handed to the receiver only after it wins the channel.
+     */
     internal fun transmit(fromNodeId: Int, toNodeId: Int, bytes: ByteArray): Boolean {
         if (fromNodeId == toNodeId) return false
         val key = LinkKey.of(fromNodeId, toNodeId)
-        val link = links[key] ?: return false
+        if (!links.containsKey(key)) return false
 
+        transmittedAnything = true
+
+        val medium = mediumAccess
+        if (medium != null) {
+            medium.enqueue(fromNodeId, toNodeId, bytes)
+            return true
+        }
+
+        val link = links.getValue(key)
         collector.recordOnAir()
         // Loss is evaluated once, at handoff time. A dropped frame is never
         // delivered and is not treated as an unreachable neighbor.
@@ -286,6 +341,23 @@ class SimNetwork(
         val deliveryAt = clock.now + link.latencyMs
         events.schedule(deliveryAt) {
             // A link removed while the frame was in flight drops the frame.
+            if (links[key] == null) return@schedule
+            nodes[toNodeId]?.receive(senderId = fromNodeId, bytes = bytes)
+        }
+        return true
+    }
+
+    /**
+     * Completes a CSMA/CA transmission attempt: random loss is re-evaluated per
+     * attempt, then the frame is scheduled for delivery after link latency.
+     */
+    private fun handoff(fromNodeId: Int, toNodeId: Int, bytes: ByteArray): Boolean {
+        val key = LinkKey.of(fromNodeId, toNodeId)
+        val link = links[key] ?: return false
+        if (random.nextDouble() < link.loss) return true
+
+        val deliveryAt = clock.now + link.latencyMs
+        events.schedule(deliveryAt) {
             if (links[key] == null) return@schedule
             nodes[toNodeId]?.receive(senderId = fromNodeId, bytes = bytes)
         }

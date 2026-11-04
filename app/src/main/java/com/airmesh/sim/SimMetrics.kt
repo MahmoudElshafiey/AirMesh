@@ -36,6 +36,24 @@ data class SimMetrics(
     val duplicatesDropped: Long,
     val framesStored: Int,
     val framesReplayed: Int,
+    /**
+     * Failed transmission attempts caused by overlapping transmissions at a
+     * common receiver. Always zero when CSMA/CA is disabled.
+     */
+    val collisions: Int = 0,
+    /**
+     * Mean channel wait per completed frame, in virtual milliseconds. It
+     * includes waiting while the channel is busy and backoff countdowns across
+     * retries. Zero when CSMA/CA is disabled.
+     */
+    val averageBackoffWaitMs: Double = 0.0,
+    /**
+     * Network-wide fraction of elapsed virtual time with at least one simulated
+     * transmission on the air. Zero when CSMA/CA is disabled.
+     */
+    val channelBusyRatio: Double = 0.0,
+    /** Frames given up after exhausting CSMA/CA retries. Zero when disabled. */
+    val framesDroppedAfterMaxRetries: Int = 0,
 )
 
 /** Mutable collector owned by [SimNetwork]; [snapshot] makes it immutable. */
@@ -94,7 +112,11 @@ internal class SimMetricsCollector {
         framesReplayed++
     }
 
-    fun snapshot(nodeCount: Int, duplicatesDropped: Long): SimMetrics {
+    fun snapshot(
+        nodeCount: Int,
+        duplicatesDropped: Long,
+        mediumAccess: MediumAccessMetrics? = null,
+    ): SimMetrics {
         val messageSnapshots = messages.values.map { message ->
             SimMessageMetrics(
                 originNode = message.originNode,
@@ -137,6 +159,10 @@ internal class SimMetricsCollector {
             duplicatesDropped = duplicatesDropped,
             framesStored = framesStored,
             framesReplayed = framesReplayed,
+            collisions = mediumAccess?.collisions ?: 0,
+            averageBackoffWaitMs = mediumAccess?.averageBackoffWaitMs ?: 0.0,
+            channelBusyRatio = mediumAccess?.channelBusyRatio ?: 0.0,
+            framesDroppedAfterMaxRetries = mediumAccess?.framesDroppedAfterMaxRetries ?: 0,
         )
     }
 }
