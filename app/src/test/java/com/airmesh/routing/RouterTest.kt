@@ -2,6 +2,7 @@ package com.airmesh.routing
 
 import com.airmesh.protocol.Frame
 import com.airmesh.protocol.FrameType
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -20,6 +21,8 @@ class RouterTest {
         var neighborIds: Set<Int> = setOf(1, 2, 3),
         initialTtl: Int = Router.DEFAULT_TTL,
         capacity: Int = 64,
+        store: PacketStore? = null,
+        sendResult: (Int, Frame) -> Boolean = { _, _ -> true },
     ) {
         val sent = mutableListOf<Pair<Int, Frame>>()
         val delivered = mutableListOf<Frame>()
@@ -28,10 +31,25 @@ class RouterTest {
             localNodeId = localNodeId,
             dedup = DedupCache(capacity),
             neighbors = { neighborIds },
-            send = { neighborId, frame -> sent += neighborId to frame },
+            send = { neighborId, frame ->
+                sent += neighborId to frame
+                sendResult(neighborId, frame)
+            },
             deliver = { frame -> delivered += frame },
             initialTtl = initialTtl,
+            packetStore = store,
         )
+
+        fun receive(frame: Frame, fromNeighbor: Int) = runBlocking {
+            router.onFrameReceived(frame, fromNeighbor)
+        }
+
+        fun originate(
+            type: FrameType = FrameType.MSG,
+            payload: ByteArray = ByteArray(0),
+        ): Frame = runBlocking {
+            router.originate(type, payload)
+        }
 
         fun frame(
             nodeId: Int = 5,
@@ -55,7 +73,7 @@ class RouterTest {
         val harness = Harness()
         val frame = harness.frame(seq = 1, ttl = 5)
 
-        harness.router.onFrameReceived(frame, fromNeighbor = 1)
+        harness.receive(frame, fromNeighbor = 1)
         assertEquals(1, harness.delivered.size)
         assertEquals(setOf(2, 3), harness.sent.map { it.first }.toSet())
 
@@ -64,7 +82,7 @@ class RouterTest {
 
         // The same (nodeId, seq) arrives again through another path, with a
         // lower TTL because the other path is shorter/longer. Still a duplicate.
-        harness.router.onFrameReceived(frame.copy(ttl = 4), fromNeighbor = 2)
+        harness.receive(frame.copy(ttl = 4), fromNeighbor = 2)
 
         assertTrue(harness.delivered.isEmpty())
         assertTrue(harness.sent.isEmpty())
@@ -82,7 +100,7 @@ class RouterTest {
             payload = payload,
         )
 
-        harness.router.onFrameReceived(frame, fromNeighbor = 1)
+        harness.receive(frame, fromNeighbor = 1)
 
         // The local copy keeps its TTL; only the forwarded copy is decremented.
         assertEquals(1, harness.delivered.size)
@@ -103,7 +121,7 @@ class RouterTest {
     fun ttlOneIsDeliveredButNotForwarded() {
         val harness = Harness(neighborIds = setOf(1, 2, 3))
 
-        harness.router.onFrameReceived(harness.frame(ttl = 1), fromNeighbor = 1)
+        harness.receive(harness.frame(ttl = 1), fromNeighbor = 1)
 
         assertEquals(1, harness.delivered.size)
         assertTrue(harness.sent.isEmpty())
@@ -113,11 +131,11 @@ class RouterTest {
     fun ttlZeroIsDeliveredButNotForwarded() {
         val harness = Harness(neighborIds = setOf(1, 2, 3))
 
-        harness.router.onFrameReceived(
+        harness.receive(
             harness.frame(type = FrameType.MSG, seq = 1, ttl = 0),
             fromNeighbor = 1,
         )
-        harness.router.onFrameReceived(
+        harness.receive(
             harness.frame(type = FrameType.LOCATION, seq = 2, ttl = 0),
             fromNeighbor = 1,
         )
@@ -133,7 +151,7 @@ class RouterTest {
     fun senderIsExcludedFromForwarding() {
         val harness = Harness(neighborIds = setOf(1, 2, 3, 4))
 
-        harness.router.onFrameReceived(harness.frame(ttl = 3), fromNeighbor = 2)
+        harness.receive(harness.frame(ttl = 3), fromNeighbor = 2)
 
         assertEquals(setOf(1, 3, 4), harness.sent.map { it.first }.toSet())
     }
@@ -143,8 +161,8 @@ class RouterTest {
         val harness = Harness(localNodeId = 42, neighborIds = setOf(1, 2), initialTtl = 8)
         val payload = "hi".toByteArray()
 
-        val first = harness.router.originate(FrameType.MSG, payload)
-        val second = harness.router.originate(FrameType.LOCATION, ByteArray(0))
+        val first = harness.originate(FrameType.MSG, payload)
+        val second = harness.originate(FrameType.LOCATION, ByteArray(0))
 
         assertEquals(42, first.nodeId)
         assertEquals(1, first.seq)
@@ -169,12 +187,12 @@ class RouterTest {
     fun originatedFrameIsMarkedSeenSoItsEchoIsDropped() {
         val harness = Harness(neighborIds = setOf(1))
 
-        val frame = harness.router.originate(FrameType.MSG, "x".toByteArray())
+        val frame = harness.originate(FrameType.MSG, "x".toByteArray())
         harness.delivered.clear()
         harness.sent.clear()
 
         // A neighbor floods our own frame back to us.
-        harness.router.onFrameReceived(frame.copy(ttl = frame.ttl - 1), fromNeighbor = 1)
+        harness.receive(frame.copy(ttl = frame.ttl - 1), fromNeighbor = 1)
 
         assertTrue(harness.delivered.isEmpty())
         assertTrue(harness.sent.isEmpty())
@@ -184,7 +202,7 @@ class RouterTest {
     fun initialTtlIsConfigurable() {
         val harness = Harness(neighborIds = emptySet(), initialTtl = 3)
 
-        val frame = harness.router.originate(FrameType.MSG, ByteArray(0))
+        val frame = harness.originate(FrameType.MSG, ByteArray(0))
 
         assertEquals(3, frame.ttl)
     }
@@ -195,22 +213,22 @@ class RouterTest {
 
         var last: Frame? = null
         repeat(0xFFFF) {
-            last = harness.router.originate(FrameType.MSG, ByteArray(0))
+            last = harness.originate(FrameType.MSG, ByteArray(0))
         }
 
         assertEquals(0xFFFF, last!!.seq)
-        assertEquals(0, harness.router.originate(FrameType.MSG, ByteArray(0)).seq)
-        assertEquals(1, harness.router.originate(FrameType.MSG, ByteArray(0)).seq)
+        assertEquals(0, harness.originate(FrameType.MSG, ByteArray(0)).seq)
+        assertEquals(1, harness.originate(FrameType.MSG, ByteArray(0)).seq)
     }
 
     @Test
     fun onlyMsgAndLocationAreDeliveredLocally() {
         val harness = Harness(neighborIds = emptySet())
 
-        harness.router.onFrameReceived(harness.frame(type = FrameType.MSG, seq = 1, ttl = 1), 1)
-        harness.router.onFrameReceived(harness.frame(type = FrameType.LOCATION, seq = 2, ttl = 1), 1)
-        harness.router.onFrameReceived(harness.frame(type = FrameType.ACK, seq = 3, ttl = 1), 1)
-        harness.router.onFrameReceived(harness.frame(type = FrameType.HELLO, seq = 4, ttl = 1), 1)
+        harness.receive(harness.frame(type = FrameType.MSG, seq = 1, ttl = 1), 1)
+        harness.receive(harness.frame(type = FrameType.LOCATION, seq = 2, ttl = 1), 1)
+        harness.receive(harness.frame(type = FrameType.ACK, seq = 3, ttl = 1), 1)
+        harness.receive(harness.frame(type = FrameType.HELLO, seq = 4, ttl = 1), 1)
 
         assertEquals(
             listOf(FrameType.MSG, FrameType.LOCATION),
@@ -222,7 +240,7 @@ class RouterTest {
     fun nonDeliverableFrameIsStillForwardedWhenTtlAllows() {
         val harness = Harness(neighborIds = setOf(1, 2))
 
-        harness.router.onFrameReceived(
+        harness.receive(
             harness.frame(type = FrameType.HELLO, seq = 7, ttl = 2),
             fromNeighbor = 1,
         )
@@ -234,6 +252,73 @@ class RouterTest {
     }
 
     @Test
+    fun isolatedOriginatedFrameIsStoredForLater() {
+        val store = InMemoryPacketStore()
+        val harness = Harness(neighborIds = emptySet(), store = store)
+
+        val frame = harness.originate(FrameType.MSG, "later".toByteArray())
+
+        val stored = store.all.single()
+        assertEquals(frame.nodeId, stored.frame.nodeId)
+        assertEquals(frame.seq, stored.frame.seq)
+        assertEquals(frame.ttl, stored.frame.ttl)
+        assertTrue(stored.deliveredToNeighbors.isEmpty())
+    }
+
+    @Test
+    fun receivedFrameWithOnlyItsSenderAsNeighborIsStored() {
+        val store = InMemoryPacketStore()
+        val harness = Harness(neighborIds = setOf(1), store = store)
+
+        harness.receive(harness.frame(nodeId = 5, seq = 9, ttl = 5), fromNeighbor = 1)
+
+        val stored = store.all.single()
+        assertEquals(5, stored.frame.nodeId)
+        assertEquals(9, stored.frame.seq)
+        assertEquals(4, stored.frame.ttl)
+        // The sender already has the frame, so replay must skip it.
+        assertEquals(setOf(1), stored.deliveredToNeighbors)
+    }
+
+    @Test
+    fun failedSendIsStoredAndSuccessfulNeighborsAreMarkedDelivered() {
+        val store = InMemoryPacketStore()
+        val harness = Harness(
+            neighborIds = setOf(1, 2, 3),
+            store = store,
+            sendResult = { neighbor, _ -> neighbor != 3 },
+        )
+
+        harness.receive(harness.frame(nodeId = 5, seq = 11, ttl = 3), fromNeighbor = 1)
+
+        val stored = store.all.single()
+        assertEquals(2, stored.frame.ttl)
+        // Source 1 and successful neighbor 2 are done; 3 must be retried.
+        assertEquals(setOf(1, 2), stored.deliveredToNeighbors)
+    }
+
+    @Test
+    fun fullyForwardedFrameIsNotStored() {
+        val store = InMemoryPacketStore()
+        val harness = Harness(neighborIds = setOf(2, 3), store = store)
+
+        harness.receive(harness.frame(nodeId = 5, seq = 12, ttl = 4), fromNeighbor = 1)
+
+        assertTrue(store.all.isEmpty())
+    }
+
+    @Test
+    fun lastHopCopyIsNotStored() {
+        val store = InMemoryPacketStore()
+        val harness = Harness(neighborIds = setOf(1), store = store)
+
+        // Forwarded TTL becomes 1: nobody can forward it further.
+        harness.receive(harness.frame(nodeId = 5, seq = 13, ttl = 2), fromNeighbor = 1)
+
+        assertTrue(store.all.isEmpty())
+    }
+
+    @Test
     fun concurrentOriginateAssignsEveryFrameAUniqueSeq() {
         val threadCount = 8
         val framesPerThread = 1_000
@@ -241,7 +326,7 @@ class RouterTest {
             localNodeId = 99,
             dedup = DedupCache(),
             neighbors = { emptySet() },
-            send = { _, _ -> },
+            send = { _, _ -> true },
         )
         val frames = ConcurrentLinkedQueue<Frame>()
         val start = CountDownLatch(1)
@@ -254,7 +339,7 @@ class RouterTest {
                     // originate() calls against the sequence counter.
                     start.await()
                     repeat(framesPerThread) {
-                        frames.add(router.originate(FrameType.MSG, ByteArray(0)))
+                        frames.add(runBlocking { router.originate(FrameType.MSG, ByteArray(0)) })
                     }
                 }
             }
@@ -281,7 +366,7 @@ class RouterTest {
                 localNodeId = 0x10000,
                 dedup = dedup,
                 neighbors = { emptySet() },
-                send = { _, _ -> },
+                send = { _, _ -> true },
             )
         }
         assertThrows(IllegalArgumentException::class.java) {
@@ -289,7 +374,7 @@ class RouterTest {
                 localNodeId = 1,
                 dedup = dedup,
                 neighbors = { emptySet() },
-                send = { _, _ -> },
+                send = { _, _ -> true },
                 initialTtl = 0,
             )
         }

@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp)
     // NOTE: AGP 9 has built-in Kotlin support, so org.jetbrains.kotlin.android
     // must NOT be applied here.
 }
@@ -36,6 +37,7 @@ dependencies {
 
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
 
     // Used by the throwaway Wi-Fi Direct prototype (sockets, StateFlow).
     implementation(libs.kotlinx.coroutines.android)
