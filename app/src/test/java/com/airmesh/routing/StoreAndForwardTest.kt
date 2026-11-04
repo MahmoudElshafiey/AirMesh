@@ -241,6 +241,33 @@ class StoreAndForwardTest {
     }
 
     @Test
+    fun resavingFrameKeepsDeliveredNeighborsAndDoesNotResend() {
+        val harness = Harness()
+        val frame = harness.frame(seq = 21)
+        harness.save(frame)
+        harness.neighborAppeared(7)
+
+        assertEquals(1, harness.sent.size)
+        assertTrue(harness.isDelivered(frame.nodeId, frame.seq, neighborId = 7))
+
+        // Simulate a re-save after dedup-cache eviction with no delivery info;
+        // the existing row's progress must survive.
+        harness.save(frame, deliveredToNeighbors = emptySet())
+
+        assertEquals(setOf(7), harness.store.all.single().deliveredToNeighbors)
+        harness.neighborAppeared(7)
+
+        assertEquals(1, harness.sent.size)
+        assertTrue(harness.isDelivered(frame.nodeId, frame.seq, neighborId = 7))
+    }
+
+    @Test
+    fun defaultPolicyValuesAreTenMinutesAnd500() {
+        assertEquals(600_000L, StoreAndForward.DEFAULT_MAX_AGE_MS)
+        assertEquals(500, StoreAndForward.DEFAULT_MAX_STORE_SIZE)
+    }
+
+    @Test
     fun rejectsInvalidPolicyValues() {
         val store = InMemoryPacketStore()
         val send: suspend (Int, Frame) -> Boolean = { _, _ -> true }

@@ -9,12 +9,25 @@ import androidx.room.Query
 @Dao
 interface StoredPacketDao {
 
-    /** Inserts or replaces the packet with the same `(nodeId, seq)`. */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(packet: StoredPacket)
+    /**
+     * Inserts a new packet. A packet with the same `(nodeId, seq)` is ignored
+     * so an existing row keeps its primary key, insertion order, createdAt, and
+     * delivered-neighbor set.
+     *
+     * @return the new row id, or -1 when the unique index rejected the insert.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(packet: StoredPacket): Long
 
-    /** Non-expired packets, oldest first. */
-    @Query("SELECT * FROM stored_packets WHERE createdAt >= :notBefore ORDER BY createdAt ASC")
+    /** Replaces only the delivered set; identity, bytes and age are untouched. */
+    @Query("UPDATE stored_packets SET deliveredToNeighbors = :deliveredToNeighbors WHERE id = :id")
+    suspend fun updateDelivered(id: Long, deliveredToNeighbors: Set<String>)
+
+    /** Non-expired packets, oldest first; [id] breaks same-millisecond ties. */
+    @Query(
+        "SELECT * FROM stored_packets " +
+            "WHERE createdAt >= :notBefore ORDER BY createdAt ASC, id ASC",
+    )
     suspend fun recent(notBefore: Long): List<StoredPacket>
 
     @Query("SELECT * FROM stored_packets WHERE nodeId = :nodeId AND seq = :seq")
@@ -26,9 +39,10 @@ interface StoredPacketDao {
     @Query("SELECT COUNT(*) FROM stored_packets")
     suspend fun count(): Int
 
-    @Query("SELECT * FROM stored_packets ORDER BY createdAt ASC LIMIT :limit")
+    /** Oldest packets by time, then by insertion order for equal timestamps. */
+    @Query("SELECT * FROM stored_packets ORDER BY createdAt ASC, id ASC LIMIT :limit")
     suspend fun oldest(limit: Int): List<StoredPacket>
 
-    @Query("DELETE FROM stored_packets WHERE nodeId = :nodeId AND seq = :seq")
-    suspend fun delete(nodeId: Int, seq: Int)
+    @Query("DELETE FROM stored_packets WHERE id = :id")
+    suspend fun deleteById(id: Long)
 }

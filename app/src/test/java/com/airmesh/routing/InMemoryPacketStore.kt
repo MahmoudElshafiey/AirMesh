@@ -22,11 +22,22 @@ class InMemoryPacketStore : PacketStore {
         createdAt: Long,
     ) {
         synchronized(lock) {
-            packets[Key(frame.nodeId, frame.seq)] = StoredFrame(
-                frame = frame,
-                createdAt = createdAt,
-                deliveredToNeighbors = deliveredToNeighbors.toSet(),
-            )
+            val key = Key(frame.nodeId, frame.seq)
+            val existing = packets[key]
+            if (existing == null) {
+                packets[key] = StoredFrame(
+                    frame = frame,
+                    createdAt = createdAt,
+                    deliveredToNeighbors = deliveredToNeighbors.toSet(),
+                )
+            } else {
+                // Mirror RoomPacketStore: re-saving must not reset age/bytes or
+                // erase delivery progress; it only unions newly delivered ids.
+                val merged = existing.deliveredToNeighbors + deliveredToNeighbors
+                if (merged != existing.deliveredToNeighbors) {
+                    packets[key] = existing.copy(deliveredToNeighbors = merged)
+                }
+            }
         }
     }
 
