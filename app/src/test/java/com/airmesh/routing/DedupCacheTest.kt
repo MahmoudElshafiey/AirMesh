@@ -116,6 +116,20 @@ class DedupCacheTest {
     }
 
     @Test
+    fun duplicateCountTracksOnlyHits() {
+        val cache = DedupCache(capacity = 4)
+
+        assertFalse(cache.seen(nodeId = 1, seq = 1))
+        assertEquals(0L, cache.duplicateCount)
+
+        assertTrue(cache.seen(nodeId = 1, seq = 1))
+        assertEquals(1L, cache.duplicateCount)
+
+        assertFalse(cache.seen(nodeId = 1, seq = 2))
+        assertEquals(1L, cache.duplicateCount)
+    }
+
+    @Test
     fun capacityMustBePositive() {
         assertThrows(IllegalArgumentException::class.java) { DedupCache(capacity = 0) }
         assertThrows(IllegalArgumentException::class.java) { DedupCache(capacity = -1) }

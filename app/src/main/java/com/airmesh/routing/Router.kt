@@ -34,6 +34,8 @@ import com.airmesh.protocol.FrameType
  * @property initialTtl hop limit for newly originated frames.
  * @property packetStore optional store-and-forward queue. Without one, frames
  *   that cannot be forwarded are simply dropped, as before.
+ * @property clock current time in milliseconds, used for store timestamps.
+ *   Injectable so the deterministic simulator can supply virtual time.
  */
 class Router(
     private val localNodeId: Int,
@@ -43,6 +45,7 @@ class Router(
     private val deliver: (Frame) -> Unit = {},
     private val initialTtl: Int = DEFAULT_TTL,
     private val packetStore: PacketStore? = null,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
     companion object {
@@ -108,7 +111,7 @@ class Router(
         // A hop-1 copy cannot be forwarded by anyone, so it is not worth
         // storing. The source already has the frame and is marked delivered.
         if (forwarded.ttl > 1 && (targets.isEmpty() || failed)) {
-            packetStore?.save(forwarded, deliveredTo + fromNeighbor)
+            packetStore?.save(forwarded, deliveredTo + fromNeighbor, clock())
         }
     }
 
@@ -149,7 +152,7 @@ class Router(
         }
 
         if (frame.ttl > 1 && (targets.isEmpty() || failed)) {
-            packetStore?.save(frame, deliveredTo)
+            packetStore?.save(frame, deliveredTo, clock())
         }
         return frame
     }

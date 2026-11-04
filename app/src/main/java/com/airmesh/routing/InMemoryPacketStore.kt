@@ -3,7 +3,7 @@ package com.airmesh.routing
 import com.airmesh.protocol.Frame
 
 /**
- * Thread-safe in-memory [PacketStore] for JVM tests.
+ * Thread-safe in-memory [PacketStore] for JVM tests and the simulator.
  *
  * One lock guards the map. No callback or suspend function runs while the lock
  * is held, matching the production rule that store I/O must not happen under a

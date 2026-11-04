@@ -266,6 +266,23 @@ class RouterTest {
     }
 
     @Test
+    fun storeTimestampComesFromTheInjectedClock() = runBlocking {
+        val store = InMemoryPacketStore()
+        val router = Router(
+            localNodeId = 1,
+            dedup = DedupCache(),
+            neighbors = { emptySet() },
+            send = { _, _ -> true },
+            packetStore = store,
+            clock = { 12_345L },
+        )
+
+        router.originate(FrameType.MSG, "clock".toByteArray())
+
+        assertEquals(12_345L, store.all.single().createdAt)
+    }
+
+    @Test
     fun receivedFrameWithOnlyItsSenderAsNeighborIsStored() {
         val store = InMemoryPacketStore()
         val harness = Harness(neighborIds = setOf(1), store = store)

@@ -34,6 +34,10 @@ class DedupCache(private val capacity: Int = DEFAULT_CAPACITY) {
      */
     private data class Key(val nodeId: Int, val seq: Int)
 
+    /** Number of [seen] calls that found an already-known frame. Telemetry only. */
+    var duplicateCount: Long = 0L
+        private set
+
     // Insertion-order map. Every hit removes and re-inserts the key, which
     // moves it to the newest end; the eldest entry is the least recently used.
     private val entries = object : LinkedHashMap<Key, Boolean>(capacity, 0.75f, false) {
@@ -54,6 +58,7 @@ class DedupCache(private val capacity: Int = DEFAULT_CAPACITY) {
         val alreadySeen = entries.remove(key) != null
         // Insert (or re-insert) as the most recently used entry.
         entries[key] = true
+        if (alreadySeen) duplicateCount++
         return alreadySeen
     }
 }
