@@ -146,14 +146,22 @@ class SimNetwork(
     }
 
     /**
-     * Switches to radio-range mode and replaces any explicit links with links
-     * derived from the current positions.
+     * Enters radio-range mode. Explicit [connect] links and range-derived links
+     * are mutually exclusive, so this must be called before any explicit links
+     * are added. Links are derived from the current positions.
      */
     fun configureRadioRange(
         range: Double,
         loss: Double = 0.0,
         latencyMs: Long = 0,
     ) {
+        require(rangeConfig == null) {
+            "configureRadioRange() cannot be called after radio-range mode is enabled"
+        }
+        require(links.isEmpty()) {
+            "configureRadioRange() is only available before explicit links; " +
+                "explicit-link and radio-range modes are mutually exclusive"
+        }
         require(range > 0.0) { "range must be positive: $range" }
         require(loss in 0.0..1.0) { "loss must be in 0.0..1.0: $loss" }
         require(latencyMs >= 0) { "latencyMs must not be negative: $latencyMs" }
@@ -178,8 +186,8 @@ class SimNetwork(
      * Enables seeded random-waypoint mobility.
      *
      * [configureRadioRange] must be called first because movement changes the
-     * range-derived link set. The first movement step happens one [stepMs]
-     * after the current virtual time.
+     * range-derived link set. A speed of zero keeps every node stationary. The
+     * first movement step happens one [stepMs] after the current virtual time.
      */
     fun enableMobility(
         width: Double,
@@ -194,7 +202,7 @@ class SimNetwork(
         require(width > 0.0 && height > 0.0) {
             "mobility area must be positive: ${width}x$height"
         }
-        require(minSpeed > 0.0) { "minSpeed must be positive: $minSpeed" }
+        require(minSpeed >= 0.0) { "minSpeed must not be negative: $minSpeed" }
         require(maxSpeed >= minSpeed) {
             "maxSpeed must be at least minSpeed: min=$minSpeed, max=$maxSpeed"
         }
