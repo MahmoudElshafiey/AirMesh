@@ -106,6 +106,9 @@ class WifiDirectConnector(
     /** One-shot job that confirms a pending "group gone" episode after the grace period. */
     private var groupGoneJob: Job? = null
 
+    /** True until the first connection-info report after [start] has been handled. */
+    private var staleGroupCheckPending = false
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -173,6 +176,9 @@ class WifiDirectConnector(
                     "(must be ON for discovery on Android 12 and below)",
             )
         }
+        // The first connection-info report after start() may reveal a group that
+        // survived from an earlier session; onConnectionInfo removes it.
+        staleGroupCheckPending = true
         refreshConnectionInfo()
     }
 
@@ -190,6 +196,10 @@ class WifiDirectConnector(
             receiverRegistered = false
         }
 
+        // A group left behind by a stopped node blocks new formation with BUSY.
+        if (state.value.groupFormed) {
+            removeGroupForCleanup("node stopped")
+        }
         closeTransport("activity stopped")
     }
 
@@ -279,8 +289,8 @@ class WifiDirectConnector(
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
-        val manager = p2p ?: return log("disconnect impossible: Wi-Fi Direct unsupported")
-        val currentChannel = channel ?: return log("disconnect impossible: no channel")
+        if (p2p == null) return log("disconnect impossible: Wi-Fi Direct unsupported")
+        if (channel == null) return log("disconnect impossible: no channel")
         if (!hasP2pPermission()) {
             log("disconnect blocked: ${requiredPermission().substringAfterLast('.')} not granted")
             return
@@ -291,10 +301,27 @@ class WifiDirectConnector(
             it.copy(role = P2pRole.NONE, groupFormed = false, groupOwnerAddress = null)
         }
 
-        log("removeGroup() called")
+        removeGroupForCleanup("user pressed Disconnect")
+    }
+
+    /**
+     * Removes the current P2P group during cleanup (stale group at startup,
+     * node stop, user disconnect). Logs the outcome; safe to call when there is
+     * no manager/channel/permission.
+     */
+    @SuppressLint("MissingPermission")
+    private fun removeGroupForCleanup(reason: String) {
+        val manager = p2p ?: return log("removeGroup skipped ($reason): Wi-Fi Direct unsupported")
+        val currentChannel = channel ?: return log("removeGroup skipped ($reason): no channel")
+        if (!hasP2pPermission()) {
+            log("removeGroup skipped ($reason): permission not granted")
+            return
+        }
+
+        log("removeGroup() called: $reason")
         manager.removeGroup(currentChannel, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() = log("removeGroup: onSuccess")
-            override fun onFailure(reason: Int) = log("removeGroup: onFailure ${errorName(reason)}")
+            override fun onSuccess() = log("removeGroup: onSuccess ($reason)")
+            override fun onFailure(reason: Int) = log("removeGroup: onFailure ${errorName(reason)} ($reason)")
         })
     }
 
@@ -370,6 +397,18 @@ class WifiDirectConnector(
             "requestConnectionInfo: groupFormed=${info.groupFormed} " +
                 "isGroupOwner=${info.isGroupOwner} groupOwnerAddress=$ownerAddress",
         )
+
+        // First report after start(): a group that survived from an earlier
+        // session is stale — remove it before anything else, unless a live TCP
+        // link already uses it (possible when the activity restarts in place).
+        if (staleGroupCheckPending) {
+            staleGroupCheckPending = false
+            if (info.groupFormed && transport.neighbors.value.isEmpty()) {
+                log("group already formed at startup with no live link — removing the stale group")
+                removeGroupForCleanup("stale group at startup")
+                return
+            }
+        }
 
         val nowMs = System.currentTimeMillis()
 
