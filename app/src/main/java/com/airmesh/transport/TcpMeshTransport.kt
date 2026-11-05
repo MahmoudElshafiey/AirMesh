@@ -1,5 +1,6 @@
 package com.airmesh.transport
 
+import com.airmesh.node.EventLog
 import com.airmesh.protocol.Frame
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.FrameType
@@ -13,6 +14,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -34,9 +36,36 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+/** Which phase of a client connection attempt failed. */
+enum class ConnectPhase {
+    /** The TCP connect itself (three-way handshake) did not complete. */
+    CONNECT,
+
+    /** TCP connected, but the HELLO exchange did not finish in time. */
+    HANDSHAKE,
+}
+
+/** Outcome of one [TcpMeshTransport.connect] attempt. */
+sealed interface ConnectOutcome {
+    /** The HELLO exchange completed and the peer is now a live neighbor. */
+    data class Success(val remoteNodeId: Int) : ConnectOutcome
+
+    /**
+     * The attempt failed in [phase]. [exceptionClass] and [message] describe
+     * the underlying exception (or a short reason for non-exception failures);
+     * [elapsedMs] is how long the whole attempt took.
+     */
+    data class Failure(
+        val phase: ConnectPhase,
+        val exceptionClass: String,
+        val message: String?,
+        val elapsedMs: Long,
+    ) : ConnectOutcome
+}
 
 /**
- * Plain-TCP implementation of [Transport], usable on the JVM and on Android.
  *
  * A node joins links in two ways:
  * - [listen] makes it a hub: it accepts any number of clients.
@@ -68,6 +97,8 @@ import kotlinx.coroutines.sync.withLock
 class TcpMeshTransport(
     private val localNodeId: Int,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** Optional shared diagnostic log; when set, socket events are written here. */
+    private val eventLog: EventLog? = null,
 ) : Transport {
 
     private companion object {
@@ -80,8 +111,11 @@ class TcpMeshTransport(
          */
         const val MAX_FRAME_SIZE = FrameCodec.MIN_FRAME_SIZE + FrameCodec.MAX_PAYLOAD
 
-        const val CONNECT_TIMEOUT_MS = 5_000
-        const val HANDSHAKE_TIMEOUT_MS = 5_000
+        /** Default timeout for the TCP connect phase of [connect]. */
+        const val DEFAULT_CONNECT_TIMEOUT_MS = 5_000L
+
+        /** Default timeout for the HELLO handshake phase. */
+        const val DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000L
     }
 
     init {
@@ -193,25 +227,108 @@ class TcpMeshTransport(
 
         previous?.closeQuietly()
         owner.launch { acceptLoop(bound, owner) }
+        // API 37 stubs dropped InetSocketAddress.getHostAddress(); go via InetAddress.
+        val boundHost = (bound.localSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: "?"
+        log("accept loop started on $boundHost:$actualPort")
         return actualPort
     }
 
-    /** Opens one client connection to a hub and performs the HELLO exchange. */
-    fun connect(host: String, port: Int) {
+    /**
+     * Opens one client connection to a hub and performs the HELLO exchange.
+     *
+     * The attempt runs in two phases with separate, configurable timeouts so
+     * on-device logs can tell them apart:
+     * - [ConnectPhase.CONNECT]: the TCP three-way handshake, bounded by
+     *   [connectTimeoutMs]. A refused port surfaces as ConnectException here.
+     * - [ConnectPhase.HANDSHAKE]: sending our HELLO and waiting for the peer's,
+     *   bounded by [handshakeTimeoutMs]. A listener that accepts but never
+     *   answers surfaces as SocketTimeoutException here.
+     *
+     * On success the socket stays open: a reader coroutine keeps consuming
+     * frames until it closes. The returned [ConnectOutcome] reports which phase
+     * failed (exception class, message, elapsed ms) so callers can log an
+     * actionable line instead of guessing from silence.
+     */
+    suspend fun connect(
+        host: String,
+        port: Int,
+        connectTimeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS,
+        handshakeTimeoutMs: Long = DEFAULT_HANDSHAKE_TIMEOUT_MS,
+    ): ConnectOutcome {
         require(port in 0..0xFFFF) { "port must be in 0..65535: $port" }
         val owner = ensureStarted()
 
-        owner.launch {
+        val startedAtNanos = System.nanoTime()
+        return withContext(dispatcher) {
+            log("connecting to $host:$port (connect timeout ${connectTimeoutMs}ms)")
             val socket = Socket()
             try {
                 socket.tcpNoDelay = true
-                socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-                handleSocket(socket)
+                socket.connect(InetSocketAddress(host, port), connectTimeoutMs.toInt())
             } catch (error: CancellationException) {
                 socket.closeQuietly()
                 throw error
             } catch (error: IOException) {
                 socket.closeQuietly()
+                log("connect phase failed after ${elapsedMs(startedAtNanos)}ms: ${describe(error)}")
+                return@withContext ConnectOutcome.Failure(
+                    phase = ConnectPhase.CONNECT,
+                    exceptionClass = error.javaClass.simpleName,
+                    message = error.message,
+                    elapsedMs = elapsedMs(startedAtNanos),
+                )
+            }
+
+            log(
+                "connected: local=${socket.localAddress?.hostAddress}:${socket.localPort} " +
+                    "remote=${socket.remoteHost()}:$port",
+            )
+
+            val peer = try {
+                PeerConnection(socket)
+            } catch (error: IOException) {
+                socket.closeQuietly()
+                log("handshake phase failed after ${elapsedMs(startedAtNanos)}ms: ${describe(error)}")
+                return@withContext ConnectOutcome.Failure(
+                    phase = ConnectPhase.HANDSHAKE,
+                    exceptionClass = error.javaClass.simpleName,
+                    message = error.message,
+                    elapsedMs = elapsedMs(startedAtNanos),
+                )
+            }
+
+            var registeredId: Int? = null
+            try {
+                val remoteId = handshake(socket, peer, handshakeTimeoutMs)
+                if (!register(remoteId, peer)) {
+                    // stop() won the race: the socket is valid but no longer wanted.
+                    log("handshake complete with node $remoteId but transport stopped; closing")
+                    return@withContext ConnectOutcome.Failure(
+                        phase = ConnectPhase.HANDSHAKE,
+                        exceptionClass = "TransportStopped",
+                        message = null,
+                        elapsedMs = elapsedMs(startedAtNanos),
+                    )
+                }
+                registeredId = remoteId
+                startReader(owner, remoteId, peer)
+                log(
+                    "handshake complete: neighbor $remoteId is live " +
+                        "(attempt took ${elapsedMs(startedAtNanos)}ms)",
+                )
+                ConnectOutcome.Success(remoteId)
+            } catch (error: CancellationException) {
+                socket.closeQuietly()
+                registeredId?.let { removePeer(it, peer) }
+                throw error
+            } catch (error: IOException) {
+                log("handshake phase failed after ${elapsedMs(startedAtNanos)}ms: ${describe(error)}")
+                ConnectOutcome.Failure(
+                    phase = ConnectPhase.HANDSHAKE,
+                    exceptionClass = error.javaClass.simpleName,
+                    message = error.message,
+                    elapsedMs = elapsedMs(startedAtNanos),
+                )
             }
         }
     }
@@ -254,6 +371,7 @@ class TcpMeshTransport(
             } catch (error: IOException) {
                 // Closing the listener during stop() also lands here.
                 if (!currentCoroutineContext().isActive || server.isClosed) return
+                log("accept loop error (continuing): ${describe(error)}")
                 continue
             }
 
@@ -266,9 +384,11 @@ class TcpMeshTransport(
     }
 
     private suspend fun handleSocket(socket: Socket) {
+        log("accepted connection from ${socket.remoteHost()}:${socket.port}")
         val peer = try {
             PeerConnection(socket)
         } catch (error: IOException) {
+            log("reader setup failed for ${socket.remoteHost()}:${socket.port} — ${describe(error)}")
             socket.closeQuietly()
             return
         }
@@ -276,32 +396,95 @@ class TcpMeshTransport(
         var remoteId: Int? = null
         try {
             socket.tcpNoDelay = true
-            // A peer that never sends HELLO must not pin a coroutine forever.
-            socket.soTimeout = HANDSHAKE_TIMEOUT_MS
-
-            peer.write(helloBytes)
-            val helloResult = peer.readFrame() ?: return
-            val hello = FrameCodec.decode(helloResult).getOrNull()
-            if (hello == null) {
-                corruptFrames.incrementAndGet()
-                return
-            }
-            if (hello.type != FrameType.HELLO) return
-            if (hello.nodeId == localNodeId) return
-
-            socket.soTimeout = 0
-            remoteId = hello.nodeId
-            if (!register(hello.nodeId, peer)) return
-            readFrames(hello.nodeId, peer)
+            remoteId = handshake(socket, peer, DEFAULT_HANDSHAKE_TIMEOUT_MS)
+            if (!register(remoteId, peer)) return
+            readFrames(remoteId, peer)
         } catch (error: CancellationException) {
             throw error
         } catch (error: IOException) {
-            // Peer closed, timed out, or sent a malformed stream.
+            // Peer closed, timed out, or sent a malformed stream. A raw probe
+            // connection that closes before answering HELLO lands here too.
+            val where = remoteId?.let { "reader for node $it" }
+                ?: "handshake with ${socket.remoteHost()}:${socket.port}"
+            log("$where ended: ${describe(error)}")
         } finally {
             remoteId?.let { removePeer(it, peer) }
             peer.close()
         }
     }
+
+    /**
+     * Performs the HELLO exchange on an already-connected [socket].
+     *
+     * Both sides send their HELLO immediately and wait for the peer's; a peer
+     * that never answers must not pin a coroutine forever, so reads are bounded
+     * by [timeoutMs]. Returns the peer's node id. Throws IOException when the
+     * peer times out, resets, or sends a malformed or invalid HELLO — the
+     * message says which case happened.
+     */
+    private suspend fun handshake(socket: Socket, peer: PeerConnection, timeoutMs: Long): Int {
+        socket.soTimeout = timeoutMs.toInt()
+
+        log("HELLO sent")
+        peer.write(helloBytes)
+
+        val helloResult = peer.readFrame() ?: throw EOFException("peer closed before sending HELLO")
+        val hello = FrameCodec.decode(helloResult).getOrNull()
+            ?: run {
+                corruptFrames.incrementAndGet()
+                throw IOException("HELLO frame failed CRC or decoding")
+            }
+        if (hello.type != FrameType.HELLO) {
+            throw IOException("expected a HELLO frame, got ${hello.type}")
+        }
+        if (hello.nodeId == localNodeId) {
+            throw IOException("peer announced our own node id $localNodeId")
+        }
+
+        log("HELLO received (node id ${hello.nodeId})")
+        socket.soTimeout = 0
+        return hello.nodeId
+    }
+
+    /**
+     * Keeps consuming frames from [peer] until the socket ends, then removes
+     * the neighbor and closes the connection. Runs in its own coroutine so a
+     * finished [connect] does not pin the caller for the link's lifetime.
+     */
+    private fun startReader(owner: CoroutineScope, remoteId: Int, peer: PeerConnection) {
+        owner.launch {
+            try {
+                readFrames(remoteId, peer)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: IOException) {
+                log("reader for node $remoteId ended: ${describe(error)}")
+            } finally {
+                removePeer(remoteId, peer)
+                peer.close()
+            }
+        }
+    }
+
+    /** Writes one line to the shared diagnostic log, if one was provided. */
+    private fun log(message: String) {
+        eventLog?.log("TCP: $message")
+    }
+
+    /** Milliseconds elapsed since a [System.nanoTime] stamp. */
+    private fun elapsedMs(startedAtNanos: Long): Long =
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
+
+    /** "ClassName: message" for log lines and failure reports. */
+    private fun describe(error: Throwable): String = "${error.javaClass.simpleName}: ${error.message}"
+
+    /**
+     * Host part of this socket's remote address, or "?" when not connected yet.
+     * The API 37 platform stubs dropped [InetSocketAddress.getHostAddress], so
+     * the IP string comes from the wrapped InetAddress instead.
+     */
+    private fun Socket.remoteHost(): String =
+        (remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: "?"
 
     private suspend fun readFrames(remoteId: Int, peer: PeerConnection) {
         while (true) {

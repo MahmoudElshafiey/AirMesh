@@ -20,7 +20,13 @@ fun createAirMeshNode(
     eventLog: EventLog,
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ): AirMeshNode {
-    val transport = TcpMeshTransport(localNodeId = nodeId, dispatcher = dispatcher)
+    // Share the node's event log with the transport so socket events (connect
+    // phases, HELLO exchange, accept loop) show up in the on-device log.
+    val transport = TcpMeshTransport(
+        localNodeId = nodeId,
+        dispatcher = dispatcher,
+        eventLog = eventLog,
+    )
     return AirMeshNode(
         localNodeId = nodeId,
         transport = transport,

@@ -16,6 +16,8 @@ import android.os.Build
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.airmesh.node.EventLog
+import java.net.InetSocketAddress
+import java.net.Socket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,11 +26,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 /** Role this device currently has in the Wi-Fi Direct group. */
 enum class P2pRole {
@@ -73,7 +73,9 @@ class WifiDirectConnector(
         const val PORT = 8988
 
         private const val CONNECT_ATTEMPTS = 5
-        private const val CONNECT_RETRY_DELAY_MS = 1_000L
+
+        /** Timeout for the raw reachability probe before HELLO attempts start. */
+        private const val PROBE_TIMEOUT_MS = 5_000L
     }
 
     private val appContext = context.applicationContext
@@ -364,6 +366,10 @@ class WifiDirectConnector(
             return
         }
 
+        logNetworkInterfaces(
+            "group formed (role=${if (info.isGroupOwner) "owner" else "client"})",
+        )
+
         if (info.isGroupOwner) {
             _state.update {
                 it.copy(
@@ -425,6 +431,10 @@ class WifiDirectConnector(
         }
 
         connectJob = scope.launch {
+            // Raw reachability probe first: a plain TCP connect with no HELLO,
+            // so "no route / port closed" is separable from protocol problems.
+            runReachabilityProbe(groupOwnerAddress)
+
             for (attempt in 1..CONNECT_ATTEMPTS) {
                 if (!isActive) return@launch
                 if (transport.neighbors.value.isNotEmpty()) {
@@ -432,26 +442,28 @@ class WifiDirectConnector(
                     return@launch
                 }
 
+                logNetworkInterfaces("before connect attempt $attempt")
                 log("TCP connect attempt $attempt/$CONNECT_ATTEMPTS to $groupOwnerAddress:$PORT")
-                try {
+                val outcome = try {
                     transport.connect(groupOwnerAddress, PORT)
                 } catch (error: Exception) {
                     log(
                         "TCP connect attempt $attempt failed to start: " +
                             "${error.javaClass.simpleName}: ${error.message}",
                     )
+                    continue
                 }
+                when (outcome) {
+                    is ConnectOutcome.Success -> {
+                        log("TCP connected to $groupOwnerAddress:$PORT neighbor=${outcome.remoteNodeId}")
+                        return@launch
+                    }
 
-                // TcpMeshTransport.connect() is asynchronous, so wait for the
-                // HELLO handshake to register a neighbor before retrying.
-                val connected = withTimeoutOrNull(CONNECT_RETRY_DELAY_MS) {
-                    transport.neighbors.first { it.isNotEmpty() }
+                    is ConnectOutcome.Failure -> log(
+                        "TCP connect attempt $attempt failed in ${outcome.phase} phase after " +
+                            "${outcome.elapsedMs}ms: ${outcome.exceptionClass}: ${outcome.message}",
+                    )
                 }
-                if (connected != null) {
-                    log("TCP connected to $groupOwnerAddress:$PORT neighbors=$connected")
-                    return@launch
-                }
-                log("TCP connect attempt $attempt failed: no handshake within ${CONNECT_RETRY_DELAY_MS}ms")
             }
             log("TCP connect gave up after $CONNECT_ATTEMPTS attempts")
         }
@@ -463,6 +475,43 @@ class WifiDirectConnector(
         listening = false
         transport.stop()
         log("transport closed: $reason")
+    }
+
+    /**
+     * Plain TCP connect to the owner port with no HELLO exchange. If this fails
+     * while a later real attempt succeeds, the problem was timing; if both fail,
+     * the socket path itself (route/interface) is suspect. The server treats it
+     * as an ordinary connection that closes before any frame arrives.
+     */
+    private fun runReachabilityProbe(host: String) {
+        val startedAt = System.currentTimeMillis()
+        try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, PORT), PROBE_TIMEOUT_MS.toInt())
+            }
+            log(
+                "reachability probe to $host:$PORT succeeded in " +
+                    "${System.currentTimeMillis() - startedAt}ms",
+            )
+        } catch (error: Exception) {
+            log(
+                "reachability probe to $host:$PORT failed after " +
+                    "${System.currentTimeMillis() - startedAt}ms: " +
+                    "${error.javaClass.simpleName}: ${error.message}",
+            )
+        }
+    }
+
+    /** Dumps every network interface (flagging p2p / 192.168.49.x) into the event log. */
+    private fun logNetworkInterfaces(context: String) {
+        runCatching { NetworkDiagnostics.enumerate() }
+            .onSuccess { interfaces ->
+                log("interfaces ($context):")
+                NetworkDiagnostics.describe(interfaces).forEach { line -> log("  $line") }
+            }
+            .onFailure { error ->
+                log("interface dump failed: ${error.javaClass.simpleName}: ${error.message}")
+            }
     }
 
     // --- Helpers ----------------------------------------------------------
