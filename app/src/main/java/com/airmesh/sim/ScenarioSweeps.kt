@@ -6,10 +6,11 @@ import kotlin.math.sqrt
 /**
  * Scenario sweeps for the simulator experiments.
  *
- * Every sweep varies exactly one parameter and copies everything else from
- * [baseScenario]. The base matches the existing six-node mobility scenario:
- * 80x80 area, radio range 22, 20% loss, 5 ms latency, speed 2..5, 12 messages
- * over 60 s, TTL 8, and CSMA/CA off.
+ * Every sweep varies exactly one parameter. Scenarios are copied from
+ * [baseScenario] except where a sweep documents a different starting topology
+ * (currently only the speed sweep). The base matches the existing six-node
+ * mobility scenario: 80x80 area, radio range 22, 20% loss, 5 ms latency,
+ * speed 2..5, 12 messages over 60 s, TTL 8, and CSMA/CA off.
  */
 object ScenarioSweeps {
 
@@ -17,6 +18,11 @@ object ScenarioSweeps {
     private const val DENSE_NODE_COUNT = 15
     private const val DENSE_AREA_SIZE = 40.0
     private const val DENSE_MESSAGE_COUNT = 60
+
+    /**
+     * Area side used by the speed sweep so the six-node grid starts connected.
+     */
+    private const val SPEED_AREA_SIZE = 40.0
 
     fun baseScenario(): Scenario = Scenario(
         name = "base",
@@ -72,10 +78,23 @@ object ScenarioSweeps {
             )
         }
 
-    /** Speed 0, 2, 5, 10 units/s; min and max are equal for a fixed speed. */
-    fun speedSweep(base: Scenario = baseScenario()): List<Scenario> =
-        listOf(0.0, 2.0, 5.0, 10.0).map { speed ->
-            base.copy(
+    /**
+     * Speed 0, 2, 5, 10 units/s; min and max are equal for a fixed speed.
+     *
+     * This sweep uses a 40x40 area instead of the base 80x80 area. At 80x80
+     * the six-node 3x2 grid places neighbors 26.67 units apart horizontally
+     * and 40 vertically, beyond the 22-unit radio range, so the run starts
+     * with no links and depends entirely on mobility to connect. A speed of
+     * zero would then never transmit and would report all-zero metrics. At
+     * 40x40 the spacing is 13.33 and 20, inside the radio range, so the
+     * network is connected at t=0 and the stationary case is a meaningful
+     * baseline. Only the area differs from [base]; all other settings are
+     * inherited.
+     */
+    fun speedSweep(base: Scenario = baseScenario()): List<Scenario> {
+        val connectedBase = base.copy(areaSize = SPEED_AREA_SIZE)
+        return listOf(0.0, 2.0, 5.0, 10.0).map { speed ->
+            connectedBase.copy(
                 name = "speed",
                 parameterName = "speed",
                 parameterValue = decimal(speed),
@@ -83,6 +102,7 @@ object ScenarioSweeps {
                 maxSpeed = speed,
             )
         }
+    }
 
     /** CSMA/CA off vs on for a dense 15-node, small-area, 60-message run. */
     fun csmaSweep(base: Scenario = baseScenario()): List<Scenario> {
