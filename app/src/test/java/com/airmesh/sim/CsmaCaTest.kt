@@ -87,6 +87,33 @@ class CsmaCaTest {
     }
 
     /**
+     * Same hidden-terminal topology with the default contention window. Backoff
+     * is now the only thing separating the two senders, so whether their frames
+     * overlap at B depends on the seed: some runs draw the same slot and collide,
+     * others spread out and deliver.
+     */
+    @Test
+    fun defaultContentionWindowCollisionsVaryAcrossSeeds() {
+        val collisionsPerSeed = (0L until 50L).map { seed ->
+            val net = hiddenTerminalNetwork(seed = seed, config = CsmaCaConfig())
+            net.originate(from = 1, payload = ByteArray(64), at = 0)
+            net.originate(from = 3, payload = ByteArray(64), at = 0)
+            net.runUntil(20_000)
+            net.metrics().collisions
+        }
+
+        val total = collisionsPerSeed.sum()
+        assertTrue(
+            "expected at least one collision across seeds 0..49, got $total",
+            total > 0,
+        )
+        assertTrue(
+            "expected the collision count to differ between seeds, got $collisionsPerSeed",
+            collisionsPerSeed.distinct().size > 1,
+        )
+    }
+
+    /**
      * Hidden terminals with the default contention window: backoff must not
      * eliminate collisions in every run, and the seeded randomness must make
      * the per-seed collision count vary instead of being constant.
