@@ -30,11 +30,10 @@
             android:name=".MainActivity"
             android:exported="true" />
 
-        <!-- THROWAWAY PROTOTYPE: temporarily the launcher so it is easy to
-             open on two phones. Restore this intent-filter to MainActivity
-             when the prototype is removed. -->
+        <!-- Real mesh UI: launcher. The throwaway Wi-Fi Direct prototype stays
+             reachable from a button inside MeshActivity. -->
         <activity
-            android:name=".transport.PrototypeActivity"
+            android:name=".ui.MeshActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true">
             <intent-filter>
@@ -42,6 +41,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- THROWAWAY PROTOTYPE: fallback, opened explicitly from MeshActivity. -->
+        <activity
+            android:name=".transport.PrototypeActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true" />
     </application>
 
 </manifest>
