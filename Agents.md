@@ -27,6 +27,7 @@ Do NOT use Nearby Connections, Bridgefy, or any ready-made mesh SDK.
 - If a build or runtime error occurs, read the actual error message and the relevant file. Do not guess.
 - Keep code simple and readable; add short comments explaining protocol decisions (this will be presented in a course).
 - Make small commits with clear messages after each passing task.
+- Never add "Generated with" or "Co-Authored-By" trailers to commit messages; use the repository's configured git identity.
 - Android limitation: a device cannot be in two Wi-Fi Direct groups at once. Multi-hop is achieved by
   connecting to groups in turns + store-and-forward. Real multi-hop is only tested with 2-3 phones;
   large multi-hop tests run in the FakeTransport simulator.
