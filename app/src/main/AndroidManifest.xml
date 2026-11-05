@@ -17,10 +17,11 @@
         android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />
 
-    <!-- Android 14+: Local Network Protection drops LAN TCP (both directions)
-         for apps targeting SDK 37 without this runtime permission. Without it
-         a client's connect to the group owner times out instead of being
-         refused, and the owner never sees an accepted connection. -->
+    <!-- Android 17+: Local Network Protection requires this runtime permission
+         for apps targeting SDK 37; without it a client's connect to the group
+         owner times out instead of being refused. On Android 14-16 protection
+         is opt-in and covered by NEARBY_WIFI_DEVICES, which we also request —
+         declaring it there is harmless (unknown permissions are ignored). -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <uses-feature

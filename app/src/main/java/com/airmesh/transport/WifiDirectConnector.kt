@@ -49,7 +49,7 @@ data class ConnectorState(
     val groupOwnerAddress: String? = null,
     /** True while a manager.connect() request is in flight. */
     val connecting: Boolean = false,
-    /** True on devices where Local Network Protection applies (SDK >= 34). */
+    /** True on devices where ACCESS_LOCAL_NETWORK is required (SDK >= 37). */
     val localNetworkRequired: Boolean = false,
     val localNetworkGranted: Boolean = false,
 )

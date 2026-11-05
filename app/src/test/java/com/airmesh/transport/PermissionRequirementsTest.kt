@@ -36,20 +36,18 @@ class PermissionRequirementsTest {
     }
 
     @Test
-    fun sdk36AddsLocalNetworkPermission() {
-        // Android 16: Local Network Protection applies to our targetSdk-37 app.
+    fun sdk36DoesNotRequireLocalNetworkPermission() {
+        // Android 16: local network protection is opt-in and covered by
+        // NEARBY_WIFI_DEVICES, so ACCESS_LOCAL_NETWORK must not be requested.
         assertEquals(
-            listOf(
-                PermissionRequirements.NEARBY_WIFI_DEVICES,
-                PermissionRequirements.ACCESS_LOCAL_NETWORK,
-            ),
+            listOf(PermissionRequirements.NEARBY_WIFI_DEVICES),
             PermissionRequirements.required(36),
         )
     }
 
     @Test
     fun sdk37AddsLocalNetworkPermission() {
-        // Android 17: same requirement as SDK 36.
+        // Android 17: ACCESS_LOCAL_NETWORK becomes required for our app.
         assertEquals(
             listOf(
                 PermissionRequirements.NEARBY_WIFI_DEVICES,
@@ -60,18 +58,19 @@ class PermissionRequirementsTest {
     }
 
     @Test
-    fun localNetworkPermissionAppearsExactlyAtSdk34() {
-        // Boundary: the permission exists from Android 14 (SDK 34) onward.
+    fun localNetworkPermissionAppearsExactlyAtSdk37() {
+        // Boundary: Android 14-16 do not require ACCESS_LOCAL_NETWORK; it is
+        // required from Android 17 (SDK 37) onward.
         assertEquals(
             listOf(PermissionRequirements.NEARBY_WIFI_DEVICES),
-            PermissionRequirements.required(33),
+            PermissionRequirements.required(34),
         )
         assertEquals(
             listOf(
                 PermissionRequirements.NEARBY_WIFI_DEVICES,
                 PermissionRequirements.ACCESS_LOCAL_NETWORK,
             ),
-            PermissionRequirements.required(34),
+            PermissionRequirements.required(37),
         )
     }
 
