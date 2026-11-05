@@ -47,6 +47,8 @@ data class ConnectorState(
     val role: P2pRole = P2pRole.NONE,
     val groupFormed: Boolean = false,
     val groupOwnerAddress: String? = null,
+    /** True while a manager.connect() request is in flight. */
+    val connecting: Boolean = false,
 )
 
 /**
@@ -261,9 +263,14 @@ class WifiDirectConnector(
 
         val config = WifiP2pConfig().apply { deviceAddress = device.deviceAddress }
         log("connect() requested to ${device.deviceName} (${device.deviceAddress})")
+        _state.update { it.copy(connecting = true) }
         manager.connect(currentChannel, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() = log("connect: onSuccess (waiting for group formation)")
-            override fun onFailure(reason: Int) = log("connect: onFailure ${errorName(reason)}")
+
+            override fun onFailure(reason: Int) {
+                _state.update { it.copy(connecting = false) }
+                log("connect: onFailure ${errorName(reason)}")
+            }
         })
     }
 
@@ -322,7 +329,12 @@ class WifiDirectConnector(
 
         closeTransport("user pressed Disconnect")
         _state.update {
-            it.copy(role = P2pRole.NONE, groupFormed = false, groupOwnerAddress = null)
+            it.copy(
+                role = P2pRole.NONE,
+                groupFormed = false,
+                groupOwnerAddress = null,
+                connecting = false,
+            )
         }
 
         removeGroupForCleanup("user pressed Disconnect")
@@ -454,10 +466,12 @@ class WifiDirectConnector(
             return
         }
 
-        // A formed-group report cancels any pending "gone" episode.
+        // A formed-group report cancels any pending "gone" episode and ends a
+        // connect request that is still in flight.
         presenceTracker.onReport(true, nowMs)
         groupGoneJob?.cancel()
         groupGoneJob = null
+        _state.update { it.copy(connecting = false) }
 
         logNetworkInterfaces(
             "group formed (role=${if (info.isGroupOwner) "owner" else "client"})",

@@ -154,7 +154,14 @@ fun MeshScreen(
                                 fontFamily = FontFamily.Monospace,
                             )
                         }
-                        Button(onClick = { onConnectPeer(device) }) { Text("Connect") }
+                        // A device can only join one group at a time, so block new
+                        // connect requests while a group is formed or forming.
+                        Button(
+                            onClick = { onConnectPeer(device) },
+                            enabled = !connectorState.groupFormed && !connectorState.connecting,
+                        ) {
+                            Text("Connect")
+                        }
                     }
                 }
             }
