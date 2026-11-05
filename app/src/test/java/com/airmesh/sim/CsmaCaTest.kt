@@ -142,6 +142,48 @@ class CsmaCaTest {
         assertTrue("no frame may be delivered", metrics.deliveredCopies == 0)
     }
 
+    /**
+     * maxRetries is the number of retries *after* the first attempt, so a frame
+     * is put on air at most maxRetries + 1 times and is then dropped once.
+     *
+     * A short frame from C collides with the long frame from A for as long as A
+     * stays on air: with cwMin = cwMax = 1 the backoff is always zero, so every
+     * retry starts in the next slot and overlaps A again. C therefore uses all
+     * of its attempts and is dropped exactly once, while A only collides during
+     * its one long attempt.
+     */
+    @Test
+    fun frameIsRetriedExactlyMaxRetriesTimesBeforeBeingDropped() {
+        val maxRetries = 3
+        val net = hiddenTerminalNetwork(
+            seed = 3,
+            config = CsmaCaConfig(
+                cwMin = 1,
+                cwMax = 1,
+                slotTimeMs = 1,
+                bitrate = 1_000_000,
+                maxRetries = maxRetries,
+            ),
+        )
+
+        // 1000 bytes = 8 slots at 1 Mbit/s with 1 ms slots, so node 1 is on air
+        // for slots 1..9 and overlaps the whole retry sequence of node 3's
+        // one-slot frame. The run stops at 8, when node 3 gives up: node 1 is
+        // still transmitting, so no further attempt is counted.
+        net.originate(from = 1, payload = ByteArray(1_000), at = 0)
+        net.originate(from = 3, payload = "c".toByteArray(), at = 0)
+        net.runUntil(8)
+
+        val metrics = net.metrics()
+        assertEquals(
+            "dropped frame is put on air 1 + maxRetries times, plus node 1's still " +
+                "running attempt",
+            (1 + maxRetries) + 1,
+            metrics.totalFramesOnAir,
+        )
+        assertEquals("the exhausted frame is counted exactly once", 1, metrics.framesDroppedAfterMaxRetries)
+    }
+
     @Test
     fun sameSeedProducesIdenticalCsmaMetrics() {
         val first = cliqueMetrics(seed = 42, config = CsmaCaConfig(cwMin = 16, cwMax = 64))
