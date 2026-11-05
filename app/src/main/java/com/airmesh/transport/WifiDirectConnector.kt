@@ -269,6 +269,16 @@ class WifiDirectConnector(
 
     @SuppressLint("MissingPermission")
     fun createGroup() {
+        doCreateGroup(allowBusyRetry = true)
+    }
+
+    /**
+     * Calls manager.createGroup. When the system reports BUSY (a group from an
+     * earlier session is still lingering), removes that group and retries once;
+     * a second failure gives up.
+     */
+    @SuppressLint("MissingPermission")
+    private fun doCreateGroup(allowBusyRetry: Boolean) {
         val manager = p2p ?: return log("createGroup impossible: Wi-Fi Direct unsupported")
         val currentChannel = channel ?: return log("createGroup impossible: no channel")
         if (!hasP2pPermission()) {
@@ -276,14 +286,28 @@ class WifiDirectConnector(
             return
         }
 
-        log("createGroup() called")
+        log(if (allowBusyRetry) "createGroup() called" else "createGroup() retry after BUSY")
         manager.createGroup(currentChannel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 log("createGroup: onSuccess")
                 refreshConnectionInfo()
             }
 
-            override fun onFailure(reason: Int) = log("createGroup: onFailure ${errorName(reason)}")
+            override fun onFailure(reason: Int) {
+                if (reason == WifiP2pManager.BUSY && allowBusyRetry) {
+                    // A stale group blocks new formation; remove it, wait for the
+                    // removal to finish, then try once more.
+                    log("createGroup failed with BUSY — removing the stale group, then retrying once")
+                    manager.removeGroup(currentChannel, object : WifiP2pManager.ActionListener {
+                        override fun onSuccess() = doCreateGroup(allowBusyRetry = false)
+
+                        override fun onFailure(r: Int) =
+                            log("removeGroup after BUSY failed ${errorName(r)} — giving up on createGroup")
+                    })
+                } else {
+                    log("createGroup: onFailure ${errorName(reason)}")
+                }
+            }
         })
     }
 
