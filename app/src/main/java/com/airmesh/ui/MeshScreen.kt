@@ -65,6 +65,7 @@ fun MeshScreen(
     onRequestPermissions: () -> Unit,
     onDiscover: () -> Unit,
     onCreateGroup: () -> Unit,
+    onRetryTcp: () -> Unit,
     onDisconnect: () -> Unit,
     onConnectPeer: (WifiP2pDevice) -> Unit,
     onSendText: (String) -> Unit,
@@ -109,6 +110,13 @@ fun MeshScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onCreateGroup) { Text("Create group") }
             OutlinedButton(onClick = onDisconnect) { Text("Disconnect") }
+            // Only meaningful for a client waiting on the owner's TCP port.
+            OutlinedButton(
+                onClick = onRetryTcp,
+                enabled = connectorState.role == P2pRole.CLIENT && connectorState.groupFormed,
+            ) {
+                Text("Retry TCP")
+            }
             TextButton(onClick = onOpenPrototype) { Text("Prototype") }
         }
 

@@ -70,6 +70,7 @@ class MeshActivity : ComponentActivity() {
                     onRequestPermissions = ::requestP2pPermission,
                     onDiscover = connector::discover,
                     onCreateGroup = connector::createGroup,
+                    onRetryTcp = connector::retryConnect,
                     onDisconnect = connector::disconnect,
                     onConnectPeer = connector::connect,
                     onSendText = { text ->

@@ -23,9 +23,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -55,8 +57,9 @@ data class ConnectorState(
  * layer to [TcpMeshTransport]:
  *
  * - group owner: `transport.listen(PORT)`
- * - client: `transport.connect(groupOwnerAddress, PORT)` with a few retries,
- *   because the owner may not have bound the port yet.
+ * - client: a retry loop around `transport.connect(groupOwnerAddress, PORT)`
+ *   with growing backoff (1 s, 2 s, 3 s, then every 5 s), because the owner
+ *   may not have bound the port yet and the link can drop later.
  *
  * A removed group calls `transport.stop()` (closing all sockets) so the next
  * group formation starts from a clean transport and can reconnect without
@@ -71,8 +74,6 @@ class WifiDirectConnector(
     companion object {
         /** Single TCP port used by the group owner. */
         const val PORT = 8988
-
-        private const val CONNECT_ATTEMPTS = 5
 
         /** Timeout for the raw reachability probe before HELLO attempts start. */
         private const val PROBE_TIMEOUT_MS = 5_000L
@@ -92,6 +93,12 @@ class WifiDirectConnector(
     private var started = false
     private var listening = false
     private var connectJob: Job? = null
+
+    /** Owner address the current [connectJob] targets, if any. */
+    private var connectTarget: String? = null
+
+    /** Backoff schedule for the client's TCP retry loop. */
+    private val reconnectPolicy = ReconnectPolicy()
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -424,26 +431,40 @@ class WifiDirectConnector(
         }
     }
 
+    /**
+     * Starts (or restarts) the client's TCP retry loop for [groupOwnerAddress].
+     *
+     * The loop keeps trying with growing backoff while the group exists and no
+     * live link to the owner is registered, so a slow or late-binding owner
+     * port does not cost us the connection. It also resumes automatically if an
+     * established link drops later. A call for a different address restarts the
+     * loop; a duplicate call for the same address is ignored.
+     */
     private fun startClient(groupOwnerAddress: String) {
-        if (connectJob?.isActive == true) {
+        val currentJob = connectJob
+        if (currentJob?.isActive == true && connectTarget == groupOwnerAddress) {
             log("client: connect already in progress to $groupOwnerAddress")
             return
         }
+        currentJob?.cancel()
 
+        connectTarget = groupOwnerAddress
+        reconnectPolicy.reset()
         connectJob = scope.launch {
             // Raw reachability probe first: a plain TCP connect with no HELLO,
             // so "no route / port closed" is separable from protocol problems.
             runReachabilityProbe(groupOwnerAddress)
 
-            for (attempt in 1..CONNECT_ATTEMPTS) {
-                if (!isActive) return@launch
-                if (transport.neighbors.value.isNotEmpty()) {
-                    log("TCP already connected (neighbors=${transport.neighbors.value})")
-                    return@launch
-                }
+            var attempt = 0
+            while (isActive && state.value.groupFormed) {
+                // Wait out any live link: skips work while connected and makes
+                // the loop resume automatically if the link drops later.
+                transport.neighbors.first { it.isEmpty() }
+                if (!state.value.groupFormed) return@launch
 
+                attempt += 1
                 logNetworkInterfaces("before connect attempt $attempt")
-                log("TCP connect attempt $attempt/$CONNECT_ATTEMPTS to $groupOwnerAddress:$PORT")
+                log("TCP connect attempt $attempt to $groupOwnerAddress:$PORT")
                 val outcome = try {
                     transport.connect(groupOwnerAddress, PORT)
                 } catch (error: Exception) {
@@ -451,22 +472,51 @@ class WifiDirectConnector(
                         "TCP connect attempt $attempt failed to start: " +
                             "${error.javaClass.simpleName}: ${error.message}",
                     )
-                    continue
-                }
-                when (outcome) {
-                    is ConnectOutcome.Success -> {
-                        log("TCP connected to $groupOwnerAddress:$PORT neighbor=${outcome.remoteNodeId}")
-                        return@launch
-                    }
-
-                    is ConnectOutcome.Failure -> log(
-                        "TCP connect attempt $attempt failed in ${outcome.phase} phase after " +
-                            "${outcome.elapsedMs}ms: ${outcome.exceptionClass}: ${outcome.message}",
+                    ConnectOutcome.Failure(
+                        phase = ConnectPhase.CONNECT,
+                        exceptionClass = error.javaClass.simpleName,
+                        message = error.message,
+                        elapsedMs = 0L,
                     )
                 }
+
+                when (outcome) {
+                    is ConnectOutcome.Success -> {
+                        reconnectPolicy.reset()
+                        log("TCP connected to $groupOwnerAddress:$PORT neighbor=${outcome.remoteNodeId}")
+                    }
+
+                    is ConnectOutcome.Failure -> {
+                        val delayMs = reconnectPolicy.recordFailure()
+                        log(
+                            "TCP connect attempt $attempt failed in ${outcome.phase} phase after " +
+                                "${outcome.elapsedMs}ms: ${outcome.exceptionClass}: ${outcome.message}; " +
+                                "retrying in ${delayMs}ms",
+                        )
+                        delay(delayMs)
+                    }
+                }
             }
-            log("TCP connect gave up after $CONNECT_ATTEMPTS attempts")
+            log("TCP connect loop stopped (group gone or connector cancelled)")
         }
+    }
+
+    /**
+     * Manual retry for the client role: restarts the TCP retry loop with a fresh
+     * backoff schedule. No-op unless this device is a group client in a formed group.
+     */
+    fun retryConnect() {
+        val snapshot = state.value
+        if (snapshot.role != P2pRole.CLIENT || !snapshot.groupFormed) {
+            log("retry ignored: role=${snapshot.role} groupFormed=${snapshot.groupFormed}")
+            return
+        }
+        val address = snapshot.groupOwnerAddress ?: run {
+            log("retry impossible: no group owner address")
+            return
+        }
+        log("manual TCP retry requested")
+        startClient(address)
     }
 
     private fun closeTransport(reason: String) {
