@@ -48,3 +48,20 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
 }
+
+/**
+ * Runs all simulator sweeps with 30 seeds and writes the CSV files under results/.
+ *
+ * Kept out of the unit-test suite because a full run is intentionally long.
+ */
+tasks.register<JavaExec>("runExperiments") {
+    group = "verification"
+    description = "Run all simulator sweeps with 30 seeds into results/*.csv"
+    dependsOn("compileDebugKotlin")
+    mainClass.set("com.airmesh.sim.ExperimentMainKt")
+    classpath = files(
+        provider { tasks.named("compileDebugKotlin").get().outputs.files },
+        configurations.getByName("debugRuntimeClasspath"),
+    )
+    workingDir = rootProject.projectDir
+}
