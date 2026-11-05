@@ -100,6 +100,12 @@ class WifiDirectConnector(
     /** Backoff schedule for the client's TCP retry loop. */
     private val reconnectPolicy = ReconnectPolicy()
 
+    /** Debounces "group not formed" reports during formation. */
+    private val presenceTracker = GroupPresenceTracker()
+
+    /** One-shot job that confirms a pending "group gone" episode after the grace period. */
+    private var groupGoneJob: Job? = null
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -365,13 +371,30 @@ class WifiDirectConnector(
                 "isGroupOwner=${info.isGroupOwner} groupOwnerAddress=$ownerAddress",
         )
 
+        val nowMs = System.currentTimeMillis()
+
         if (!info.groupFormed) {
-            _state.update {
-                it.copy(role = P2pRole.NONE, groupFormed = false, groupOwnerAddress = null)
+            // Only debounce when there is a live link worth protecting; a false
+            // report with nothing open can be handled immediately.
+            if (hasLiveLink() && !presenceTracker.onReport(false, nowMs)) {
+                log(
+                    "transient groupFormed=false; keeping the live transport for up to " +
+                        "${GroupPresenceTracker.DEFAULT_GRACE_MS}ms",
+                )
+                scheduleGroupGoneCheck(nowMs)
+            } else {
+                _state.update {
+                    it.copy(role = P2pRole.NONE, groupFormed = false, groupOwnerAddress = null)
+                }
+                closeTransport("group not formed")
             }
-            closeTransport("group not formed")
             return
         }
+
+        // A formed-group report cancels any pending "gone" episode.
+        presenceTracker.onReport(true, nowMs)
+        groupGoneJob?.cancel()
+        groupGoneJob = null
 
         logNetworkInterfaces(
             "group formed (role=${if (info.isGroupOwner) "owner" else "client"})",
@@ -519,9 +542,34 @@ class WifiDirectConnector(
         startClient(address)
     }
 
+    /** True when a live TCP link exists that a false report must not tear down. */
+    private fun hasLiveLink(): Boolean = listening || transport.neighbors.value.isNotEmpty()
+
+    /**
+     * Schedules the one-shot check that fires at the end of the pending grace
+     * period and closes the transport if "group gone" is still unrefuted. A
+     * second false report while the job is pending does not restart it: the
+     * window stays anchored to the first false report.
+     */
+    private fun scheduleGroupGoneCheck(nowMs: Long) {
+        if (groupGoneJob?.isActive == true) return // this episode is already watched
+        val remaining = presenceTracker.pendingGraceRemaining(nowMs) ?: GroupPresenceTracker.DEFAULT_GRACE_MS
+        groupGoneJob = scope.launch {
+            delay(remaining)
+            if (!presenceTracker.onReport(false, System.currentTimeMillis())) return@launch
+            _state.update {
+                it.copy(role = P2pRole.NONE, groupFormed = false, groupOwnerAddress = null)
+            }
+            closeTransport("group confirmed gone after ${GroupPresenceTracker.DEFAULT_GRACE_MS}ms")
+        }
+    }
+
     private fun closeTransport(reason: String) {
         connectJob?.cancel()
         connectJob = null
+        groupGoneJob?.cancel()
+        groupGoneJob = null
+        presenceTracker.reset()
         listening = false
         transport.stop()
         log("transport closed: $reason")
