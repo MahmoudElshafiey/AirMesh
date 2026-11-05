@@ -1,6 +1,5 @@
 package com.airmesh.transport
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -41,6 +40,7 @@ enum class P2pRole {
 
 /** UI-facing snapshot of the Wi-Fi Direct side. */
 data class ConnectorState(
+    /** True when every runtime permission required on this device is granted. */
     val permissionsGranted: Boolean = false,
     val p2pEnabled: Boolean? = null,
     val peers: List<WifiP2pDevice> = emptyList(),
@@ -49,6 +49,9 @@ data class ConnectorState(
     val groupOwnerAddress: String? = null,
     /** True while a manager.connect() request is in flight. */
     val connecting: Boolean = false,
+    /** True on devices where Local Network Protection applies (SDK >= 34). */
+    val localNetworkRequired: Boolean = false,
+    val localNetworkGranted: Boolean = false,
 )
 
 /**
@@ -145,6 +148,13 @@ class WifiDirectConnector(
         if (started) return
         started = true
 
+        // Once per node start: device and permission snapshot so on-device logs
+        // are self-explanatory when LAN TCP misbehaves.
+        log(
+            "device: model=${Build.MODEL} SDK_INT=${Build.VERSION.SDK_INT} " +
+                "targetSdk=$targetSdkVersion ${describePermissionStates()}",
+        )
+
         if (p2p == null) {
             log("start(): no Wi-Fi Direct support, nothing to do")
             return
@@ -217,22 +227,47 @@ class WifiDirectConnector(
 
     /** Runtime permission Wi-Fi Direct needs on this Android version. */
     fun requiredPermission(): String =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.NEARBY_WIFI_DEVICES
-        } else {
-            Manifest.permission.ACCESS_FINE_LOCATION
-        }
+        PermissionRequirements.wifiDirectPermission(Build.VERSION.SDK_INT)
 
-    fun onPermissionResult(granted: Boolean) {
-        _state.update { it.copy(permissionsGranted = granted) }
-        val name = requiredPermission().substringAfterLast('.')
-        log("runtime permission $name granted=$granted")
-        if (granted) refreshConnectionInfo()
+    /** Every runtime permission AirMesh must hold on this device. */
+    fun requiredPermissions(): List<String> =
+        PermissionRequirements.required(Build.VERSION.SDK_INT)
+
+    /** Applies a batch of grant results (from the launcher or an initial check). */
+    fun onPermissionResults(results: Map<String, Boolean>) {
+        val required = requiredPermissions()
+        _state.update { state ->
+            state.copy(
+                permissionsGranted = required.all { results[it] == true },
+                localNetworkRequired = PermissionRequirements.ACCESS_LOCAL_NETWORK in required,
+                localNetworkGranted = results[PermissionRequirements.ACCESS_LOCAL_NETWORK] == true,
+            )
+        }
+        required.forEach { permission ->
+            log("runtime permission ${permission.substringAfterLast('.')} granted=${results[permission] == true}")
+        }
+        if (required.all { results[it] == true }) refreshConnectionInfo()
     }
 
-    private fun hasP2pPermission(): Boolean =
-        ContextCompat.checkSelfPermission(appContext, requiredPermission()) ==
-            PackageManager.PERMISSION_GRANTED
+    private fun hasP2pPermission(): Boolean = isGranted(requiredPermission())
+
+    /** True when [permission] is currently held. */
+    private fun isGranted(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(appContext, permission) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Granted state of every permission AirMesh may need on this device, e.g.
+     * "NEARBY_WIFI_DEVICES=granted ACCESS_LOCAL_NETWORK=denied". Makes timeout
+     * logs self-explanatory: a dropped (not refused) LAN TCP connect is the
+     * Local Network Protection signature when that permission is missing.
+     */
+    private fun describePermissionStates(): String = listOf(
+        PermissionRequirements.NEARBY_WIFI_DEVICES,
+        PermissionRequirements.ACCESS_LOCAL_NETWORK,
+        PermissionRequirements.ACCESS_FINE_LOCATION,
+    ).joinToString(" ") { permission ->
+        "${permission.substringAfterLast('.')}=${if (isGranted(permission)) "granted" else "denied"}"
+    }
 
     // --- Wi-Fi Direct actions ---------------------------------------------
 
@@ -593,6 +628,12 @@ class WifiDirectConnector(
                                 "${outcome.elapsedMs}ms: ${outcome.exceptionClass}: ${outcome.message}; " +
                                 "retrying in ${delayMs}ms",
                         )
+                        if (outcome.phase == ConnectPhase.CONNECT && outcome.exceptionClass == "SocketTimeoutException") {
+                            // A timeout means packets are dropped, not refused — the
+                            // Local Network Protection signature when a required
+                            // permission is missing. Log which ones are held.
+                            log("connect timed out; current permission states: ${describePermissionStates()}")
+                        }
                         delay(delayMs)
                     }
                 }
@@ -690,6 +731,10 @@ class WifiDirectConnector(
     }
 
     // --- Helpers ----------------------------------------------------------
+
+    /** The app's target SDK. The field is deprecated on API 37 but works everywhere. */
+    @Suppress("DEPRECATION")
+    private val targetSdkVersion: Int get() = appContext.applicationInfo.targetSdkVersion
 
     private fun errorName(code: Int): String = when (code) {
         WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"

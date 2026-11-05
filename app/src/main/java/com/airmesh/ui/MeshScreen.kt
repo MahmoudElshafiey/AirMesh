@@ -103,6 +103,27 @@ fun MeshScreen(
             if (neighbors.isEmpty()) "-" else neighbors.sorted().joinToString(", ") { "#$it" },
         )
 
+        // Local Network Protection: without this permission the OS drops LAN TCP
+        // packets, so every client connect to the group owner times out.
+        if (connectorState.localNetworkRequired && !connectorState.localNetworkGranted) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, MaterialTheme.colorScheme.error)
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Local network permission missing — TCP to the group owner will time out.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f),
+                )
+                Button(onClick = onRequestPermissions) { Text("Grant") }
+            }
+        }
+
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onRequestPermissions) { Text("Permissions") }
             Button(onClick = onDiscover) { Text("Discover") }

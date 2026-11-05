@@ -36,10 +36,12 @@ class MeshActivity : ComponentActivity() {
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private val permissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            connector.onPermissionResult(granted)
-        }
+    /** Requests every runtime permission AirMesh needs on this device at once. */
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        connector.onPermissionResults(results)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,7 +54,7 @@ class MeshActivity : ComponentActivity() {
         val nodeId = NodeIdProvider(SharedPreferencesNodeIdStore(this)).getOrCreate()
         node = createAirMeshNode(this, nodeId, eventLog)
         connector = WifiDirectConnector(this, node.transport, eventLog)
-        connector.onPermissionResult(hasP2pPermission())
+        connector.onPermissionResults(permissionStates())
 
         setContent {
             val connectorState by connector.state.collectAsState()
@@ -67,7 +69,7 @@ class MeshActivity : ComponentActivity() {
                     neighbors = neighbors,
                     messages = messages,
                     events = events,
-                    onRequestPermissions = ::requestP2pPermission,
+                    onRequestPermissions = ::requestPermissions,
                     onDiscover = connector::discover,
                     onCreateGroup = connector::createGroup,
                     onRetryTcp = connector::retryConnect,
@@ -104,15 +106,21 @@ class MeshActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun requestP2pPermission() {
-        if (hasP2pPermission()) {
-            connector.onPermissionResult(true)
+    /** Requests every runtime permission this device needs; skips the dialog when all are held. */
+    private fun requestPermissions() {
+        val required = connector.requiredPermissions()
+        if (required.all(::isPermissionGranted)) {
+            // Nothing to ask for: just refresh the UI state without a dialog.
+            connector.onPermissionResults(permissionStates())
             return
         }
-        permissionLauncher.launch(connector.requiredPermission())
+        permissionLauncher.launch(required.toTypedArray())
     }
 
-    private fun hasP2pPermission(): Boolean =
-        ContextCompat.checkSelfPermission(this, connector.requiredPermission()) ==
-            PackageManager.PERMISSION_GRANTED
+    private fun isPermissionGranted(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    /** Current grant state of every permission required on this device. */
+    private fun permissionStates(): Map<String, Boolean> =
+        connector.requiredPermissions().associateWith(::isPermissionGranted)
 }
