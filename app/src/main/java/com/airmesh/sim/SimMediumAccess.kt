@@ -234,7 +234,12 @@ internal class SimMediumAccess(
     private fun hasWork(): Boolean =
         active.isNotEmpty() || nodeStates.values.any { it.current != null || it.queue.isNotEmpty() }
 
-    private fun transmissionDurationMs(bytes: ByteArray): Long {
+    /**
+     * Transmission duration in whole contention slots: the encoded frame length
+     * in bits divided by the configured bitrate, rounded up, with a minimum of
+     * one slot (a zero-length transmission would never free the channel).
+     */
+    internal fun transmissionDurationMs(bytes: ByteArray): Long {
         val bits = bytes.size.toLong() * 8L
         val bitsPerSlot = config.bitrate.toDouble() * config.slotTimeMs.toDouble() / 1000.0
         val slots = maxOf(1L, ceil(bits / bitsPerSlot).toLong())
