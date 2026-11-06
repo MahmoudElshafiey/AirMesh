@@ -8,6 +8,7 @@ import com.airmesh.routing.Router
 import com.airmesh.routing.StoreAndForward
 import com.airmesh.transport.ReceivedPacket
 import com.airmesh.transport.TcpMeshTransport
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +49,7 @@ data class MeshMessage(
  * It owns the transport, dedup cache, store-and-forward facade, and router. The
  * wiring mirrors the simulator's SimNode and the TCP end-to-end test:
  *
- * - Router sends through `transport.send` and reads `transport.neighbors`.
+ * - Router sends through `transport.trySend` and reads `transport.neighbors`.
  * - Every decoded incoming frame is handed to `router.onFrameReceived`.
  * - A neighbor that just appeared gets a `storeAndForward.onNeighborAppeared`
  *   replay so queued frames are delivered after a reconnect, and the same
@@ -254,7 +255,24 @@ class AirMeshNode(
         }
         for (neighborId in added.sorted()) {
             eventLog.log("neighbor up: $neighborId")
+            replayFor(neighborId)
+        }
+    }
+
+    /**
+     * Runs one store-and-forward replay without letting a failure kill the
+     * caller: an exception here used to stop both this collector and
+     * [periodicReplay] forever, leaving queued frames undelivered with no log.
+     */
+    private suspend fun replayFor(neighborId: Int) {
+        try {
             storeAndForward.onNeighborAppeared(neighborId)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            eventLog.log(
+                "replay failed for neighbor $neighborId: ${error.javaClass.simpleName}: ${error.message}",
+            )
         }
     }
 
@@ -267,7 +285,7 @@ class AirMeshNode(
         while (currentCoroutineContext().isActive) {
             delay(replayIntervalMs)
             for (neighborId in transport.neighbors.value.sorted()) {
-                storeAndForward.onNeighborAppeared(neighborId)
+                replayFor(neighborId)
             }
         }
     }
@@ -288,12 +306,21 @@ class AirMeshNode(
         }
 
         return try {
-            transport.send(neighborId, bytes)
-            eventLog.log(
-                "TX ${frame.type} node=${frame.nodeId} seq=${frame.seq} " +
-                    "ttl=${frame.ttl} -> $neighborId",
-            )
-            true
+            // trySend reports false when the peer is gone or the write failed;
+            // returning that keeps the frame queued for replay instead of
+            // marking a lost frame delivered.
+            val sent = transport.trySend(neighborId, bytes)
+            if (sent) {
+                eventLog.log(
+                    "TX ${frame.type} node=${frame.nodeId} seq=${frame.seq} " +
+                        "ttl=${frame.ttl} -> $neighborId",
+                )
+            } else {
+                eventLog.log(
+                    "TX ${frame.type} seq=${frame.seq} -> $neighborId failed: no live socket",
+                )
+            }
+            sent
         } catch (error: Exception) {
             eventLog.log(
                 "TX ${frame.type} seq=${frame.seq} -> $neighborId failed: " +
