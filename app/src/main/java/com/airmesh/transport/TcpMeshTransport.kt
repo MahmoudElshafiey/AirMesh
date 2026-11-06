@@ -91,8 +91,10 @@ sealed interface ConnectOutcome {
  * held during socket I/O.
  *
  * @param localNodeId 16-bit AirMesh node id advertised in HELLO frames.
- * @param dispatcher runs accept, connect, and socket-reader coroutines. It is
- *   injectable so tests can control the threading.
+ * @param dispatcher runs all socket I/O: accept, connect, reads, and writes.
+ *   [send] and [broadcast] hop onto it even when called from another thread
+ *   (the UI calls them from the main thread). Injectable so tests can control
+ *   the threading.
  */
 class TcpMeshTransport(
     private val localNodeId: Int,
@@ -334,8 +336,28 @@ class TcpMeshTransport(
     }
 
     override suspend fun broadcast(bytes: ByteArray) {
-        // Snapshot first: the map may change while sockets are written to.
-        for ((neighborId, peer) in peers.entries.toList()) {
+        // All socket I/O runs on the injected dispatcher regardless of the
+        // caller's thread — the UI calls this from the main thread, where a
+        // blocking write throws NetworkOnMainThreadException.
+        withContext(dispatcher) {
+            // Snapshot first: the map may change while sockets are written to.
+            for ((neighborId, peer) in peers.entries.toList()) {
+                try {
+                    peer.write(bytes)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: IOException) {
+                    removePeer(neighborId, peer)
+                }
+            }
+        }
+    }
+
+    override suspend fun send(neighborId: Int, bytes: ByteArray) {
+        // Same rule as [broadcast]: the write must happen on the injected
+        // dispatcher even when the caller is on the main thread.
+        withContext(dispatcher) {
+            val peer = peers[neighborId] ?: return@withContext
             try {
                 peer.write(bytes)
             } catch (error: CancellationException) {
@@ -343,17 +365,6 @@ class TcpMeshTransport(
             } catch (error: IOException) {
                 removePeer(neighborId, peer)
             }
-        }
-    }
-
-    override suspend fun send(neighborId: Int, bytes: ByteArray) {
-        val peer = peers[neighborId] ?: return
-        try {
-            peer.write(bytes)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: IOException) {
-            removePeer(neighborId, peer)
         }
     }
 

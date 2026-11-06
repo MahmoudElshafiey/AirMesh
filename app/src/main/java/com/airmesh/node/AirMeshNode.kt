@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * One visible text message, incoming or outgoing.
@@ -165,34 +166,38 @@ class AirMeshNode(
     /**
      * Encodes [text] as UTF-8 and floods it as one MSG frame.
      *
+     * The whole body runs on the node's background dispatcher: a call from the
+     * main thread (the UI) hops once and suspends, so encoding, routing, store
+     * access, and socket writes never block or run on the main thread.
+     *
      * @return false when the UTF-8 payload exceeds [FrameCodec.MAX_PAYLOAD],
      *   so the UI can show a validation error instead of crashing.
      */
-    suspend fun sendText(text: String): Boolean {
+    suspend fun sendText(text: String): Boolean = withContext(dispatcher) {
         val payload = text.toByteArray(Charsets.UTF_8)
         if (payload.size > FrameCodec.MAX_PAYLOAD) {
             eventLog.log(
                 "send rejected: ${payload.size} UTF-8 bytes exceed ${FrameCodec.MAX_PAYLOAD}",
             )
-            return false
-        }
-
-        return try {
-            val frame = router.originate(FrameType.MSG, payload)
-            appendMessage(
-                MeshMessage(
-                    senderId = localNodeId,
-                    text = text,
-                    timestamp = clock(),
-                    ttl = frame.ttl,
-                    outgoing = true,
-                ),
-            )
-            eventLog.log("originated MSG seq=${frame.seq} ttl=${frame.ttl} (${payload.size} bytes)")
-            true
-        } catch (error: Exception) {
-            eventLog.log("send failed: ${error.javaClass.simpleName}: ${error.message}")
             false
+        } else {
+            try {
+                val frame = router.originate(FrameType.MSG, payload)
+                appendMessage(
+                    MeshMessage(
+                        senderId = localNodeId,
+                        text = text,
+                        timestamp = clock(),
+                        ttl = frame.ttl,
+                        outgoing = true,
+                    ),
+                )
+                eventLog.log("originated MSG seq=${frame.seq} ttl=${frame.ttl} (${payload.size} bytes)")
+                true
+            } catch (error: Exception) {
+                eventLog.log("send failed: ${error.javaClass.simpleName}: ${error.message}")
+                false
+            }
         }
     }
 
