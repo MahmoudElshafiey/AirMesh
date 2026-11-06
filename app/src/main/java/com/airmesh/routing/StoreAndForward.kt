@@ -3,6 +3,15 @@ package com.airmesh.routing
 import com.airmesh.protocol.Frame
 import java.util.concurrent.ConcurrentHashMap
 
+/** Why a replay was triggered; controls how chatty its summary log line is. */
+enum class ReplayTrigger {
+    /** The neighbor just appeared over a new link — always log the summary. */
+    APPEARED,
+
+    /** Periodic retry while the neighbor stays connected — log only on change. */
+    PERIODIC,
+}
+
 /**
  * Store-and-forward queue and replay engine.
  *
@@ -29,9 +38,10 @@ import java.util.concurrent.ConcurrentHashMap
  * @property clock current wall-clock time in milliseconds, injectable for tests.
  * @property maxAgeMs frames older than this are discarded (10 minutes default).
  * @property maxStoreSize maximum queued frames; oldest are dropped first.
- * @property log receives one line per replay trigger and per frame attempted,
- *   so the on-device event log shows exactly what a replay did. No-op by
- *   default, which keeps pure-Kotlin callers (simulator, tests) quiet.
+ * @property log receives one summary line per meaningful replay trigger and
+ *   one line per frame attempted, so the on-device event log shows exactly
+ *   what a replay did without spamming it every 5 s. No-op by default, which
+ *   keeps pure-Kotlin callers (simulator, tests) quiet.
  */
 class StoreAndForward(
     private val store: PacketStore,
@@ -66,6 +76,13 @@ class StoreAndForward(
     private val inFlight: MutableSet<DeliveryKey> = ConcurrentHashMap.newKeySet()
 
     /**
+     * Stored count reported in each neighbor's last summary line. Anchors the
+     * "queue size moved since the last log" check; updated only when a summary
+     * is actually logged, so a later change is still noticed after quiet ticks.
+     */
+    private val lastLoggedStoredCount: MutableMap<Int, Int> = ConcurrentHashMap()
+
+    /**
      * Stores [frame] after pruning expired and excess entries.
      *
      * Frames at their last hop (`ttl <= 1`) are not queued: they can never be
@@ -93,16 +110,27 @@ class StoreAndForward(
      * again: another thread may have sent it between [pendingFor] and the
      * claim. Failed sends are left queued, so the next neighbor event retries
      * them.
+     *
+     * The one-line replay summary is logged for [ReplayTrigger.APPEARED] calls
+     * and whenever a periodic call has something new to report: frames pending
+     * for this neighbor, or the queue size moved since its last summary. A
+     * quiet tick logs nothing; per-frame "replay TX" lines are always kept.
      */
-    suspend fun onNeighborAppeared(neighborId: Int) {
+    suspend fun onNeighborAppeared(neighborId: Int, trigger: ReplayTrigger = ReplayTrigger.APPEARED) {
         val notBefore = clock() - maxAgeMs
         store.deleteOlderThan(notBefore)
 
         // One snapshot per trigger; the log line reports both the total queue
-        // size and what is actually pending for this neighbor, so a silent
-        // replay (trigger fired but nothing sent) is visible in the event log.
+        // size and what is actually pending for this neighbor.
         val pending = store.pendingFor(neighborId, notBefore)
-        log("replay: neighbor $neighborId: ${store.count()} stored, ${pending.size} pending for this neighbor")
+        val storedCount = store.count()
+        if (trigger == ReplayTrigger.APPEARED ||
+            pending.isNotEmpty() ||
+            lastLoggedStoredCount[neighborId] != storedCount
+        ) {
+            log("replay: neighbor $neighborId: $storedCount stored, ${pending.size} pending for this neighbor")
+            lastLoggedStoredCount[neighborId] = storedCount
+        }
 
         for (stored in pending) {
             val frame = stored.frame

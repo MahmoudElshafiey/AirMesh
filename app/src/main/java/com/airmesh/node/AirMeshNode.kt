@@ -4,6 +4,7 @@ import com.airmesh.protocol.Frame
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.FrameType
 import com.airmesh.routing.DedupCache
+import com.airmesh.routing.ReplayTrigger
 import com.airmesh.routing.Router
 import com.airmesh.routing.StoreAndForward
 import com.airmesh.transport.ReceivedPacket
@@ -255,7 +256,7 @@ class AirMeshNode(
         }
         for (neighborId in added.sorted()) {
             eventLog.log("neighbor up: $neighborId")
-            replayFor(neighborId)
+            replayFor(neighborId, ReplayTrigger.APPEARED)
         }
     }
 
@@ -264,9 +265,9 @@ class AirMeshNode(
      * caller: an exception here used to stop both this collector and
      * [periodicReplay] forever, leaving queued frames undelivered with no log.
      */
-    private suspend fun replayFor(neighborId: Int) {
+    private suspend fun replayFor(neighborId: Int, trigger: ReplayTrigger) {
         try {
-            storeAndForward.onNeighborAppeared(neighborId)
+            storeAndForward.onNeighborAppeared(neighborId, trigger)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -285,7 +286,7 @@ class AirMeshNode(
         while (currentCoroutineContext().isActive) {
             delay(replayIntervalMs)
             for (neighborId in transport.neighbors.value.sorted()) {
-                replayFor(neighborId)
+                replayFor(neighborId, ReplayTrigger.PERIODIC)
             }
         }
     }
