@@ -28,6 +28,16 @@ object NetworkDiagnostics {
     fun holdsGroupAddress(ipv4Addresses: List<String>): Boolean =
         ipv4Addresses.any { it.startsWith("192.168.49.") }
 
+    /**
+     * True when some up interface holds an address in the P2P group subnet, i.e.
+     * the Wi-Fi Direct link is actually present on this device. The client's
+     * connect loop refuses to attempt without it: a connect to the owner IP
+     * would otherwise leave over the normal Wi-Fi interface (wlan0) toward an
+     * address that does not exist there.
+     */
+    fun hasGroupAddress(interfaces: List<InterfaceInfo>): Boolean =
+        interfaces.any { it.up && holdsGroupAddress(it.ipv4Addresses) }
+
     /** One log line per interface, flagging p2p interfaces and group-subnet addresses. */
     fun describe(interfaces: List<InterfaceInfo>): List<String> = interfaces.map { info ->
         val flags = buildList {

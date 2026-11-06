@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 import com.airmesh.node.EventLog
 import java.net.InetSocketAddress
 import java.net.Socket
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -102,8 +103,8 @@ class WifiDirectConnector(
     /** Owner address the current [connectJob] targets, if any. */
     private var connectTarget: String? = null
 
-    /** Backoff schedule for the client's TCP retry loop. */
-    private val reconnectPolicy = ReconnectPolicy()
+    /** Should-retry / should-stop rules for the client's TCP connect loop. */
+    private val connectDecider = ClientConnectDecider()
 
     /** Debounces "group not formed" reports during formation. */
     private val presenceTracker = GroupPresenceTracker()
@@ -574,6 +575,12 @@ class WifiDirectConnector(
      * port does not cost us the connection. It also resumes automatically if an
      * established link drops later. A call for a different address restarts the
      * loop; a duplicate call for the same address is ignored.
+     *
+     * Every iteration is gated by [ClientConnectDecider]: the loop stops as soon
+     * as the group is no longer formed (a confirmed-gone group must not be
+     * retried through the normal Wi-Fi interface) and refuses to attempt while
+     * no up interface holds a 192.168.49.x address, because such an attempt
+     * would leave over wlan0 toward an address that does not exist there.
      */
     private fun startClient(groupOwnerAddress: String) {
         val currentJob = connectJob
@@ -584,24 +591,47 @@ class WifiDirectConnector(
         currentJob?.cancel()
 
         connectTarget = groupOwnerAddress
-        reconnectPolicy.reset()
+        connectDecider.reset()
         connectJob = scope.launch {
             // Raw reachability probe first: a plain TCP connect with no HELLO,
             // so "no route / port closed" is separable from protocol problems.
-            runReachabilityProbe(groupOwnerAddress)
+            // Skipped when the p2p link itself is missing — probing would just
+            // send SYNs over wlan0 toward an address that does not exist there.
+            if (p2pHasMeshAddress()) {
+                runReachabilityProbe(groupOwnerAddress)
+            } else {
+                log("reachability probe skipped: no up interface holds a 192.168.49.x address")
+            }
 
             var attempt = 0
-            while (isActive && state.value.groupFormed) {
+            while (isActive) {
+                when (val decision = connectDecider.decide(state.value.groupFormed, p2pHasMeshAddress())) {
+                    is ClientConnectDecider.Decision.Stop -> {
+                        log("TCP connect loop stopped: group no longer formed")
+                        return@launch
+                    }
+
+                    is ClientConnectDecider.Decision.Wait -> {
+                        delay((decision.untilMs - System.currentTimeMillis()).coerceAtLeast(0L))
+                        continue
+                    }
+
+                    ClientConnectDecider.Decision.Attempt -> Unit
+                }
+
                 // Wait out any live link: skips work while connected and makes
                 // the loop resume automatically if the link drops later.
                 transport.neighbors.first { it.isEmpty() }
-                if (!state.value.groupFormed) return@launch
 
                 attempt += 1
                 logNetworkInterfaces("before connect attempt $attempt")
                 log("TCP connect attempt $attempt to $groupOwnerAddress:$PORT")
                 val outcome = try {
                     transport.connect(groupOwnerAddress, PORT)
+                } catch (error: CancellationException) {
+                    // A cancelled attempt is not a failure; let the coroutine die
+                    // quietly instead of logging "failed ... retrying".
+                    throw error
                 } catch (error: Exception) {
                     log(
                         "TCP connect attempt $attempt failed to start: " +
@@ -617,28 +647,37 @@ class WifiDirectConnector(
 
                 when (outcome) {
                     is ConnectOutcome.Success -> {
-                        reconnectPolicy.reset()
+                        connectDecider.onSuccess()
                         log("TCP connected to $groupOwnerAddress:$PORT neighbor=${outcome.remoteNodeId}")
                     }
 
                     is ConnectOutcome.Failure -> {
-                        val delayMs = reconnectPolicy.recordFailure()
-                        log(
-                            "TCP connect attempt $attempt failed in ${outcome.phase} phase after " +
-                                "${outcome.elapsedMs}ms: ${outcome.exceptionClass}: ${outcome.message}; " +
-                                "retrying in ${delayMs}ms",
-                        )
-                        if (outcome.phase == ConnectPhase.CONNECT && outcome.exceptionClass == "SocketTimeoutException") {
-                            // A timeout means packets are dropped, not refused — the
-                            // Local Network Protection signature when a required
-                            // permission is missing. Log which ones are held.
-                            log("connect timed out; current permission states: ${describePermissionStates()}")
+                        if (!isActive) {
+                            // The loop was cancelled while the attempt ran; report
+                            // the outcome without claiming a retry that will never
+                            // happen.
+                            log(
+                                "TCP connect attempt $attempt failed in ${outcome.phase} phase after " +
+                                    "${outcome.elapsedMs}ms: ${outcome.exceptionClass}: ${outcome.message}; " +
+                                    "loop cancelled, not retrying",
+                            )
+                        } else {
+                            val delayMs = connectDecider.recordFailure()
+                            log(
+                                "TCP connect attempt $attempt failed in ${outcome.phase} phase after " +
+                                    "${outcome.elapsedMs}ms: ${outcome.exceptionClass}: ${outcome.message}; " +
+                                    "retrying in ${delayMs}ms",
+                            )
+                            if (outcome.phase == ConnectPhase.CONNECT && outcome.exceptionClass == "SocketTimeoutException") {
+                                // A timeout means packets are dropped, not refused — the
+                                // Local Network Protection signature when a required
+                                // permission is missing. Log which ones are held.
+                                log("connect timed out; current permission states: ${describePermissionStates()}")
+                            }
                         }
-                        delay(delayMs)
                     }
                 }
             }
-            log("TCP connect loop stopped (group gone or connector cancelled)")
         }
     }
 
@@ -662,6 +701,16 @@ class WifiDirectConnector(
 
     /** True when a live TCP link exists that a false report must not tear down. */
     private fun hasLiveLink(): Boolean = listening || transport.neighbors.value.isNotEmpty()
+
+    /**
+     * True when some up interface holds an address in the P2P group subnet, i.e.
+     * the Wi-Fi Direct link is actually present on this device. The connect loop
+     * refuses to attempt without it: a connect to the owner IP would otherwise
+     * leave over wlan0 toward an address that does not exist there.
+     */
+    private fun p2pHasMeshAddress(): Boolean = runCatching {
+        NetworkDiagnostics.hasGroupAddress(NetworkDiagnostics.enumerate())
+    }.getOrDefault(false)
 
     /**
      * Schedules the one-shot check that fires at the end of the pending grace
