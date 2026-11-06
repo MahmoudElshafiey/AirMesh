@@ -288,12 +288,6 @@ private fun StatusLine(label: String, value: String) {
     }
 }
 
-private fun roleLabel(role: P2pRole): String = when (role) {
-    P2pRole.NONE -> "none"
-    P2pRole.GROUP_OWNER -> "group owner"
-    P2pRole.CLIENT -> "client"
-}
-
 private fun formatMessage(message: MeshMessage): String {
     val direction = if (message.outgoing) "TX" else "RX"
     return "${formatTime(message.timestamp)}  $direction from ${message.senderId} " +
