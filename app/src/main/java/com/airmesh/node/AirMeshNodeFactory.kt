@@ -31,7 +31,7 @@ fun createAirMeshNode(
         localNodeId = nodeId,
         transport = transport,
         eventLog = eventLog,
-        storeFactory = { send -> createRoomBackedStore(context, send) },
+        storeFactory = { send -> createRoomBackedStore(context, send, log = eventLog::log) },
         dispatcher = dispatcher,
     )
 }

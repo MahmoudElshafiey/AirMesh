@@ -60,4 +60,7 @@ interface PacketStore {
 
     /** Removes the oldest frames until at most [maxSize] remain. */
     suspend fun trimToSize(maxSize: Int)
+
+    /** Total number of frames currently held, for observability logging. */
+    suspend fun count(): Int
 }

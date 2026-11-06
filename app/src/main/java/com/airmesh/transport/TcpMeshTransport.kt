@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -101,6 +102,12 @@ class TcpMeshTransport(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     /** Optional shared diagnostic log; when set, socket events are written here. */
     private val eventLog: EventLog? = null,
+    /**
+     * Test hook: pause after the HELLO exchange but before the peer is
+     * registered and its reader loop starts, so frames the remote writes in
+     * that window pile up in the socket buffer. Production uses 0.
+     */
+    private val postHandshakeDelayMs: Long = 0L,
 ) : Transport {
 
     private companion object {
@@ -302,6 +309,9 @@ class TcpMeshTransport(
             var registeredId: Int? = null
             try {
                 val remoteId = handshake(socket, peer, handshakeTimeoutMs)
+                // Test hook: let the remote's post-HELLO bytes pile up in the
+                // socket buffer before the reader loop is attached.
+                if (postHandshakeDelayMs > 0L) delay(postHandshakeDelayMs)
                 if (!register(remoteId, peer)) {
                     // stop() won the race: the socket is valid but no longer wanted.
                     log("handshake complete with node $remoteId but transport stopped; closing")
@@ -342,13 +352,7 @@ class TcpMeshTransport(
         withContext(dispatcher) {
             // Snapshot first: the map may change while sockets are written to.
             for ((neighborId, peer) in peers.entries.toList()) {
-                try {
-                    peer.write(bytes)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: IOException) {
-                    removePeer(neighborId, peer)
-                }
+                writeToPeer(neighborId, peer, bytes)
             }
         }
     }
@@ -356,16 +360,40 @@ class TcpMeshTransport(
     override suspend fun send(neighborId: Int, bytes: ByteArray) {
         // Same rule as [broadcast]: the write must happen on the injected
         // dispatcher even when the caller is on the main thread.
-        withContext(dispatcher) {
-            val peer = peers[neighborId] ?: return@withContext
-            try {
-                peer.write(bytes)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: IOException) {
-                removePeer(neighborId, peer)
-            }
+        trySend(neighborId, bytes)
+    }
+
+    /**
+     * Sends [bytes] to [neighborId] and reports whether the frame was actually
+     * written to a live peer socket.
+     *
+     * Returns false — instead of throwing or staying silent — when the neighbor
+     * is unknown or the write failed, so store-and-forward can keep the frame
+     * queued and retry it later. [send] delegates here and ignores the result.
+     */
+    suspend fun trySend(neighborId: Int, bytes: ByteArray): Boolean = withContext(dispatcher) {
+        val peer = peers[neighborId] ?: run {
+            log("send dropped: unknown neighbor $neighborId")
+            return@withContext false
         }
+        writeToPeer(neighborId, peer, bytes)
+    }
+
+    /**
+     * Writes [bytes] to one live peer and reports success. A failed write
+     * removes the peer so later sends take the "unknown neighbor" path instead
+     * of retrying a dead socket forever.
+     */
+    private suspend fun writeToPeer(neighborId: Int, peer: PeerConnection, bytes: ByteArray): Boolean = try {
+        peer.write(bytes)
+        log("wrote ${bytes.size} bytes to $neighborId")
+        true
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: IOException) {
+        log("write failed for neighbor $neighborId: ${describe(error)}")
+        removePeer(neighborId, peer)
+        false
     }
 
     private fun ensureStarted(): CoroutineScope {
@@ -503,10 +531,18 @@ class TcpMeshTransport(
             val frame = FrameCodec.decode(bytes).getOrNull()
             if (frame == null) {
                 corruptFrames.incrementAndGet()
+                log("dropped frame from $remoteId: corrupt (CRC or decode failed)")
                 continue
             }
             // Handshake traffic is transport-internal and never routed.
-            if (frame.type == FrameType.HELLO) continue
+            if (frame.type == FrameType.HELLO) {
+                log(
+                    "dropped frame type=HELLO len=${bytes.size} from $remoteId: " +
+                        "handshake already complete",
+                )
+                continue
+            }
+            log("recv frame type=${frame.type} len=${bytes.size} from $remoteId")
             _incoming.emit(ReceivedPacket(senderId = remoteId, bytes = bytes))
         }
     }

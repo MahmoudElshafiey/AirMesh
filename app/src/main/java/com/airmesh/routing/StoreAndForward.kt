@@ -29,6 +29,9 @@ import java.util.concurrent.ConcurrentHashMap
  * @property clock current wall-clock time in milliseconds, injectable for tests.
  * @property maxAgeMs frames older than this are discarded (10 minutes default).
  * @property maxStoreSize maximum queued frames; oldest are dropped first.
+ * @property log receives one line per replay trigger and per frame attempted,
+ *   so the on-device event log shows exactly what a replay did. No-op by
+ *   default, which keeps pure-Kotlin callers (simulator, tests) quiet.
  */
 class StoreAndForward(
     private val store: PacketStore,
@@ -36,6 +39,7 @@ class StoreAndForward(
     private val clock: () -> Long = System::currentTimeMillis,
     private val maxAgeMs: Long = DEFAULT_MAX_AGE_MS,
     private val maxStoreSize: Int = DEFAULT_MAX_STORE_SIZE,
+    private val log: (String) -> Unit = {},
 ) : PacketStore by store {
 
     companion object {
@@ -94,20 +98,34 @@ class StoreAndForward(
         val notBefore = clock() - maxAgeMs
         store.deleteOlderThan(notBefore)
 
-        for (stored in store.pendingFor(neighborId, notBefore)) {
+        // One snapshot per trigger; the log line reports both the total queue
+        // size and what is actually pending for this neighbor, so a silent
+        // replay (trigger fired but nothing sent) is visible in the event log.
+        val pending = store.pendingFor(neighborId, notBefore)
+        log("replay: neighbor $neighborId: ${store.count()} stored, ${pending.size} pending for this neighbor")
+
+        for (stored in pending) {
             val frame = stored.frame
             if (frame.ttl <= 1) continue
 
             val key = DeliveryKey(neighborId, frame.nodeId, frame.seq)
-            if (!inFlight.add(key)) continue
+            if (!inFlight.add(key)) {
+                log("replay TX seq=${frame.seq} -> $neighborId skipped(in-flight)")
+                continue
+            }
             try {
                 // Re-check after claiming: a concurrent replay may have marked
                 // this frame delivered after pendingFor() took its snapshot.
-                if (store.isDelivered(frame.nodeId, frame.seq, neighborId)) continue
+                if (store.isDelivered(frame.nodeId, frame.seq, neighborId)) {
+                    log("replay TX seq=${frame.seq} -> $neighborId skipped(already-delivered)")
+                    continue
+                }
 
-                if (send(neighborId, frame)) {
+                val sent = send(neighborId, frame)
+                if (sent) {
                     store.markDelivered(frame.nodeId, frame.seq, neighborId)
                 }
+                log("replay TX seq=${frame.seq} -> $neighborId ${if (sent) "ok" else "failed"}")
             } finally {
                 inFlight.remove(key)
             }

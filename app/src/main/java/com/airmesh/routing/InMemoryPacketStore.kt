@@ -78,6 +78,8 @@ class InMemoryPacketStore : PacketStore {
         }
     }
 
+    override suspend fun count(): Int = synchronized(lock) { packets.size }
+
     /** Snapshot of everything held, oldest first. Test helper. */
     val all: List<StoredFrame>
         get() = synchronized(lock) { packets.values.sortedBy { it.createdAt } }

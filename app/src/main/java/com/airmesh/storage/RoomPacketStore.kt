@@ -22,12 +22,14 @@ fun createRoomBackedStore(
     clock: () -> Long = System::currentTimeMillis,
     maxAgeMs: Long = StoreAndForward.DEFAULT_MAX_AGE_MS,
     maxStoreSize: Int = StoreAndForward.DEFAULT_MAX_STORE_SIZE,
+    log: (String) -> Unit = {},
 ): StoreAndForward = StoreAndForward(
     store = RoomPacketStore(database),
     send = send,
     clock = clock,
     maxAgeMs = maxAgeMs,
     maxStoreSize = maxStoreSize,
+    log = log,
 )
 
 /** Convenience overload that builds the on-device database. */
@@ -37,12 +39,14 @@ fun createRoomBackedStore(
     clock: () -> Long = System::currentTimeMillis,
     maxAgeMs: Long = StoreAndForward.DEFAULT_MAX_AGE_MS,
     maxStoreSize: Int = StoreAndForward.DEFAULT_MAX_STORE_SIZE,
+    log: (String) -> Unit = {},
 ): StoreAndForward = createRoomBackedStore(
     database = AirMeshDatabase.build(context),
     send = send,
     clock = clock,
     maxAgeMs = maxAgeMs,
     maxStoreSize = maxStoreSize,
+    log = log,
 )
 
 /**
@@ -133,6 +137,8 @@ private class RoomPacketStore(
     override suspend fun deleteOlderThan(notBefore: Long) {
         dao.deleteOlderThan(notBefore)
     }
+
+    override suspend fun count(): Int = dao.count()
 
     override suspend fun trimToSize(maxSize: Int) {
         require(maxSize >= 0) { "maxSize must not be negative: $maxSize" }

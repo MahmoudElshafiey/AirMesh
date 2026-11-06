@@ -126,6 +126,7 @@ class AirMeshNode(
             initialTtl = INITIAL_TTL,
             packetStore = storeAndForward,
             clock = clock,
+            log = eventLog::log,
         )
     }
 

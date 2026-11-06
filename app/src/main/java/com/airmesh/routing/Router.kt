@@ -36,6 +36,8 @@ import com.airmesh.protocol.FrameType
  *   that cannot be forwarded are simply dropped, as before.
  * @property clock current time in milliseconds, used for store timestamps.
  *   Injectable so the deterministic simulator can supply virtual time.
+ * @property log receives one line per dropped duplicate frame; no-op by
+ *   default so pure-Kotlin callers (simulator) stay quiet.
  */
 class Router(
     private val localNodeId: Int,
@@ -46,6 +48,7 @@ class Router(
     private val initialTtl: Int = DEFAULT_TTL,
     private val packetStore: PacketStore? = null,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val log: (String) -> Unit = {},
 ) {
 
     companion object {
@@ -85,7 +88,10 @@ class Router(
      */
     suspend fun onFrameReceived(frame: Frame, fromNeighbor: Int) {
         // Seen before? Nothing to deliver and nothing to forward.
-        if (dedup.seen(frame.nodeId, frame.seq)) return
+        if (dedup.seen(frame.nodeId, frame.seq)) {
+            log("dropped duplicate: node=${frame.nodeId} seq=${frame.seq} from=$fromNeighbor")
+            return
+        }
 
         if (frame.type == FrameType.MSG || frame.type == FrameType.LOCATION) {
             deliver(frame)
