@@ -51,7 +51,8 @@ data class MeshMessage(
  * - Router sends through `transport.send` and reads `transport.neighbors`.
  * - Every decoded incoming frame is handed to `router.onFrameReceived`.
  * - A neighbor that just appeared gets a `storeAndForward.onNeighborAppeared`
- *   replay so queued frames are delivered after a reconnect.
+ *   replay so queued frames are delivered after a reconnect, and the same
+ *   replay is retried periodically while neighbors stay connected.
  *
  * Coroutines live in a supervised scope created by [start] and cancelled by
  * [stop]; both are idempotent, and the node can be restarted.
@@ -69,6 +70,7 @@ class AirMeshNode(
     storeFactory: (suspend (neighborId: Int, frame: Frame) -> Boolean) -> StoreAndForward,
     private val clock: () -> Long = System::currentTimeMillis,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val replayIntervalMs: Long = DEFAULT_REPLAY_INTERVAL_MS,
 ) {
 
     companion object {
@@ -77,6 +79,9 @@ class AirMeshNode(
 
         /** Hop limit for newly originated messages. */
         const val INITIAL_TTL = Router.DEFAULT_TTL
+
+        /** How often queued frames are retried for currently connected neighbors. */
+        const val DEFAULT_REPLAY_INTERVAL_MS = 5_000L
 
         private const val CORRUPT_POLL_MS = 500L
     }
@@ -142,6 +147,7 @@ class AirMeshNode(
                 transport.neighbors.collect { current -> onNeighbors(current) }
             }
             nodeScope.launch { logCorruptFrameDeltas() }
+            nodeScope.launch { periodicReplay() }
             eventLog.log("node $localNodeId started")
         }
     }
@@ -248,6 +254,20 @@ class AirMeshNode(
         for (neighborId in added.sorted()) {
             eventLog.log("neighbor up: $neighborId")
             storeAndForward.onNeighborAppeared(neighborId)
+        }
+    }
+
+    /**
+     * Retries store-and-forward delivery for every currently connected neighbor
+     * on a fixed interval. A frame whose send failed stays queued; without this,
+     * it would only be retried if that same neighbor disconnected and came back.
+     */
+    private suspend fun periodicReplay() {
+        while (currentCoroutineContext().isActive) {
+            delay(replayIntervalMs)
+            for (neighborId in transport.neighbors.value.sorted()) {
+                storeAndForward.onNeighborAppeared(neighborId)
+            }
         }
     }
 
