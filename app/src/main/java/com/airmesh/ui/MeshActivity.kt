@@ -1,8 +1,10 @@
 package com.airmesh.ui
 
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.StrictMode
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -45,6 +47,8 @@ class MeshActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        enableStrictModeInDebugBuilds()
 
         // Wi-Fi Direct drops when the phone sleeps, so keep the screen on while
         // this activity is in the foreground.
@@ -123,4 +127,21 @@ class MeshActivity : ComponentActivity() {
     /** Current grant state of every permission required on this device. */
     private fun permissionStates(): Map<String, Boolean> =
         connector.requiredPermissions().associateWith(::isPermissionGranted)
+
+    /**
+     * Debug builds only: surface future main-thread network/disk violations in
+     * logcat (penaltyLog, never penaltyDeath) instead of crashing the app.
+     * Both checks live on ThreadPolicy; VmPolicy has no disk-read detector.
+     */
+    private fun enableStrictModeInDebugBuilds() {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+
+        StrictMode.setThreadPolicy(
+            StrictMode.ThreadPolicy.Builder()
+                .detectNetwork()
+                .detectDiskReads()
+                .penaltyLog()
+                .build(),
+        )
+    }
 }
