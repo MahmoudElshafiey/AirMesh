@@ -100,7 +100,19 @@ fun MeshScreen(
         ) {
             when (tab) {
                 MeshTab.CHAT -> MeshChatTab(nodeId, messages, onSendText)
-                MeshTab.NETWORK -> NetworkPlaceholder()
+                MeshTab.NETWORK ->
+                    MeshNetworkTab(
+                        nodeId = nodeId,
+                        state = connectorState,
+                        neighbors = neighbors,
+                        onRequestPermissions = onRequestPermissions,
+                        onDiscover = onDiscover,
+                        onCreateGroup = onCreateGroup,
+                        onRetryTcp = onRetryTcp,
+                        onDisconnect = onDisconnect,
+                        onConnectPeer = onConnectPeer,
+                        onOpenPrototype = onOpenPrototype,
+                    )
                 MeshTab.LOG -> LogPlaceholder()
             }
         }
@@ -130,11 +142,6 @@ private fun StatusChip(role: P2pRole, neighborCount: Int) {
             Text(statusChipText(role, neighborCount), style = MaterialTheme.typography.labelMedium)
         }
     }
-}
-
-@Composable
-private fun NetworkPlaceholder() {
-    Text("Network tab — coming in the next commit.", modifier = Modifier.padding(16.dp))
 }
 
 @Composable
