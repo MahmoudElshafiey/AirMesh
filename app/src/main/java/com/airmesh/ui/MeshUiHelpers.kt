@@ -5,6 +5,7 @@ import com.airmesh.transport.P2pRole
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Pure presentation helpers for the mesh UI: time formatting, relay-count text,
@@ -131,3 +132,23 @@ fun resolveDarkTheme(mode: ThemeMode, systemIsDark: Boolean): Boolean = when (mo
 /** Restores a stored value; missing or unknown values fall back to SYSTEM. */
 fun parseThemeMode(storedValue: String?): ThemeMode =
     ThemeMode.entries.firstOrNull { it.name == storedValue } ?: ThemeMode.SYSTEM
+
+// --- Location sharing ---------------------------------------------------------
+
+/** Progress of a "share my location" request, shown above the compose bar. */
+enum class LocationShareStatus { IDLE, WAITING_FOR_FIX, FAILED }
+
+/**
+ * Coordinates with 5 decimals (~1 m resolution). Micro-degrees carry a sixth
+ * digit that is below GPS accuracy, so it is not displayed. Locale.US keeps
+ * the decimal point stable — copied coordinates must parse on any device.
+ */
+fun formatCoordinates(latitudeE6: Int, longitudeE6: Int): String =
+    "%.5f, %.5f".format(Locale.US, latitudeE6 / 1e6, longitudeE6 / 1e6)
+
+/** Human distance: whole meters below a kilometer (rounded), kilometers above. */
+fun formatDistanceMeters(meters: Double): String {
+    val rounded = Math.round(meters)
+    // Round first so 999.6 m reads "1.0 km", never the awkward "1000 m".
+    return if (rounded < 1_000) "$rounded m" else "%.1f km".format(Locale.US, meters / 1000.0)
+}

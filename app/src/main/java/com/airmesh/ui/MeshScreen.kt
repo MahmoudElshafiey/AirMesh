@@ -28,7 +28,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
+import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
@@ -57,6 +59,9 @@ fun MeshScreen(
     connectorState: ConnectorState,
     neighbors: Set<Int>,
     messages: List<MeshMessage>,
+    locations: List<MeshLocation>,
+    myLastFix: LocationFix?,
+    shareStatus: LocationShareStatus,
     events: List<LogEntry>,
     onRequestPermissions: () -> Unit,
     onDiscover: () -> Unit,
@@ -65,6 +70,11 @@ fun MeshScreen(
     onDisconnect: () -> Unit,
     onConnectPeer: (WifiP2pDevice) -> Unit,
     onSendText: (String) -> Unit,
+    onShareLocation: () -> Unit,
+    // Debug builds only: the fixed test-location toggle in the compose bar.
+    showTestLocationToggle: Boolean = false,
+    useTestLocation: Boolean = false,
+    onSetUseTestLocation: (Boolean) -> Unit = {},
     onClearLog: () -> Unit,
     onOpenPrototype: () -> Unit,
     themeMode: ThemeMode,
@@ -101,7 +111,19 @@ fun MeshScreen(
                 .imePadding(),
         ) {
             when (tab) {
-                MeshTab.CHAT -> MeshChatTab(nodeId, messages, onSendText)
+                MeshTab.CHAT ->
+                    MeshChatTab(
+                        nodeId = nodeId,
+                        messages = messages,
+                        locations = locations,
+                        myLastFix = myLastFix,
+                        shareStatus = shareStatus,
+                        onSendText = onSendText,
+                        onShareLocation = onShareLocation,
+                        showTestLocationToggle = showTestLocationToggle,
+                        useTestLocation = useTestLocation,
+                        onSetUseTestLocation = onSetUseTestLocation,
+                    )
                 MeshTab.NETWORK ->
                     MeshNetworkTab(
                         nodeId = nodeId,

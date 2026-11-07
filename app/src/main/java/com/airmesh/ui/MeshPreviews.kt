@@ -3,12 +3,19 @@ package com.airmesh.ui
 import android.net.wifi.p2p.WifiP2pDevice
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
+import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
 import com.airmesh.routing.Router
 import com.airmesh.transport.ConnectorState
@@ -25,6 +32,13 @@ private val previewMessages = listOf(
     MeshMessage(1, "Yes. I am two relays from base camp.", 1_700_000_060_000L, Router.DEFAULT_TTL, outgoing = true),
     MeshMessage(3, "Copy that. Sending the supply list next.", 1_700_000_120_000L, Router.DEFAULT_TTL - 2, outgoing = false),
 )
+
+private val previewLocations = listOf(
+    MeshLocation(3, 30_044_420, 31_235_760, 12, 1_700_000_090_000L, Router.DEFAULT_TTL - 1),
+)
+
+// Timestamped "now" so the card shows a distance to my own fix in previews.
+private val previewMyFix = LocationFix(30_044_000, 31_235_000, 8, timeMs = System.currentTimeMillis())
 
 private val previewPeer = WifiP2pDevice().apply {
     deviceName = "Pixel 8"
@@ -68,13 +82,54 @@ private fun ThemedTabPreview(darkTheme: Boolean, content: @Composable () -> Unit
 @Preview(name = "Chat · light")
 @Composable
 private fun ChatTabLightPreview() = ThemedTabPreview(darkTheme = false) {
-    MeshChatTab(nodeId = 1, messages = previewMessages, onSendText = {})
+    MeshChatTab(
+        nodeId = 1,
+        messages = previewMessages,
+        locations = previewLocations,
+        myLastFix = previewMyFix,
+        shareStatus = LocationShareStatus.IDLE,
+        onSendText = {},
+        onShareLocation = {},
+    )
 }
 
 @Preview(name = "Chat · dark")
 @Composable
 private fun ChatTabDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    MeshChatTab(nodeId = 1, messages = previewMessages, onSendText = {})
+    MeshChatTab(
+        nodeId = 1,
+        messages = previewMessages,
+        locations = previewLocations,
+        myLastFix = previewMyFix,
+        shareStatus = LocationShareStatus.IDLE,
+        onSendText = {},
+        onShareLocation = {},
+    )
+}
+
+/** A received card with a distance to my own fix, and one of my own cards. */
+@Composable
+private fun LocationCardsContent() {
+    Column(modifier = Modifier.padding(16.dp)) {
+        LocationCard(location = previewLocations.first(), isMine = false, distanceMeters = 87.0)
+        Spacer(modifier = Modifier.height(8.dp))
+        LocationCard(
+            location = MeshLocation(1, 30_044_000, 31_235_000, 8, 1_700_000_150_000L, Router.DEFAULT_TTL),
+            isMine = true,
+        )
+    }
+}
+
+@Preview(name = "Location card · light")
+@Composable
+private fun LocationCardLightPreview() = ThemedTabPreview(darkTheme = false) {
+    LocationCardsContent()
+}
+
+@Preview(name = "Location card · dark")
+@Composable
+private fun LocationCardDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    LocationCardsContent()
 }
 
 @Preview(name = "Network · light")

@@ -20,12 +20,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.airmesh.node.AirMeshNode
+import com.airmesh.node.AndroidLocationProvider
 import com.airmesh.node.EventLog
+import com.airmesh.node.LOCATION_MAX_WAIT_MS
+import com.airmesh.node.LocationFix
+import com.airmesh.node.LocationProvider
 import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
+import com.airmesh.transport.PermissionRequirements
 import com.airmesh.transport.PrototypeActivity
 import com.airmesh.transport.WifiDirectConnector
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -42,14 +48,34 @@ class MeshActivity : ComponentActivity() {
     private lateinit var node: AirMeshNode
     private lateinit var connector: WifiDirectConnector
     private lateinit var themeStore: ThemeModeStore
+    private lateinit var locationProvider: LocationProvider
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** Progress of the current share request; IDLE means "nothing in flight". */
+    private val shareStatus = mutableStateOf(LocationShareStatus.IDLE)
+    /** DEBUG builds only: when on, a fixed test point is shared instead of GPS. */
+    private val useTestLocation = mutableStateOf(false)
+    /** My own last fix — used to show "X m from you" on received location cards. */
+    private val myLastFix = mutableStateOf<LocationFix?>(null)
 
     /** Requests every runtime permission AirMesh needs on this device at once. */
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
         connector.onPermissionResults(results)
+    }
+
+    /** Location permissions are requested only when the user taps "Share my location". */
+    private val locationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        if (PermissionRequirements.locationPermissionsForSharing().all(::isPermissionGranted)) {
+            shareMyLocation()
+        } else {
+            eventLog.log("location: permission not granted — cannot share")
+            shareStatus.value = LocationShareStatus.FAILED
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,12 +92,17 @@ class MeshActivity : ComponentActivity() {
         node = createAirMeshNode(this, nodeId, eventLog)
         connector = WifiDirectConnector(this, node.transport, eventLog)
         themeStore = SharedPreferencesThemeModeStore(this)
+        locationProvider = AndroidLocationProvider(this)
+        // BuildConfig is not generated for this module; the debuggable flag is
+        // the reliable way to tell a debug build apart.
+        val showTestLocationToggle = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         connector.onPermissionResults(permissionStates())
 
         setContent {
             val connectorState by connector.state.collectAsState()
             val neighbors by node.neighbors.collectAsState()
             val messages by node.messages.collectAsState()
+            val locations by node.locations.collectAsState()
             val events by eventLog.entries.collectAsState()
             // remember (not a bare mutableStateOf): the setContent body re-runs on
             // every recomposition, and the choice must survive it. Rotation is
@@ -85,6 +116,9 @@ class MeshActivity : ComponentActivity() {
                     connectorState = connectorState,
                     neighbors = neighbors,
                     messages = messages,
+                    locations = locations,
+                    myLastFix = myLastFix.value,
+                    shareStatus = shareStatus.value,
                     events = events,
                     onRequestPermissions = ::requestPermissions,
                     onDiscover = connector::discover,
@@ -95,6 +129,10 @@ class MeshActivity : ComponentActivity() {
                     onSendText = { text ->
                         uiScope.launch { node.sendText(text) }
                     },
+                    onShareLocation = ::requestLocationShare,
+                    showTestLocationToggle = showTestLocationToggle,
+                    useTestLocation = useTestLocation.value,
+                    onSetUseTestLocation = { useTestLocation.value = it },
                     onClearLog = eventLog::clear,
                     onOpenPrototype = {
                         startActivity(Intent(this, PrototypeActivity::class.java))
@@ -164,6 +202,51 @@ class MeshActivity : ComponentActivity() {
 
     private fun isPermissionGranted(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    /** Tap handler: ask for location permissions first — only now, never at startup. */
+    private fun requestLocationShare() {
+        val missing = PermissionRequirements.locationPermissionsForSharing().filterNot(::isPermissionGranted)
+        if (missing.isEmpty()) shareMyLocation() else locationPermissionLauncher.launch(missing.toTypedArray())
+    }
+
+    /** Waits for a fix (or the debug test point), then floods it as a LOCATION frame. */
+    private fun shareMyLocation() {
+        shareStatus.value = LocationShareStatus.WAITING_FOR_FIX
+        uiScope.launch {
+            val fix = try {
+                if (useTestLocation.value) {
+                    // Debug builds only: a fixed, clearly-labeled point instead of GPS.
+                    LocationFix(TEST_LATITUDE_E6, TEST_LONGITUDE_E6, 5, System.currentTimeMillis())
+                } else {
+                    locationProvider.requestFix()
+                }
+            } catch (error: CancellationException) {
+                throw error // activity destroyed while waiting — do not swallow it
+            } catch (error: Exception) {
+                eventLog.log("location: provider failed: ${error.javaClass.simpleName}: ${error.message}")
+                null
+            }
+            if (fix == null) {
+                eventLog.log("location: no usable fix after ${LOCATION_MAX_WAIT_MS / 1000}s — share failed")
+                shareStatus.value = LocationShareStatus.FAILED
+                return@launch
+            }
+            myLastFix.value = fix
+            if (node.sendLocation(fix.latitudeE6, fix.longitudeE6, fix.accuracyMeters)) {
+                // The outgoing card in the chat list is the success confirmation.
+                shareStatus.value = LocationShareStatus.IDLE
+            } else {
+                eventLog.log("location: send failed")
+                shareStatus.value = LocationShareStatus.FAILED
+            }
+        }
+    }
+
+    companion object {
+        /** Fixed point for the debug "test location" toggle (Cairo, Egypt). */
+        private const val TEST_LATITUDE_E6 = 30_000_000
+        private const val TEST_LONGITUDE_E6 = 31_000_000
+    }
 
     /** Current grant state of every permission required on this device. */
     private fun permissionStates(): Map<String, Boolean> =
