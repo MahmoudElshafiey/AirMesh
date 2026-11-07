@@ -15,6 +15,9 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.airmesh.node.AirMeshNode
 import com.airmesh.node.EventLog
@@ -38,6 +41,7 @@ class MeshActivity : ComponentActivity() {
     private lateinit var eventLog: EventLog
     private lateinit var node: AirMeshNode
     private lateinit var connector: WifiDirectConnector
+    private lateinit var themeStore: ThemeModeStore
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -61,6 +65,7 @@ class MeshActivity : ComponentActivity() {
         val nodeId = NodeIdProvider(SharedPreferencesNodeIdStore(this)).getOrCreate()
         node = createAirMeshNode(this, nodeId, eventLog)
         connector = WifiDirectConnector(this, node.transport, eventLog)
+        themeStore = SharedPreferencesThemeModeStore(this)
         connector.onPermissionResults(permissionStates())
 
         setContent {
@@ -68,8 +73,11 @@ class MeshActivity : ComponentActivity() {
             val neighbors by node.neighbors.collectAsState()
             val messages by node.messages.collectAsState()
             val events by eventLog.entries.collectAsState()
-            // Follows the system dark setting (the in-app theme mode lands later).
-            val dark = isSystemInDarkTheme()
+            // remember (not a bare mutableStateOf): the setContent body re-runs on
+            // every recomposition, and the choice must survive it. Rotation is
+            // covered because the store persists the value across process death.
+            val themeMode = remember { mutableStateOf(themeStore.load()) }
+            val dark = resolveDarkTheme(themeMode.value, isSystemInDarkTheme())
 
             AirMeshTheme(darkTheme = dark) {
                 MeshScreen(
@@ -90,6 +98,12 @@ class MeshActivity : ComponentActivity() {
                     onClearLog = eventLog::clear,
                     onOpenPrototype = {
                         startActivity(Intent(this, PrototypeActivity::class.java))
+                    },
+                    themeMode = themeMode.value,
+                    // Applies immediately (state change recomposes) and persists.
+                    onSetThemeMode = { mode ->
+                        themeMode.value = mode
+                        themeStore.save(mode)
                     },
                 )
             }

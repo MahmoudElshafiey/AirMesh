@@ -115,3 +115,19 @@ private fun chipWithNeighbors(roleLabel: String, neighborCount: Int): String =
         val plural = if (neighborCount == 1) "neighbor" else "neighbors"
         "$roleLabel · $neighborCount $plural"
     }
+
+// --- Theme mode ---------------------------------------------------------------
+
+/** In-app theme setting; SYSTEM follows the device's dark-mode toggle. */
+enum class ThemeMode(val label: String) { SYSTEM("System"), LIGHT("Light"), DARK("Dark") }
+
+/** Pure decision used by the activity and the previews alike. */
+fun resolveDarkTheme(mode: ThemeMode, systemIsDark: Boolean): Boolean = when (mode) {
+    ThemeMode.SYSTEM -> systemIsDark
+    ThemeMode.LIGHT -> false
+    ThemeMode.DARK -> true
+}
+
+/** Restores a stored value; missing or unknown values fall back to SYSTEM. */
+fun parseThemeMode(storedValue: String?): ThemeMode =
+    ThemeMode.entries.firstOrNull { it.name == storedValue } ?: ThemeMode.SYSTEM

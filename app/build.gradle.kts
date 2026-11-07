@@ -37,6 +37,9 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
 
+    // @Preview support for the tab previews (debug builds only).
+    debugImplementation("androidx.compose.ui:ui-tooling-preview")
+
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)

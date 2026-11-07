@@ -67,6 +67,8 @@ fun MeshScreen(
     onSendText: (String) -> Unit,
     onClearLog: () -> Unit,
     onOpenPrototype: () -> Unit,
+    themeMode: ThemeMode,
+    onSetThemeMode: (ThemeMode) -> Unit,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(MeshTab.CHAT.ordinal) }
     val tab = MeshTab.values()[selectedTab.coerceIn(0, MeshTab.values().size - 1)]
@@ -112,6 +114,8 @@ fun MeshScreen(
                         onDisconnect = onDisconnect,
                         onConnectPeer = onConnectPeer,
                         onOpenPrototype = onOpenPrototype,
+                        themeMode = themeMode,
+                        onSetThemeMode = onSetThemeMode,
                     )
                 MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
             }

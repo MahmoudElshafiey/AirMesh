@@ -16,8 +16,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,6 +53,8 @@ fun MeshNetworkTab(
     onDisconnect: () -> Unit,
     onConnectPeer: (WifiP2pDevice) -> Unit,
     onOpenPrototype: () -> Unit,
+    themeMode: ThemeMode,
+    onSetThemeMode: (ThemeMode) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -57,6 +63,8 @@ fun MeshNetworkTab(
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        ThemeSelector(selected = themeMode, onSelect = onSetThemeMode)
+
         if (state.localNetworkRequired && !state.localNetworkGranted) {
             LocalNetworkBanner(onGrant = onRequestPermissions)
         }
@@ -103,6 +111,24 @@ fun MeshNetworkTab(
 private val ActionButtonModifier = Modifier
     .fillMaxWidth(0.45f)
     .heightIn(min = MinTouch)
+
+/** System / Light / Dark selector; the change applies immediately in the activity. */
+@OptIn(ExperimentalMaterial3Api::class) // Segmented buttons are experimental in this M3 version
+@Composable
+private fun ThemeSelector(selected: ThemeMode, onSelect: (ThemeMode) -> Unit) {
+    val modes = ThemeMode.entries
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        modes.forEachIndexed { index, mode ->
+            SegmentedButton(
+                selected = selected == mode,
+                onClick = { onSelect(mode) },
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
+            ) {
+                Text(mode.label)
+            }
+        }
+    }
+}
 
 /** Red banner shown on Android 17+ while ACCESS_LOCAL_NETWORK is missing. */
 @Composable
