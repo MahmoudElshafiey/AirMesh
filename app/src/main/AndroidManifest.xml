@@ -32,6 +32,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
+    <!-- Android 13+: runtime permission for the per-message notifications. It is
+         requested gracefully from MeshActivity and never blocks the service — if
+         it is denied, the mesh still runs (only the extra notifications are gone).
+         Ignored on older versions where notifications need no permission. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-feature
         android:name="android.hardware.wifi.direct"
         android:required="false" />

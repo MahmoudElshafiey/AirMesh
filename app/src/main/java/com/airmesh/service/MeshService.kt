@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.net.wifi.p2p.WifiP2pDevice
 import android.os.Binder
@@ -70,10 +71,17 @@ class MeshService : Service() {
     /** Throttles running-notification updates to at most one per 2 s. */
     private val runningThrottle = NotificationThrottle()
 
+    /** Whether received content posts a notification (Network tab toggle). Persisted. */
+    private val _messageNotificationsEnabled = MutableStateFlow(true)
+    val messageNotificationsEnabled: StateFlow<Boolean> = _messageNotificationsEnabled.asStateFlow()
+
+    /** Keys of incoming items already notified, so list re-emissions do not repost. */
+    private val seenIncoming = LinkedHashSet<String>()
+
     override fun onCreate() {
         super.onCreate()
         notificationManager = getSystemService(NotificationManager::class.java)
-        createRunningChannel()
+        createChannels()
 
         eventLog = EventLog()
         node = createAirMeshNode(
@@ -83,6 +91,10 @@ class MeshService : Service() {
         )
         connector = WifiDirectConnector(applicationContext, node.transport, eventLog)
 
+        // Per-message notifications are on by default; the Network tab toggle persists the choice.
+        _messageNotificationsEnabled.value = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MESSAGE_NOTIFICATIONS_ENABLED, true)
+
         // The system requires startForeground within 5 s of startForegroundService;
         // onCreate is well inside that window.
         startForeground(RUNNING_NOTIFICATION_ID, buildRunningNotification(0))
@@ -91,6 +103,27 @@ class MeshService : Service() {
             node.neighbors.collect { neighbors ->
                 if (runningThrottle.shouldPost(System.currentTimeMillis())) {
                     notificationManager.notify(RUNNING_NOTIFICATION_ID, buildRunningNotification(neighbors.size))
+                }
+            }
+        }
+
+        // One notification per newly received text/location while no Activity is
+        // visible; the pure decision lives in shouldPostMessageNotification.
+        serviceScope.launch {
+            node.messages.collect { messages ->
+                for (message in messages) {
+                    if (!message.outgoing) {
+                        notifyIncoming(IncomingKind.TEXT, message.senderId, message.text, message.timestamp)
+                    }
+                }
+            }
+        }
+        serviceScope.launch {
+            node.locations.collect { locations ->
+                for (location in locations) {
+                    if (location.senderId != node.localNodeId) {
+                        notifyIncoming(IncomingKind.LOCATION, location.senderId, "", location.timestamp)
+                    }
                 }
             }
         }
@@ -178,14 +211,61 @@ class MeshService : Service() {
 
     // --- Running notification ---------------------------------------------------
 
-    private fun createRunningChannel() {
+    private fun createChannels() {
         // Low importance + ongoing: a quiet "mesh is alive" indicator, not an alert.
-        val channel = NotificationChannel(
+        val running = NotificationChannel(
             CHANNEL_RUNNING,
             "AirMesh running",
             NotificationManager.IMPORTANCE_LOW,
         ).apply { description = "Shows that the mesh is active and how many neighbors are live" }
-        notificationManager.createNotificationChannel(channel)
+        // Default importance: one notification per received text/location while no
+        // Activity is visible. Grouped so several collapse into a single entry.
+        val messages = NotificationChannel(
+            CHANNEL_MESSAGES,
+            "AirMesh messages",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply { description = "One notification per received text or location share" }
+        notificationManager.createNotificationChannel(running)
+        notificationManager.createNotificationChannel(messages)
+    }
+
+    /**
+     * Posts a per-message notification for one newly received item. Dedup by
+     * (kind, sender, timestamp): the StateFlows re-emit their whole list on every
+     * change, so only items not seen before are notified. The decision itself is
+     * pure and tested: nothing posts while an Activity is visible or the user has
+     * turned message notifications off in the Network tab.
+     */
+    private fun notifyIncoming(kind: IncomingKind, senderId: Int, text: String, timestampMs: Long) {
+        val key = "$kind:$senderId:$timestampMs"
+        if (!seenIncoming.add(key)) return
+        // Bound the dedup set; drop the oldest entries first (insertion order).
+        while (seenIncoming.size > MAX_SEEN_INCOMING) {
+            val oldest = seenIncoming.first()
+            if (!seenIncoming.remove(oldest)) break
+        }
+        if (!shouldPostMessageNotification(AppForeground.anyActivityVisible, _messageNotificationsEnabled.value)) return
+
+        val content = messageNotificationContent(kind, senderId, text)
+        val notification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
+            .setContentTitle(content.title)
+            .setContentText(content.body)
+            .setSmallIcon(R.drawable.ic_notification_mesh)
+            .setGroup(GROUP_MESSAGES)
+            .setAutoCancel(true)
+            .build()
+        // Hash of the dedup key: stable per item (a repost replaces its own slot),
+        // different items almost never collide.
+        notificationManager.notify(key.hashCode(), notification)
+    }
+
+    /** Network tab toggle: persist the choice and apply it to future posts. */
+    fun setMessageNotificationsEnabled(enabled: Boolean) {
+        _messageNotificationsEnabled.value = enabled
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_MESSAGE_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+        eventLog.log("service: message notifications ${if (enabled) "enabled" else "disabled"}")
     }
 
     private fun buildRunningNotification(neighborCount: Int): Notification {
@@ -215,5 +295,12 @@ class MeshService : Service() {
         const val ACTION_STOP = "com.airmesh.service.MESH_ACTION_STOP"
         private const val CHANNEL_RUNNING = "mesh_running"
         private const val RUNNING_NOTIFICATION_ID = 1
+        private const val CHANNEL_MESSAGES = "mesh_messages"
+        /** Group id so per-message notifications collapse into one entry. */
+        private const val GROUP_MESSAGES = "airmesh_incoming"
+        /** Max remembered incoming items for dedup; oldest are dropped first. */
+        private const val MAX_SEEN_INCOMING = 500
+        private const val PREFS_NAME = "airmesh_service"
+        private const val KEY_MESSAGE_NOTIFICATIONS_ENABLED = "message_notifications_enabled"
     }
 }
