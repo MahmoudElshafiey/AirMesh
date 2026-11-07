@@ -16,10 +16,10 @@ data class LocationFix(
     fun toPayload(): LocationPayload = LocationPayload(latitudeE6, longitudeE6, accuracyMeters)
 }
 
-/** How long [LocationProvider.requestFix] waits for a live GPS fix at most. */
-const val LOCATION_MAX_WAIT_MS = 20_000L
+/** How long [LocationProvider.requestFix] waits for a live fix (GPS or network) at most. */
+const val LOCATION_MAX_WAIT_MS = 45_000L
 
-/** Last-known fixes older than this are considered stale and never shared. */
+/** Fixes older than this are not used for the "X m from you" distance display in chat. */
 const val LOCATION_STALE_AFTER_MS = 5 * 60 * 1000L
 
 /**

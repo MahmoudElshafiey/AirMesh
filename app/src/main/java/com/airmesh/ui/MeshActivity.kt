@@ -22,9 +22,7 @@ import androidx.core.content.ContextCompat
 import com.airmesh.node.AirMeshNode
 import com.airmesh.node.AndroidLocationProvider
 import com.airmesh.node.EventLog
-import com.airmesh.node.LOCATION_MAX_WAIT_MS
 import com.airmesh.node.LocationFix
-import com.airmesh.node.LocationProvider
 import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
@@ -48,12 +46,14 @@ class MeshActivity : ComponentActivity() {
     private lateinit var node: AirMeshNode
     private lateinit var connector: WifiDirectConnector
     private lateinit var themeStore: ThemeModeStore
-    private lateinit var locationProvider: LocationProvider
+    private lateinit var locationProvider: AndroidLocationProvider
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** Progress of the current share request; IDLE means "nothing in flight". */
     private val shareStatus = mutableStateOf(LocationShareStatus.IDLE)
+    /** Specific reason of the last failed attempt, shown above the compose bar. */
+    private val shareFailureMessage = mutableStateOf<String?>(null)
     /** DEBUG builds only: when on, a fixed test point is shared instead of GPS. */
     private val useTestLocation = mutableStateOf(false)
     /** My own last fix — used to show "X m from you" on received location cards. */
@@ -97,7 +97,8 @@ class MeshActivity : ComponentActivity() {
         node = createAirMeshNode(this, nodeId, eventLog)
         connector = WifiDirectConnector(this, node.transport, eventLog)
         themeStore = SharedPreferencesThemeModeStore(this)
-        locationProvider = AndroidLocationProvider(this)
+        // Every phase of a share attempt lands in the event log.
+        locationProvider = AndroidLocationProvider(this, eventLog::log)
         // BuildConfig is not generated for this module; the debuggable flag is
         // the reliable way to tell a debug build apart.
         val showTestLocationToggle = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
@@ -210,6 +211,9 @@ class MeshActivity : ComponentActivity() {
 
     /** Tap handler: ask for location permissions first — only now, never at startup. */
     private fun requestLocationShare() {
+        // One attempt at a time — the pin is disabled while waiting; this guards
+        // against any other path re-entering mid-attempt and stacking requests.
+        if (shareStatus.value == LocationShareStatus.WAITING_FOR_FIX) return
         val missing = PermissionRequirements.locationPermissionsForSharing().filterNot(::isPermissionGranted)
         if (missing.isEmpty()) shareMyLocation() else locationPermissionLauncher.launch(missing.toTypedArray())
     }
@@ -217,6 +221,7 @@ class MeshActivity : ComponentActivity() {
     /** Waits for a fix (or the debug test point), then floods it as a LOCATION frame. */
     private fun shareMyLocation() {
         eventLog.log("location: share attempt started (source=${if (useTestLocation.value) "test-location" else "gps"})")
+        shareFailureMessage.value = null
         shareStatus.value = LocationShareStatus.WAITING_FOR_FIX
         uiScope.launch {
             val fix = try {
@@ -233,7 +238,10 @@ class MeshActivity : ComponentActivity() {
                 null
             }
             if (fix == null) {
-                eventLog.log("location: no usable fix after ${LOCATION_MAX_WAIT_MS / 1000}s — share failed")
+                // The provider already logged "location: failed: <reasons>"; show
+                // the same specific text in the UI instead of a generic one.
+                shareFailureMessage.value = locationProvider.lastFailureMessage
+                    ?: "no usable fix — try again, preferably outdoors"
                 shareStatus.value = LocationShareStatus.FAILED
                 return@launch
             }
