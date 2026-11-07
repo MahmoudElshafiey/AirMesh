@@ -7,9 +7,12 @@ import android.os.Bundle
 import android.os.StrictMode
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
@@ -65,8 +68,10 @@ class MeshActivity : ComponentActivity() {
             val neighbors by node.neighbors.collectAsState()
             val messages by node.messages.collectAsState()
             val events by eventLog.entries.collectAsState()
+            // Follows the system dark setting (the in-app theme mode lands later).
+            val dark = isSystemInDarkTheme()
 
-            MaterialTheme {
+            AirMeshTheme(darkTheme = dark) {
                 MeshScreen(
                     nodeId = nodeId,
                     connectorState = connectorState,
@@ -88,7 +93,29 @@ class MeshActivity : ComponentActivity() {
                     },
                 )
             }
+
+            // Re-apply the system bar styles whenever the effective theme flips,
+            // so status/navigation icons stay readable in both themes.
+            LaunchedEffect(dark) { applySystemBars(dark) }
         }
+    }
+
+    /**
+     * Edge-to-edge: content draws behind both bars (the Scaffold insets it), and
+     * the bar icon contrast is forced to match our theme — white icons on dark,
+     * black on light. Transparent scrims keep the bars see-through; on API 35+
+     * a non-automatic style would otherwise paint its scrim as the bar color.
+     */
+    private fun applySystemBars(dark: Boolean) {
+        // Scrims are ARGB ints; transparent keeps the bars see-through (on API 35+
+        // a non-automatic style would otherwise paint its scrim as the bar color).
+        val transparent = android.graphics.Color.TRANSPARENT
+        val style = if (dark) {
+            SystemBarStyle.dark(transparent)
+        } else {
+            SystemBarStyle.light(transparent, transparent)
+        }
+        enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
     }
 
     override fun onStart() {
