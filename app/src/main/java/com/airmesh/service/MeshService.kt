@@ -20,6 +20,7 @@ import com.airmesh.node.MeshMessage
 import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
+import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoFailureReason
 import com.airmesh.transport.AutoMeshAction
 import com.airmesh.transport.AutoMeshController
@@ -94,6 +95,17 @@ class MeshService : Service() {
     /** Whether auto-mesh is on (Network tab switch, default on). Persisted. */
     private val _autoMeshEnabled = MutableStateFlow(true)
     val autoMeshEnabled: StateFlow<Boolean> = _autoMeshEnabled.asStateFlow()
+
+    /** The controller's current state; drives the banner shown above every tab. */
+    private val _autoMeshState = MutableStateFlow<AutoMeshState>(AutoMeshState.Idle)
+    val autoMeshState: StateFlow<AutoMeshState> = _autoMeshState.asStateFlow()
+
+    /** Why [autoMeshState] is Idle even though auto-mesh is enabled (e.g. missing permission). */
+    private val _autoIdleReason = MutableStateFlow<String?>(null)
+    val autoIdleReason: StateFlow<String?> = _autoIdleReason.asStateFlow()
+
+    /** AirMesh-tagged peers from the DNS-SD directory; the Network tab lists them first. */
+    val airMeshPeers: StateFlow<List<AirMeshPeer>> get() = peerDirectory.peers
 
     private lateinit var notificationManager: NotificationManager
     /** Throttles running-notification updates to at most one per 2 s. */
@@ -347,9 +359,17 @@ class MeshService : Service() {
                 .putBoolean(KEY_AUTO_MESH_ENABLED, enabled)
                 .apply()
         }
-        val actions = autoController?.setAutoEnabled(enabled) ?: emptyList()
+        val controller = autoController
+        val actions = controller?.setAutoEnabled(enabled) ?: emptyList()
+        if (controller != null) syncAutoUi(controller)
         _eventLog.log("auto: ${if (enabled) "resumed" else "paused"} => ${actions.joinToString(", ") { describeAction(it) }}")
         actions.forEach(::executeAutoAction)
+    }
+
+    /** Publishes the controller's state/reason to the UI flows after a decision. */
+    private fun syncAutoUi(controller: AutoMeshController) {
+        _autoMeshState.value = controller.state
+        _autoIdleReason.value = controller.idleReason
     }
 
     fun clearLog() = _eventLog.clear()
@@ -368,6 +388,7 @@ class MeshService : Service() {
     private fun autoEvent(event: AutoMeshEvent, describe: String) {
         val controller = autoController ?: return
         val actions = controller.onEvent(event)
+        syncAutoUi(controller)
         if (actions.isNotEmpty() || event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.PeersChanged) {
             _eventLog.log(
                 "auto: ${describeState(controller)} <- $describe => " +

@@ -2,27 +2,35 @@ package com.airmesh.ui
 
 import android.net.wifi.p2p.WifiP2pDevice
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -33,8 +41,12 @@ import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
+import com.airmesh.transport.AirMeshPeer
+import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
+import com.airmesh.transport.autoMeshBannerText
+import kotlinx.coroutines.delay
 
 /** Bottom tabs. The selection is stored as an ordinal so it survives rotation. */
 enum class MeshTab(val label: String) { CHAT("Chat"), NETWORK("Network"), LOG("Log") }
@@ -99,6 +111,13 @@ fun MeshScreen(
     // the Network tab and persisted by the service.
     messageNotificationsEnabled: Boolean = true,
     onSetMessageNotificationsEnabled: (Boolean) -> Unit = {},
+    // Auto-mesh status shown above every tab, its "Auto connect" switch, and the
+    // DNS-SD peer list the Network tab's manual section sorts by.
+    autoMeshState: AutoMeshState = AutoMeshState.Idle,
+    autoIdleReason: String? = null,
+    airMeshPeers: List<AirMeshPeer> = emptyList(),
+    autoMeshEnabled: Boolean = true,
+    onSetAutoMeshEnabled: (Boolean) -> Unit = {},
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(MeshTab.CHAT.ordinal) }
     val tab = MeshTab.values()[selectedTab.coerceIn(0, MeshTab.values().size - 1)]
@@ -111,6 +130,17 @@ fun MeshScreen(
         selectedTab = request.target.tab.toMeshTab().ordinal
         if (request.target.messageKey == null || request.target.tab != NavTab.CHAT) onNavConsumed()
     }
+
+    // The banner's "Retrying in Ns" and join-waiting texts need a live clock;
+    // the state flows alone won't re-emit an unchanged state object each second.
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000L)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+    val autoBannerText = autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs)
 
     Scaffold(
         topBar = {
@@ -132,56 +162,109 @@ fun MeshScreen(
             }
         },
     ) { innerPadding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 // Keep the compose bar (and any content) above the keyboard.
                 .imePadding(),
         ) {
-            when (tab) {
-                MeshTab.CHAT ->
-                    MeshChatTab(
-                        nodeId = nodeId,
-                        messages = messages,
-                        locations = locations,
-                        myLastFix = myLastFix,
-                        shareStatus = shareStatus,
-                        onSendText = onSendText,
-                        onShareLocation = onShareLocation,
-                        useTestLocation = useTestLocation,
-                        showTestLocationToggle = showTestLocationToggle,
-                        shareDeadlineMs = shareDeadlineMs,
-                        onCancelShare = onCancelShare,
-                        shareFailureMessage = shareFailureMessage,
-                        myLatestShareWasCached = myLatestShareWasCached,
-                        onShareTestLocation = onShareTestLocation,
-                        scrollToKey = navRequest?.target?.messageKey,
-                        onScrollConsumed = onNavConsumed,
-                    )
-                MeshTab.NETWORK ->
-                    MeshNetworkTab(
-                        nodeId = nodeId,
-                        state = connectorState,
-                        neighbors = neighbors,
-                        onRequestPermissions = onRequestPermissions,
-                        onDiscover = onDiscover,
-                        onCreateGroup = onCreateGroup,
-                        onRetryTcp = onRetryTcp,
-                        onDisconnect = onDisconnect,
-                        onConnectPeer = onConnectPeer,
-                        onOpenPrototype = onOpenPrototype,
-                        themeMode = themeMode,
-                        onSetThemeMode = onSetThemeMode,
-                        showTestLocationToggle = showTestLocationToggle,
-                        useTestLocation = useTestLocation,
-                        onSetUseTestLocation = onSetUseTestLocation,
-                        messageNotificationsEnabled = messageNotificationsEnabled,
-                        onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
-                    )
-                MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
+            AutoMeshHeader(
+                bannerText = autoBannerText,
+                enabled = autoMeshEnabled,
+                onSetEnabled = onSetAutoMeshEnabled,
+            )
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                when (tab) {
+                    MeshTab.CHAT ->
+                        MeshChatTab(
+                            nodeId = nodeId,
+                            messages = messages,
+                            locations = locations,
+                            myLastFix = myLastFix,
+                            shareStatus = shareStatus,
+                            onSendText = onSendText,
+                            onShareLocation = onShareLocation,
+                            useTestLocation = useTestLocation,
+                            showTestLocationToggle = showTestLocationToggle,
+                            shareDeadlineMs = shareDeadlineMs,
+                            onCancelShare = onCancelShare,
+                            shareFailureMessage = shareFailureMessage,
+                            myLatestShareWasCached = myLatestShareWasCached,
+                            onShareTestLocation = onShareTestLocation,
+                            scrollToKey = navRequest?.target?.messageKey,
+                            onScrollConsumed = onNavConsumed,
+                        )
+                    MeshTab.NETWORK ->
+                        MeshNetworkTab(
+                            nodeId = nodeId,
+                            state = connectorState,
+                            neighbors = neighbors,
+                            onRequestPermissions = onRequestPermissions,
+                            onDiscover = onDiscover,
+                            onCreateGroup = onCreateGroup,
+                            onRetryTcp = onRetryTcp,
+                            onDisconnect = onDisconnect,
+                            onConnectPeer = onConnectPeer,
+                            onOpenPrototype = onOpenPrototype,
+                            themeMode = themeMode,
+                            onSetThemeMode = onSetThemeMode,
+                            airMeshPeers = airMeshPeers,
+                            showTestLocationToggle = showTestLocationToggle,
+                            useTestLocation = useTestLocation,
+                            onSetUseTestLocation = onSetUseTestLocation,
+                            messageNotificationsEnabled = messageNotificationsEnabled,
+                            onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
+                        )
+                    MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
+                }
             }
         }
+    }
+}
+
+/**
+ * Header shown above every tab: the auto-mesh status banner (when there is one)
+ * and the "Auto connect" switch. The service persists the switch; manual Wi-Fi
+ * Direct actions only pause auto-mesh temporarily until it is turned back on.
+ * Internal (not private) so the design-time previews can render it directly.
+ */
+@Composable
+internal fun AutoMeshHeader(bannerText: String?, enabled: Boolean, onSetEnabled: (Boolean) -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (bannerText != null) AutoMeshBanner(bannerText)
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Auto connect", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Join or create a group automatically when other AirMesh phones are nearby.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = enabled, onCheckedChange = onSetEnabled)
+            }
+        }
+    }
+}
+
+/** One-line auto-mesh status; the text itself is pure and JVM-tested. */
+@Composable
+fun AutoMeshBanner(text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.bodyMedium)
     }
 }
 

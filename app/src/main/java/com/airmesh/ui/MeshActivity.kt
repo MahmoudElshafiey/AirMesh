@@ -206,6 +206,10 @@ class MeshActivity : ComponentActivity() {
                         val locations by service.locations.collectAsState()
                         val events by service.events.collectAsState()
                         val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsState()
+                        val autoMeshState by service.autoMeshState.collectAsState()
+                        val autoIdleReason by service.autoIdleReason.collectAsState()
+                        val airMeshPeers by service.airMeshPeers.collectAsState()
+                        val autoMeshEnabled by service.autoMeshEnabled.collectAsState()
 
                         MeshScreen(
                             nodeId = service.nodeId,
@@ -252,6 +256,11 @@ class MeshActivity : ComponentActivity() {
                             },
                             messageNotificationsEnabled = messageNotificationsEnabled,
                             onSetMessageNotificationsEnabled = service::setMessageNotificationsEnabled,
+                            autoMeshState = autoMeshState,
+                            autoIdleReason = autoIdleReason,
+                            airMeshPeers = airMeshPeers,
+                            autoMeshEnabled = autoMeshEnabled,
+                            onSetAutoMeshEnabled = service::setAutoMeshEnabled,
                         )
                     }
                 }

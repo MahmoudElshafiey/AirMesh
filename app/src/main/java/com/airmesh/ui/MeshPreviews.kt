@@ -2,6 +2,7 @@ package com.airmesh.ui
 
 import android.net.wifi.p2p.WifiP2pDevice
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +19,7 @@ import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
 import com.airmesh.routing.Router
+import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
 
@@ -56,6 +58,9 @@ private val previewState = ConnectorState(
 )
 
 private val previewNeighbors = setOf(2, 3)
+
+// Same MAC as [previewPeer], so the manual peer list shows it tagged "AirMesh #2".
+private val previewAirMeshPeers = listOf(AirMeshPeer("AA:BB:CC:DD:EE:FF", nodeId = 2, isGroupOwner = true))
 
 private val previewEvents = listOf(
     LogEntry(1_700_000_000_000L, "P2P: group formed, role=GROUP_OWNER"),
@@ -194,6 +199,7 @@ private fun NetworkTabLightPreview() = ThemedTabPreview(darkTheme = false) {
         onOpenPrototype = {},
         themeMode = ThemeMode.SYSTEM,
         onSetThemeMode = {},
+        airMeshPeers = previewAirMeshPeers,
         // Debug card: off here, armed in the dark preview.
         showTestLocationToggle = true,
         useTestLocation = false,
@@ -231,4 +237,63 @@ private fun LogTabLightPreview() = ThemedTabPreview(darkTheme = false) {
 @Composable
 private fun LogTabDarkPreview() = ThemedTabPreview(darkTheme = true) {
     MeshLogTab(events = previewEvents, onClearLog = {})
+}
+
+/** The manual card expanded: Discover / Create group / Retry TCP + tagged peer list. */
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 320, name = "Network · advanced expanded")
+@Composable
+private fun NetworkTabAdvancedExpandedPreview() = ThemedTabPreview(darkTheme = false) {
+    Column(modifier = Modifier.padding(16.dp)) {
+        AdvancedManualCard(
+            state = previewState,
+            airMeshPeers = previewAirMeshPeers,
+            onDiscover = {},
+            onCreateGroup = {},
+            onRetryTcp = {},
+            onConnectPeer = {},
+            initiallyExpanded = true,
+        )
+    }
+}
+
+/** Every banner text the auto-mesh controller can produce, in order of use. */
+private val bannerPreviewTexts = listOf(
+    "Searching for nearby AirMesh phones…",
+    "Creating a group — waiting for another phone to join",
+    "Connecting to #7…",
+    "Waiting for the other phone to accept the connection request",
+    "Connected · 2 neighbors",
+    "Retrying in 5s — connect failed (other)",
+    "Wi-Fi Direct permission not granted",
+)
+
+@Composable
+private fun BannerPreviewContent() {
+    Column(
+        modifier = Modifier.padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        bannerPreviewTexts.forEach { AutoMeshBanner(it) }
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "Auto-mesh banners · light")
+@Composable
+private fun BannerLightPreview() = ThemedTabPreview(darkTheme = false) {
+    BannerPreviewContent()
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "Auto-mesh banners · dark")
+@Composable
+private fun BannerDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    BannerPreviewContent()
+}
+
+/** The full header: a banner plus the Auto connect switch. */
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 200, name = "Auto connect · header")
+@Composable
+private fun AutoMeshHeaderPreview() = ThemedTabPreview(darkTheme = false) {
+    Column(modifier = Modifier.padding(16.dp)) {
+        AutoMeshHeader(bannerText = "Searching for nearby AirMesh phones…", enabled = true, onSetEnabled = {})
+    }
 }

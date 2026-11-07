@@ -3,6 +3,7 @@ package com.airmesh.ui
 import android.net.wifi.p2p.WifiP2pDevice
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,11 +27,16 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
 
@@ -57,6 +63,8 @@ fun MeshNetworkTab(
     onOpenPrototype: () -> Unit,
     themeMode: ThemeMode,
     onSetThemeMode: (ThemeMode) -> Unit,
+    // AirMesh-tagged peers from the DNS-SD directory; listed first in the manual section.
+    airMeshPeers: List<AirMeshPeer> = emptyList(),
     // Debug builds only: a clearly-labeled toggle that shares a fixed point.
     showTestLocationToggle: Boolean = false,
     useTestLocation: Boolean = false,
@@ -80,7 +88,7 @@ fun MeshNetworkTab(
 
         StatusCard(nodeId, state)
 
-        // 45% width per button => exactly two equal-width buttons per row.
+        // The common path is automatic; only the always-useful actions stay out.
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -88,29 +96,22 @@ fun MeshNetworkTab(
             Button(onClick = onRequestPermissions, modifier = ActionButtonModifier) {
                 Text("Permissions", maxLines = 1)
             }
-            Button(onClick = onDiscover, modifier = ActionButtonModifier) {
-                Text("Discover", maxLines = 1)
-            }
-            Button(onClick = onCreateGroup, modifier = ActionButtonModifier) {
-                Text("Create group", maxLines = 1)
-            }
             OutlinedButton(onClick = onDisconnect, modifier = ActionButtonModifier) {
                 Text("Disconnect", maxLines = 1)
-            }
-            // Only meaningful for a client waiting on the owner's TCP port.
-            OutlinedButton(
-                onClick = onRetryTcp,
-                enabled = state.role == P2pRole.CLIENT && state.groupFormed,
-                modifier = ActionButtonModifier,
-            ) {
-                Text("Retry TCP", maxLines = 1)
             }
             TextButton(onClick = onOpenPrototype, modifier = ActionButtonModifier) {
                 Text("Prototype", maxLines = 1)
             }
         }
 
-        PeersSection(state, onConnectPeer)
+        AdvancedManualCard(
+            state = state,
+            airMeshPeers = airMeshPeers,
+            onDiscover = onDiscover,
+            onCreateGroup = onCreateGroup,
+            onRetryTcp = onRetryTcp,
+            onConnectPeer = onConnectPeer,
+        )
 
         NeighborsSection(neighbors)
 
@@ -130,6 +131,64 @@ fun MeshNetworkTab(
 private val ActionButtonModifier = Modifier
     .fillMaxWidth(0.45f)
     .heightIn(min = MinTouch)
+
+/**
+ * Collapsible card with the manual Wi-Fi Direct controls (Discover, Create group,
+ * Retry TCP) and the raw peer list. Auto-mesh covers the common path, so this
+ * starts collapsed; previews pass initiallyExpanded = true to show its content.
+ * Internal (not private) so the design-time previews can render it expanded.
+ */
+@Composable
+internal fun AdvancedManualCard(
+    state: ConnectorState,
+    airMeshPeers: List<AirMeshPeer>,
+    onDiscover: () -> Unit,
+    onCreateGroup: () -> Unit,
+    onRetryTcp: () -> Unit,
+    onConnectPeer: (WifiP2pDevice) -> Unit,
+    initiallyExpanded: Boolean = false,
+) {
+    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = MinTouch)
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Advanced / manual", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                // No icon dependency in this project; a text chevron is enough.
+                Text(if (expanded) "▴" else "▾")
+            }
+            if (expanded) {
+                Column(modifier = Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(onClick = onDiscover, modifier = ActionButtonModifier) {
+                            Text("Discover", maxLines = 1)
+                        }
+                        Button(onClick = onCreateGroup, modifier = ActionButtonModifier) {
+                            Text("Create group", maxLines = 1)
+                        }
+                        // Only meaningful for a client waiting on the owner's TCP port.
+                        OutlinedButton(
+                            onClick = onRetryTcp,
+                            enabled = state.role == P2pRole.CLIENT && state.groupFormed,
+                            modifier = ActionButtonModifier,
+                        ) {
+                            Text("Retry TCP", maxLines = 1)
+                        }
+                    }
+                    PeersSection(state, airMeshPeers, onConnectPeer)
+                }
+            }
+        }
+    }
+}
 
 /** System / Light / Dark selector; the change applies immediately in the activity. */
 @OptIn(ExperimentalMaterial3Api::class) // Segmented buttons are experimental in this M3 version
@@ -207,13 +266,15 @@ private fun StatusRow(label: String, value: String) {
 }
 
 /** Discovered peers with a Connect button; disabled (with the reason shown)
- * while a group is formed or a connect request is in flight. */
+ * while a group is formed or a connect request is in flight. Peers that also
+ * advertise via DNS-SD are AirMesh phones and are listed first, tagged with
+ * their node id (and "group owner" when they own a group). */
 @Composable
-private fun PeersSection(state: ConnectorState, onConnectPeer: (WifiP2pDevice) -> Unit) {
+private fun PeersSection(state: ConnectorState, airMeshPeers: List<AirMeshPeer>, onConnectPeer: (WifiP2pDevice) -> Unit) {
     Text("Discovered peers (${state.peers.size})", style = MaterialTheme.typography.titleSmall)
     if (state.peers.isEmpty()) {
         Text(
-            "No peers yet — tap Discover on both phones.",
+            "No peers yet — auto-mesh is searching, or tap Discover.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -224,8 +285,14 @@ private fun PeersSection(state: ConnectorState, onConnectPeer: (WifiP2pDevice) -
         state.connecting -> "Connect in progress…"
         else -> null
     }
+    // AirMesh-tagged peers first: they are the phones we can actually mesh with.
+    val tagged = airMeshPeers.associateBy { it.deviceAddress }
+    val sorted = state.peers.sortedWith(
+        compareByDescending<WifiP2pDevice> { tagged[it.deviceAddress] != null }.thenBy { it.deviceName },
+    )
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        state.peers.forEach { device ->
+        sorted.forEach { device ->
+            val peer = tagged[device.deviceAddress]
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -236,6 +303,14 @@ private fun PeersSection(state: ConnectorState, onConnectPeer: (WifiP2pDevice) -
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (peer != null) {
+                        // The DNS-SD ad tells us this phone runs AirMesh and its node id.
+                        Text(
+                            "AirMesh #${peer.nodeId}${if (peer.isGroupOwner) " · group owner" else ""}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                     Text(
                         "${device.deviceAddress}  ${deviceStatusLabel(device.status)}",
                         style = MaterialTheme.typography.bodySmall,
