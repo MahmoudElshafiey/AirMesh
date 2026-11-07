@@ -20,8 +20,18 @@ import com.airmesh.node.MeshMessage
 import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
+import com.airmesh.transport.AutoFailureReason
+import com.airmesh.transport.AutoMeshAction
+import com.airmesh.transport.AutoMeshController
+import com.airmesh.transport.AutoMeshEvent
+import com.airmesh.transport.AutoMeshListener
+import com.airmesh.transport.AutoMeshRole
+import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
+import com.airmesh.transport.P2pRole
+import com.airmesh.transport.PeerDirectory
 import com.airmesh.transport.WifiDirectConnector
+import com.airmesh.transport.WifiP2pPeerDirectory
 import com.airmesh.ui.EXTRA_MESSAGE_KEY
 import com.airmesh.ui.EXTRA_TAB
 import com.airmesh.ui.MeshActivity
@@ -30,9 +40,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -53,6 +65,12 @@ class MeshService : Service() {
     private lateinit var node: AirMeshNode
     private lateinit var connector: WifiDirectConnector
 
+    /** DNS-SD directory of nearby AirMesh phones; created in [onCreate]. */
+    private lateinit var peerDirectory: PeerDirectory
+
+    /** The auto-mesh state machine; created once our own MAC is known. */
+    private var autoController: AutoMeshController? = null
+
     /** This device's mesh id; set in [onCreate]. */
     val nodeId: Int get() = node.localNodeId
 
@@ -72,6 +90,10 @@ class MeshService : Service() {
     val locations: StateFlow<List<MeshLocation>> get() = node.locations
     val events: StateFlow<List<LogEntry>> get() = _eventLog.entries
     val connectorState: StateFlow<ConnectorState> get() = connector.state
+
+    /** Whether auto-mesh is on (Network tab switch, default on). Persisted. */
+    private val _autoMeshEnabled = MutableStateFlow(true)
+    val autoMeshEnabled: StateFlow<Boolean> = _autoMeshEnabled.asStateFlow()
 
     private lateinit var notificationManager: NotificationManager
     /** Throttles running-notification updates to at most one per 2 s. */
@@ -100,9 +122,25 @@ class MeshService : Service() {
         )
         connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
 
+        // Auto-mesh: a DNS-SD directory of nearby AirMesh phones plus the pure
+        // state machine that decides when to join or create groups. The controller
+        // is created lazily once our own MAC is known (selfAddress collector below).
+        peerDirectory = WifiP2pPeerDirectory(
+            applicationContext,
+            getSelfAddress = { connector.selfAddress.value },
+            log = { line -> _eventLog.log(line) },
+        )
+        connector.autoMeshListener = object : AutoMeshListener {
+            override fun onConnectFailed(reason: AutoFailureReason) =
+                autoEvent(AutoMeshEvent.ConnectFailed(reason), "connect failed (${reason.name.lowercase()})")
+        }
+
         // Per-message notifications are on by default; the Network tab toggle persists the choice.
         _messageNotificationsEnabled.value = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_MESSAGE_NOTIFICATIONS_ENABLED, true)
+        // Auto-mesh is on by default; the Network tab switch persists the choice.
+        _autoMeshEnabled.value = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUTO_MESH_ENABLED, true)
 
         // The system requires startForeground within 5 s of startForegroundService;
         // onCreate is well inside that window.
@@ -133,6 +171,80 @@ class MeshService : Service() {
                     if (location.senderId != node.localNodeId) {
                         notifyIncoming(IncomingKind.LOCATION, location.senderId, "", location.timestamp)
                     }
+                }
+            }
+        }
+
+        // --- Auto-mesh wiring ---------------------------------------------------
+        // One tick per second drives backoff expiry, join timeouts and the takeover deadline.
+        serviceScope.launch {
+            while (isActive) {
+                delay(1_000L)
+                autoEvent(AutoMeshEvent.Tick, "tick")
+            }
+        }
+
+        // Every change in the visible AirMesh peer list feeds the controller.
+        serviceScope.launch {
+            peerDirectory.peers.collect { peers ->
+                autoEvent(AutoMeshEvent.PeersChanged(peers), "peers=${peers.size}")
+            }
+        }
+
+        // Group formation, role changes and permission changes drive the controller;
+        // while in a group we keep our ad current with the owner flag set so other
+        // phones know exactly whom to join.
+        serviceScope.launch {
+            var lastRole = connector.state.value.role
+            var lastPermReason: String? = "unset" // sentinel: the first emission always feeds the controller
+            connector.state.collect { cs ->
+                val permReason = autoMeshPermissionReason(
+                    cs.wifiDirectPermissionGranted,
+                    cs.localNetworkRequired,
+                    cs.localNetworkGranted,
+                )
+                if (permReason != lastPermReason) {
+                    lastPermReason = permReason
+                    autoEvent(AutoMeshEvent.PermissionsChanged(permReason == null, permReason), "permissions changed")
+                }
+
+                val newRole = cs.role
+                if (newRole != lastRole) {
+                    val wasInGroup = lastRole != P2pRole.NONE
+                    lastRole = newRole
+                    when {
+                        // A role change while still formed (owner <-> client) re-forms too.
+                        cs.groupFormed && newRole != P2pRole.NONE ->
+                            autoEvent(AutoMeshEvent.GroupFormed(autoRoleOf(newRole)), "group formed as ${newRole.name.lowercase()}")
+                        wasInGroup -> autoEvent(AutoMeshEvent.GroupGone, "group gone")
+                    }
+                }
+
+                if (connector.selfAddress.value != null) {
+                    peerDirectory.startAdvertising(node.localNodeId, cs.groupFormed && newRole == P2pRole.GROUP_OWNER)
+                }
+            }
+        }
+
+        // The controller needs our own MAC for the symmetric election; create it on
+        // the first real address and feed a snapshot of the current world so its
+        // first decision is based on fresh data.
+        serviceScope.launch {
+            connector.selfAddress.collect { address ->
+                if (address == null) return@collect
+                if (autoController == null) {
+                    autoController = AutoMeshController(
+                        myNodeId = node.localNodeId,
+                        myDeviceAddress = address,
+                        autoEnabled = _autoMeshEnabled.value,
+                    )
+                }
+                val cs = connector.state.value
+                val permReason = autoMeshPermissionReason(cs.wifiDirectPermissionGranted, cs.localNetworkRequired, cs.localNetworkGranted)
+                autoEvent(AutoMeshEvent.PermissionsChanged(permReason == null, permReason), "initial permission snapshot")
+                autoEvent(AutoMeshEvent.PeersChanged(peerDirectory.peers.value), "initial peer snapshot")
+                if (cs.groupFormed && cs.role != P2pRole.NONE) {
+                    autoEvent(AutoMeshEvent.GroupFormed(autoRoleOf(cs.role)), "group already formed as ${cs.role.name.lowercase()}")
                 }
             }
         }
@@ -178,22 +290,127 @@ class MeshService : Service() {
     suspend fun sendLocation(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Boolean =
         node.sendLocation(latitudeE6, longitudeE6, accuracyMeters)
 
-    fun discover() = connector.discover()
-    fun createGroup() = connector.createGroup()
-    fun retryConnect() = connector.retryConnect()
-    fun connect(device: WifiP2pDevice) = connector.connect(device)
+    // Every manual Wi-Fi Direct action pauses auto-mesh first, so the two do not
+    // fight over the radio (rule: manual control wins until auto is re-enabled).
+
+    fun discover() {
+        pauseAutoForManualUse()
+        connector.discover()
+    }
+
+    fun createGroup() {
+        pauseAutoForManualUse()
+        connector.createGroup()
+    }
+
+    fun retryConnect() {
+        pauseAutoForManualUse()
+        connector.retryConnect()
+    }
+
+    fun connect(device: WifiP2pDevice) {
+        pauseAutoForManualUse()
+        connector.connect(device)
+    }
 
     /**
      * The UI's Disconnect button: removes the P2P group and closes the transport,
      * but keeps the node (and this service) alive so a new group can be formed
      * without restarting anything.
      */
-    fun disconnectFromGroup() = connector.disconnect()
+    fun disconnectFromGroup() {
+        pauseAutoForManualUse()
+        connector.disconnect()
+    }
+
+    /**
+     * A manual action pauses auto-mesh for the rest of this session. Deliberately
+     * NOT persisted: one tap on Discover must not kill auto-mesh across app
+     * restarts — the Network tab switch is the persistent control.
+     */
+    private fun pauseAutoForManualUse() {
+        if (!_autoMeshEnabled.value) return
+        _eventLog.log("auto: paused by a manual action (turn Auto connect back on to resume)")
+        applyAutoMeshEnabled(false, persist = false)
+    }
+
+    /** Network tab switch: persist the choice and pause/resume the controller. */
+    fun setAutoMeshEnabled(enabled: Boolean) {
+        if (_autoMeshEnabled.value == enabled) return
+        applyAutoMeshEnabled(enabled, persist = true)
+    }
+
+    private fun applyAutoMeshEnabled(enabled: Boolean, persist: Boolean) {
+        _autoMeshEnabled.value = enabled
+        if (persist) {
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putBoolean(KEY_AUTO_MESH_ENABLED, enabled)
+                .apply()
+        }
+        val actions = autoController?.setAutoEnabled(enabled) ?: emptyList()
+        _eventLog.log("auto: ${if (enabled) "resumed" else "paused"} => ${actions.joinToString(", ") { describeAction(it) }}")
+        actions.forEach(::executeAutoAction)
+    }
 
     fun clearLog() = _eventLog.clear()
 
     /** Applies a batch of permission grant results to the connector's state. */
     fun onPermissionResults(results: Map<String, Boolean>) = connector.onPermissionResults(results)
+
+    // --- Auto-mesh event funnel -------------------------------------------------
+
+    /**
+     * Feeds [event] to the controller (once it exists), logs every decision with an
+     * "auto:" prefix — state, event, actions — and executes the returned actions.
+     * Tick/PeersChanged are only logged when they produce actions; otherwise a line
+     * per second would drown the log.
+     */
+    private fun autoEvent(event: AutoMeshEvent, describe: String) {
+        val controller = autoController ?: return
+        val actions = controller.onEvent(event)
+        if (actions.isNotEmpty() || event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.PeersChanged) {
+            _eventLog.log(
+                "auto: ${describeState(controller)} <- $describe => " +
+                    "${actions.joinToString(", ") { describeAction(it) }}",
+            )
+        }
+        actions.forEach(::executeAutoAction)
+    }
+
+    /** Executes one controller action against the connector and peer directory. */
+    private fun executeAutoAction(action: AutoMeshAction) {
+        when (action) {
+            is AutoMeshAction.StartDiscovery -> peerDirectory.setDiscovering(true)
+            is AutoMeshAction.StopDiscovery -> peerDirectory.setDiscovering(false)
+            is AutoMeshAction.CreateGroup -> connector.createGroup()
+            is AutoMeshAction.ConnectTo -> connector.connectByAddress(action.deviceAddress)
+            is AutoMeshAction.RemoveGroup -> connector.removeGroup("auto-mesh: clearing a stale group before retry")
+        }
+    }
+
+    private fun describeState(controller: AutoMeshController): String = when (val s = controller.state) {
+        is AutoMeshState.Idle -> "Idle${controller.idleReason?.let { " ($it)" } ?: ""}"
+        is AutoMeshState.Searching -> "Searching"
+        is AutoMeshState.Creating -> "Creating"
+        is AutoMeshState.Joining -> "Joining(#${s.targetNodeId} ${s.targetAddress})"
+        is AutoMeshState.Owner -> "Owner"
+        is AutoMeshState.Client -> "Client"
+        is AutoMeshState.Backoff -> "Backoff(${s.reason})"
+    }
+
+    private fun describeAction(action: AutoMeshAction): String = when (action) {
+        is AutoMeshAction.StartDiscovery -> "StartDiscovery"
+        is AutoMeshAction.StopDiscovery -> "StopDiscovery"
+        is AutoMeshAction.CreateGroup -> "CreateGroup"
+        is AutoMeshAction.ConnectTo -> "ConnectTo(${action.deviceAddress})"
+        is AutoMeshAction.RemoveGroup -> "RemoveGroup"
+    }
+
+    /** Maps the connector's role to the controller's (the service is the boundary). */
+    private fun autoRoleOf(role: P2pRole): AutoMeshRole = when (role) {
+        P2pRole.GROUP_OWNER -> AutoMeshRole.OWNER
+        else -> AutoMeshRole.CLIENT
+    }
 
     // --- Teardown --------------------------------------------------------------
 
@@ -214,6 +431,9 @@ class MeshService : Service() {
 
     override fun onDestroy() {
         releaseMesh(StopReason.SERVICE_DESTROYED)
+        // Terminal for the directory too: it closes its own P2P channel, and a new
+        // service instance gets a fresh one on restart.
+        peerDirectory.stop()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -337,5 +557,7 @@ class MeshService : Service() {
         private const val MAX_SEEN_INCOMING = 500
         private const val PREFS_NAME = "airmesh_service"
         private const val KEY_MESSAGE_NOTIFICATIONS_ENABLED = "message_notifications_enabled"
+        /** Network tab switch: whether auto-mesh is on (default true). */
+        private const val KEY_AUTO_MESH_ENABLED = "auto_mesh_enabled"
     }
 }

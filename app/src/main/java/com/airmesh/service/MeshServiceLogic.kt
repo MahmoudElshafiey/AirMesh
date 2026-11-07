@@ -131,3 +131,22 @@ fun shouldRemoveGroupOnStop(reason: StopReason): Boolean = when (reason) {
     StopReason.USER_DISCONNECT, StopReason.NOTIFICATION_STOP, StopReason.SERVICE_DESTROYED -> true
     StopReason.ACTIVITY_STOPPED, StopReason.SCREEN_OFF -> false
 }
+
+// --- Auto-mesh permission reason --------------------------------------------
+
+/**
+ * Why auto-mesh cannot run because of a missing permission, or null when every
+ * required one is granted. The Wi-Fi Direct permission (NEARBY_WIFI_DEVICES on
+ * Android 13+, location below) always blocks; ACCESS_LOCAL_NETWORK additionally
+ * blocks on Android 17 (SDK >= 37). The Wi-Fi Direct reason wins when both are
+ * missing, because it is the more fundamental one.
+ */
+fun autoMeshPermissionReason(
+    wifiDirectGranted: Boolean,
+    localNetworkRequired: Boolean,
+    localNetworkGranted: Boolean,
+): String? = when {
+    !wifiDirectGranted -> "Wi-Fi Direct permission not granted"
+    localNetworkRequired && !localNetworkGranted -> "Local Network permission not granted (Android 17)"
+    else -> null
+}

@@ -2,6 +2,7 @@ package com.airmesh.service
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -185,5 +186,38 @@ class MeshServiceLogicTest {
     @Test
     fun `screen off never removes the group`() {
         assertFalse(shouldRemoveGroupOnStop(StopReason.SCREEN_OFF))
+    }
+
+    // --- autoMeshPermissionReason ---------------------------------------------
+
+    @Test
+    fun `auto mesh is blocked when the wifi direct permission is missing`() {
+        assertEquals(
+            "Wi-Fi Direct permission not granted",
+            autoMeshPermissionReason(wifiDirectGranted = false, localNetworkRequired = false, localNetworkGranted = true),
+        )
+    }
+
+    @Test
+    fun `the wifi direct reason wins when both permissions are missing`() {
+        assertEquals(
+            "Wi-Fi Direct permission not granted",
+            autoMeshPermissionReason(wifiDirectGranted = false, localNetworkRequired = true, localNetworkGranted = false),
+        )
+    }
+
+    @Test
+    fun `auto mesh is blocked on Android 17 when the local network permission is missing`() {
+        assertEquals(
+            "Local Network permission not granted (Android 17)",
+            autoMeshPermissionReason(wifiDirectGranted = true, localNetworkRequired = true, localNetworkGranted = false),
+        )
+    }
+
+    @Test
+    fun `no reason when every required permission is granted`() {
+        assertNull(autoMeshPermissionReason(true, true, true))
+        // Local network is irrelevant on Android versions below 17.
+        assertNull(autoMeshPermissionReason(true, false, false))
     }
 }

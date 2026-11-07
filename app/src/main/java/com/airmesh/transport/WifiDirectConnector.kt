@@ -39,10 +39,21 @@ enum class P2pRole {
     CLIENT,
 }
 
+/**
+ * Failure reports for the auto-mesh controller: a connect() or createGroup()
+ * request failed and the controller must decide whether to retry (BUSY gets one
+ * special retry) or back off. The service wires this to AutoMeshEvent.ConnectFailed.
+ */
+interface AutoMeshListener {
+    fun onConnectFailed(reason: AutoFailureReason)
+}
+
 /** UI-facing snapshot of the Wi-Fi Direct side. */
 data class ConnectorState(
     /** True when every runtime permission required on this device is granted. */
     val permissionsGranted: Boolean = false,
+    /** The Wi-Fi Direct permission alone (NEARBY_WIFI_DEVICES or location). */
+    val wifiDirectPermissionGranted: Boolean = false,
     val p2pEnabled: Boolean? = null,
     val peers: List<WifiP2pDevice> = emptyList(),
     val role: P2pRole = P2pRole.NONE,
@@ -92,6 +103,13 @@ class WifiDirectConnector(
 
     private val _state = MutableStateFlow(ConnectorState())
     val state: StateFlow<ConnectorState> = _state.asStateFlow()
+
+    /** Our own MAC, learned from THIS_DEVICE_CHANGED; null until the first report. */
+    private val _selfAddress = MutableStateFlow<String?>(null)
+    val selfAddress: StateFlow<String?> = _selfAddress.asStateFlow()
+
+    /** Set by the service so auto-mesh can react to failed connect/create attempts. */
+    var autoMeshListener: AutoMeshListener? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -240,6 +258,7 @@ class WifiDirectConnector(
         _state.update { state ->
             state.copy(
                 permissionsGranted = required.all { results[it] == true },
+                wifiDirectPermissionGranted = results[requiredPermission()] == true,
                 localNetworkRequired = PermissionRequirements.ACCESS_LOCAL_NETWORK in required,
                 localNetworkGranted = results[PermissionRequirements.ACCESS_LOCAL_NETWORK] == true,
             )
@@ -306,9 +325,24 @@ class WifiDirectConnector(
             override fun onFailure(reason: Int) {
                 _state.update { it.copy(connecting = false) }
                 log("connect: onFailure ${errorName(reason)}")
+                autoMeshListener?.onConnectFailed(autoFailureReason(reason))
             }
         })
     }
+
+    /**
+     * Connects to a peer by MAC address (the auto-mesh controller only knows the
+     * address from the DNS-SD ad, not a WifiP2pDevice). Delegates to [connect].
+     */
+    @SuppressLint("MissingPermission")
+    fun connectByAddress(deviceAddress: String) {
+        val device = WifiP2pDevice().apply { this.deviceAddress = deviceAddress }
+        connect(device)
+    }
+
+    /** Public wrapper so the auto-mesh controller can clear a stale group before retrying. */
+    @SuppressLint("MissingPermission")
+    fun removeGroup(reason: String) = removeGroupForCleanup(reason)
 
     @SuppressLint("MissingPermission")
     fun createGroup() {
@@ -344,11 +378,16 @@ class WifiDirectConnector(
                     manager.removeGroup(currentChannel, object : WifiP2pManager.ActionListener {
                         override fun onSuccess() = doCreateGroup(allowBusyRetry = false)
 
-                        override fun onFailure(r: Int) =
+                        override fun onFailure(r: Int) {
                             log("removeGroup after BUSY failed ${errorName(r)} — giving up on createGroup")
+                            autoMeshListener?.onConnectFailed(AutoFailureReason.OTHER)
+                        }
                     })
                 } else {
                     log("createGroup: onFailure ${errorName(reason)}")
+                    // Final give-up (non-BUSY, or a second BUSY after the retry):
+                    // let the controller back off and try again later.
+                    autoMeshListener?.onConnectFailed(autoFailureReason(reason))
                 }
             }
         })
@@ -461,6 +500,10 @@ class WifiDirectConnector(
             "  this device: ${device.deviceName} ${device.deviceAddress} " +
                 "status=${deviceStatus(device.status)}",
         )
+        // Some OEMs report a placeholder MAC; keep the last real address instead.
+        if (device.deviceAddress.isNotEmpty() && device.deviceAddress != PEER_PLACEHOLDER_ADDRESS) {
+            _selfAddress.value = device.deviceAddress
+        }
     }
 
     private fun onConnectionInfo(info: WifiP2pInfo) {
@@ -791,6 +834,10 @@ class WifiDirectConnector(
         WifiP2pManager.ERROR -> "ERROR"
         else -> "UNKNOWN($code)"
     }
+
+    /** BUSY gets one special retry in the controller; everything else is a plain failure. */
+    private fun autoFailureReason(code: Int): AutoFailureReason =
+        if (code == WifiP2pManager.BUSY) AutoFailureReason.BUSY else AutoFailureReason.OTHER
 
     private fun deviceStatus(status: Int): String = when (status) {
         WifiP2pDevice.AVAILABLE -> "AVAILABLE"
