@@ -79,32 +79,78 @@ private fun ThemedTabPreview(darkTheme: Boolean, content: @Composable () -> Unit
     }
 }
 
-@Preview(name = "Chat · light")
+/** All chat previews share a 360dp-wide phone canvas (the reported device class). */
+private const val PREVIEW_WIDTH_DP = 360
+private const val PREVIEW_HEIGHT_DP = 720
+
 @Composable
-private fun ChatTabLightPreview() = ThemedTabPreview(darkTheme = false) {
+private fun ChatTabPreviewContent(emptyList: Boolean, testLocationOn: Boolean = false) {
     MeshChatTab(
         nodeId = 1,
-        messages = previewMessages,
-        locations = previewLocations,
+        messages = if (emptyList) emptyList() else previewMessages,
+        locations = if (emptyList) emptyList() else previewLocations,
         myLastFix = previewMyFix,
         shareStatus = LocationShareStatus.IDLE,
         onSendText = {},
         onShareLocation = {},
+        useTestLocation = testLocationOn,
     )
 }
 
-@Preview(name = "Chat · dark")
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · mixed · light")
 @Composable
-private fun ChatTabDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    MeshChatTab(
-        nodeId = 1,
-        messages = previewMessages,
-        locations = previewLocations,
-        myLastFix = previewMyFix,
-        shareStatus = LocationShareStatus.IDLE,
-        onSendText = {},
-        onShareLocation = {},
-    )
+private fun ChatTabMixedLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatTabPreviewContent(emptyList = false)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · mixed · dark")
+@Composable
+private fun ChatTabMixedDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatTabPreviewContent(emptyList = false)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · empty · light")
+@Composable
+private fun ChatTabEmptyLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatTabPreviewContent(emptyList = true)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · empty · dark")
+@Composable
+private fun ChatTabEmptyDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatTabPreviewContent(emptyList = true)
+}
+
+// fontScale 1.5: the hint must stay on one line even with large text.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, fontScale = 1.5f, name = "Chat · mixed · light · large text")
+@Composable
+private fun ChatTabMixedLightLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatTabPreviewContent(emptyList = false)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, fontScale = 1.5f, name = "Chat · mixed · dark · large text")
+@Composable
+private fun ChatTabMixedDarkLargeTextPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatTabPreviewContent(emptyList = false)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, fontScale = 1.5f, name = "Chat · empty · light · large text")
+@Composable
+private fun ChatTabEmptyLightLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatTabPreviewContent(emptyList = true)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, fontScale = 1.5f, name = "Chat · empty · dark · large text")
+@Composable
+private fun ChatTabEmptyDarkLargeTextPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatTabPreviewContent(emptyList = true)
+}
+
+// Debug builds only: the armed test point shows a chip next to the pin icon.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · test-location chip")
+@Composable
+private fun ChatTabTestLocationChipPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatTabPreviewContent(emptyList = false, testLocationOn = true)
 }
 
 /** A received card with a distance to my own fix, and one of my own cards. */
@@ -148,6 +194,9 @@ private fun NetworkTabLightPreview() = ThemedTabPreview(darkTheme = false) {
         onOpenPrototype = {},
         themeMode = ThemeMode.SYSTEM,
         onSetThemeMode = {},
+        // Debug card: off here, armed in the dark preview.
+        showTestLocationToggle = true,
+        useTestLocation = false,
     )
 }
 
@@ -167,6 +216,8 @@ private fun NetworkTabDarkPreview() = ThemedTabPreview(darkTheme = true) {
         onOpenPrototype = {},
         themeMode = ThemeMode.DARK,
         onSetThemeMode = {},
+        showTestLocationToggle = true,
+        useTestLocation = true,
     )
 }
 

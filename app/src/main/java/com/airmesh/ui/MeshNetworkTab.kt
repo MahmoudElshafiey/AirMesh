@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,8 +39,9 @@ private val MinTouch = 48.dp
 
 /**
  * Network tab: local-network permission banner, a status card, the action
- * buttons (equal width, two per row), discovered peers with Connect, and the
- * current neighbor list. Everything scrolls; the screen itself is fixed.
+ * buttons (equal width, two per row), discovered peers with Connect, the
+ * current neighbor list, and — in debug builds only — a Debug card with the
+ * fixed test-location toggle. Everything scrolls; the screen itself is fixed.
  */
 @Composable
 fun MeshNetworkTab(
@@ -55,6 +57,10 @@ fun MeshNetworkTab(
     onOpenPrototype: () -> Unit,
     themeMode: ThemeMode,
     onSetThemeMode: (ThemeMode) -> Unit,
+    // Debug builds only: a clearly-labeled toggle that shares a fixed point.
+    showTestLocationToggle: Boolean = false,
+    useTestLocation: Boolean = false,
+    onSetUseTestLocation: (Boolean) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -104,6 +110,11 @@ fun MeshNetworkTab(
         PeersSection(state, onConnectPeer)
 
         NeighborsSection(neighbors)
+
+        if (showTestLocationToggle) {
+            // DEBUG builds only: GPS may never fix indoors, so offer a fixed point.
+            DebugCard(useTestLocation = useTestLocation, onSetUseTestLocation = onSetUseTestLocation)
+        }
     }
 }
 
@@ -265,6 +276,30 @@ private fun NeighborsSection(neighbors: Set<Int>) {
             ) {
                 Text("#$id", style = MaterialTheme.typography.labelLarge)
             }
+        }
+    }
+}
+
+/** Display label for the debug test point; must match MeshActivity's TEST_*_E6. */
+private const val TEST_LOCATION_LABEL = "30.00000 N, 31.00000 E"
+
+/** Debug-builds-only card: shares a fixed point instead of GPS (indoor testing). */
+@Composable
+private fun DebugCard(useTestLocation: Boolean, onSetUseTestLocation: (Boolean) -> Unit) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Share a fixed test location", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    TEST_LOCATION_LABEL,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = useTestLocation, onCheckedChange = onSetUseTestLocation)
         }
     }
 }

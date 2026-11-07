@@ -1,5 +1,6 @@
 package com.airmesh.ui
 
+import com.airmesh.protocol.FrameCodec
 import com.airmesh.routing.Router
 import com.airmesh.transport.P2pRole
 import java.time.Instant
@@ -39,6 +40,19 @@ fun relayCountText(ttl: Int, initialTtl: Int = Router.DEFAULT_TTL): String {
     val relays = (initialTtl - ttl).coerceAtLeast(0)
     return if (relays == 0) "direct" else "$relays ${if (relays == 1) "relay" else "relays"}"
 }
+
+// --- Payload limit ------------------------------------------------------------
+
+/** How close (in chars) to the frame payload cap before the counter appears. */
+private const val PAYLOAD_LIMIT_WARNING_MARGIN = 128
+
+/** True when a draft of [textLength] chars is within the warning margin of the cap. */
+fun isNearPayloadLimit(textLength: Int, maxPayload: Int = FrameCodec.MAX_PAYLOAD): Boolean =
+    textLength > maxPayload - PAYLOAD_LIMIT_WARNING_MARGIN
+
+/** Counter line shown under the compose field while a draft nears the frame payload limit. */
+fun payloadLimitText(textLength: Int, maxPayload: Int = FrameCodec.MAX_PAYLOAD): String =
+    "$textLength / $maxPayload — near the frame payload limit"
 
 // --- Role / Wi-Fi Direct labels ----------------------------------------------
 

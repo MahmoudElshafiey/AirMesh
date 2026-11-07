@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,11 +18,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -68,9 +70,9 @@ sealed interface ChatRow {
 
 /**
  * Chat tab: message bubbles and location cards (mine right / received left),
- * auto-scroll while following the newest item, and a pinned compose bar with
- * a payload-limit indicator and a "Share my location" button. The keyboard is
- * handled by imePadding in [MeshScreen].
+ * auto-scroll while following the newest item, and a pinned compose bar — one
+ * row with a location-pin icon, the text field, and a send icon. The keyboard
+ * is handled by imePadding in [MeshScreen].
  */
 @Composable
 fun MeshChatTab(
@@ -81,10 +83,9 @@ fun MeshChatTab(
     shareStatus: LocationShareStatus,
     onSendText: (String) -> Unit,
     onShareLocation: () -> Unit,
-    // Debug builds only: a clearly-labeled toggle that shares a fixed point.
-    showTestLocationToggle: Boolean = false,
+    // Debug builds only: when the fixed test point is armed (toggled in the
+    // Network tab), a chip next to the pin icon reminds that it is on.
     useTestLocation: Boolean = false,
-    onSetUseTestLocation: (Boolean) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     // Follow the newest item by default. Scrolling up pauses it so old items
@@ -160,9 +161,7 @@ fun MeshChatTab(
             onSendText = onSendText,
             onShareLocation = onShareLocation,
             shareStatus = shareStatus,
-            showTestLocationToggle = showTestLocationToggle,
             useTestLocation = useTestLocation,
-            onSetUseTestLocation = onSetUseTestLocation,
         )
     }
 }
@@ -261,14 +260,15 @@ fun LocationCard(location: MeshLocation, isMine: Boolean = false, distanceMeters
     }
 }
 
+/** Material's minimum touch target; the spec calls for 48dp on both icon buttons. */
+private val IconTouchTarget = 48.dp
+
 @Composable
 private fun ComposeBar(
     onSendText: (String) -> Unit,
     onShareLocation: () -> Unit,
     shareStatus: LocationShareStatus,
-    showTestLocationToggle: Boolean = false,
     useTestLocation: Boolean = false,
-    onSetUseTestLocation: (Boolean) -> Unit = {},
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     // One-time confirmation before the first share in this session. Cancelling
@@ -277,22 +277,12 @@ private fun ComposeBar(
     var confirmShare by rememberSaveable { mutableStateOf(false) }
     var hasConfirmedShare by rememberSaveable { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
-    // The frame codec caps the payload; warn before the user hits it.
-    val nearLimit = text.length > FrameCodec.MAX_PAYLOAD - 128
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        if (nearLimit) {
-            Text(
-                "${text.length} / ${FrameCodec.MAX_PAYLOAD} — near the frame payload limit",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.error,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-        }
         when (shareStatus) {
             LocationShareStatus.IDLE -> Unit
             LocationShareStatus.WAITING_FOR_FIX -> Row(
@@ -310,44 +300,46 @@ private fun ComposeBar(
                 modifier = Modifier.padding(bottom = 4.dp),
             )
         }
-        if (showTestLocationToggle) {
-            // DEBUG builds only: GPS may never fix indoors, so offer a fixed point.
-            Row(
-                modifier = Modifier.padding(bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Switch(checked = useTestLocation, onCheckedChange = onSetUseTestLocation)
-                Text(
-                    "Debug: share a fixed test location (30.00000 N, 31.00000 E)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
-                )
-            }
-        }
+        // One row: pin icon, field, send. Icon triggers keep the hint on one line.
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            IconButton(
+                onClick = { if (hasConfirmedShare) onShareLocation() else confirmShare = true },
+                enabled = shareStatus != LocationShareStatus.WAITING_FOR_FIX,
+                modifier = Modifier.size(IconTouchTarget),
+            ) {
+                Icon(imageVector = MeshLocationPinIcon, contentDescription = "Share my location")
+            }
+            if (useTestLocation) TestLocationChip()
             OutlinedTextField(
                 value = text,
                 // Clamp at the codec limit so an overlong draft can never be sent.
                 onValueChange = { if (it.length <= FrameCodec.MAX_PAYLOAD) text = it },
                 modifier = Modifier.weight(1f),
-                singleLine = true,
-                placeholder = { Text("Message to broadcast") },
+                minLines = 1,
+                maxLines = 4,
+                // Pill shape to match the round Send button.
+                shape = RoundedCornerShape(50),
+                placeholder = { Text("Message", maxLines = 1) },
             )
-            TextButton(
-                onClick = {
-                    if (hasConfirmedShare) onShareLocation() else confirmShare = true
-                },
-                enabled = shareStatus != LocationShareStatus.WAITING_FOR_FIX,
+            FilledIconButton(
+                onClick = { onSendText(text); text = "" },
+                enabled = text.isNotBlank(),
+                modifier = Modifier.size(IconTouchTarget),
             ) {
-                Text("Share my location")
+                Icon(imageVector = MeshSendIcon, contentDescription = "Send")
             }
-            Button(onClick = { onSendText(text); text = "" }, enabled = text.isNotBlank()) {
-                Text("Send")
-            }
+        }
+        // The frame codec caps the payload; warn only while a draft nears it.
+        if (isNearPayloadLimit(text.length)) {
+            Text(
+                payloadLimitText(text.length),
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.error,
+                modifier = Modifier.padding(top = 4.dp),
+            )
         }
     }
 
@@ -371,5 +363,18 @@ private fun ComposeBar(
                 }
             },
         )
+    }
+}
+
+/** Small reminder that the debug fixed test point is armed (debug builds only). */
+@Composable
+private fun TestLocationChip() {
+    val colors = MaterialTheme.colorScheme
+    Box(
+        modifier = Modifier
+            .background(colors.tertiaryContainer, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text("TEST LOCATION", style = MaterialTheme.typography.labelSmall, color = colors.onTertiaryContainer)
     }
 }

@@ -71,7 +71,8 @@ fun MeshScreen(
     onConnectPeer: (WifiP2pDevice) -> Unit,
     onSendText: (String) -> Unit,
     onShareLocation: () -> Unit,
-    // Debug builds only: the fixed test-location toggle in the compose bar.
+    // Debug builds only: the fixed test-location toggle lives in the Network
+    // tab; while armed, a "TEST LOCATION" chip sits next to the share icon.
     showTestLocationToggle: Boolean = false,
     useTestLocation: Boolean = false,
     onSetUseTestLocation: (Boolean) -> Unit = {},
@@ -120,9 +121,7 @@ fun MeshScreen(
                         shareStatus = shareStatus,
                         onSendText = onSendText,
                         onShareLocation = onShareLocation,
-                        showTestLocationToggle = showTestLocationToggle,
                         useTestLocation = useTestLocation,
-                        onSetUseTestLocation = onSetUseTestLocation,
                     )
                 MeshTab.NETWORK ->
                     MeshNetworkTab(
@@ -138,6 +137,9 @@ fun MeshScreen(
                         onOpenPrototype = onOpenPrototype,
                         themeMode = themeMode,
                         onSetThemeMode = onSetThemeMode,
+                        showTestLocationToggle = showTestLocationToggle,
+                        useTestLocation = useTestLocation,
+                        onSetUseTestLocation = onSetUseTestLocation,
                     )
                 MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
             }
