@@ -19,6 +19,7 @@ package com.airmesh.transport
 object PermissionRequirements {
 
     const val ACCESS_FINE_LOCATION = "android.permission.ACCESS_FINE_LOCATION"
+    const val ACCESS_COARSE_LOCATION = "android.permission.ACCESS_COARSE_LOCATION"
     const val NEARBY_WIFI_DEVICES = "android.permission.NEARBY_WIFI_DEVICES"
     const val ACCESS_LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
 
@@ -37,4 +38,15 @@ object PermissionRequirements {
         add(wifiDirectPermission(sdkInt))
         if (sdkInt >= ANDROID_17) add(ACCESS_LOCAL_NETWORK)
     }
+
+    /**
+     * Permissions needed only when the user actively shares their location —
+     * deliberately separate from [required], which covers Wi-Fi Direct. Both
+     * levels are asked so the dialog offers precise location first with
+     * approximate as fallback; on Android 12+ granting fine implies coarse, so
+     * asking both there is harmless. Independent of SDK level: sharing works
+     * (or fails) the same way on every version we support.
+     */
+    fun locationPermissionsForSharing(): List<String> =
+        listOf(ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION)
 }
