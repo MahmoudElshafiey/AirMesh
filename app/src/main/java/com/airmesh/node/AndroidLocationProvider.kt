@@ -14,6 +14,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 /**
  * Real [LocationProvider] backed by the platform LocationManager (no Google
@@ -93,7 +94,7 @@ class AndroidLocationProvider(private val context: Context) : LocationProvider {
         return LocationFix(
             latitudeE6 = degreesToE6(location.latitude),
             longitudeE6 = degreesToE6(location.longitude),
-            accuracyMeters = if (rawAccuracy.isFinite()) Math.round(rawAccuracy).toInt() else 0,
+            accuracyMeters = if (rawAccuracy.isFinite()) rawAccuracy.roundToInt() else 0,
             timeMs = location.time,
         )
     }
