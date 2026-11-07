@@ -25,6 +25,13 @@
          declaring it there is harmless (unknown permissions are ignored). -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
+    <!-- Foreground service: keeps the mesh running while the screen is off or
+         the app is in the background, like a normal messaging app. The
+         connectedDevice type matches what we do (talk to nearby Wi-Fi Direct
+         devices); it also names the permission that authorizes that type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
     <uses-feature
         android:name="android.hardware.wifi.direct"
         android:required="false" />
@@ -55,6 +62,14 @@
             android:name=".transport.PrototypeActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true" />
+
+        <!-- Owns the mesh (node + Wi-Fi Direct connector) so it survives the
+             Activity going to the background. Started from MeshActivity after
+             permissions are granted; never at boot. -->
+        <service
+            android:name=".service.MeshService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
     </application>
 
 </manifest>

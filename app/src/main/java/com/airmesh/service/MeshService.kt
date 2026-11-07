@@ -1,0 +1,219 @@
+package com.airmesh.service
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import android.net.wifi.p2p.WifiP2pDevice
+import android.os.Binder
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import com.airmesh.R
+import com.airmesh.node.AirMeshNode
+import com.airmesh.node.EventLog
+import com.airmesh.node.LogEntry
+import com.airmesh.node.MeshLocation
+import com.airmesh.node.MeshMessage
+import com.airmesh.node.NodeIdProvider
+import com.airmesh.node.SharedPreferencesNodeIdStore
+import com.airmesh.node.createAirMeshNode
+import com.airmesh.transport.ConnectorState
+import com.airmesh.transport.WifiDirectConnector
+import com.airmesh.ui.MeshActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+/**
+ * Foreground service that owns the mesh: [AirMeshNode], [WifiDirectConnector] and
+ * the Room store behind them. The Activity only binds to this service and observes
+ * its flows, so the mesh keeps running when the screen is off or the app goes to
+ * the background — like a normal messaging app.
+ *
+ * Lifecycle rules (the pure policy lives in MeshServiceLogic and is tested on the
+ * JVM): started from the foreground Activity once Wi-Fi Direct permissions are
+ * granted, never at boot; starting it twice is a no-op; the P2P group is removed
+ * only on an explicit user disconnect, the notification Stop action, or service
+ * destruction — never because the Activity stopped or the screen turned off.
+ */
+class MeshService : Service() {
+
+    private lateinit var eventLog: EventLog
+    private lateinit var node: AirMeshNode
+    private lateinit var connector: WifiDirectConnector
+
+    /** This device's mesh id; set in [onCreate]. */
+    val nodeId: Int get() = node.localNodeId
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private val _phase = MutableStateFlow(MeshServicePhase.NOT_STARTED)
+    /** Coarse lifecycle of the mesh; NOT_STARTED until the first start. */
+    val phase: StateFlow<MeshServicePhase> = _phase.asStateFlow()
+
+    // --- Flows observed by the bound Activity ---------------------------------
+
+    val neighbors: StateFlow<Set<Int>> get() = node.neighbors
+    val messages: StateFlow<List<MeshMessage>> get() = node.messages
+    val locations: StateFlow<List<MeshLocation>> get() = node.locations
+    val events: StateFlow<List<LogEntry>> get() = eventLog.entries
+    val connectorState: StateFlow<ConnectorState> get() = connector.state
+
+    private lateinit var notificationManager: NotificationManager
+    /** Throttles running-notification updates to at most one per 2 s. */
+    private val runningThrottle = NotificationThrottle()
+
+    override fun onCreate() {
+        super.onCreate()
+        notificationManager = getSystemService(NotificationManager::class.java)
+        createRunningChannel()
+
+        eventLog = EventLog()
+        node = createAirMeshNode(
+            applicationContext,
+            NodeIdProvider(SharedPreferencesNodeIdStore(this)).getOrCreate(),
+            eventLog,
+        )
+        connector = WifiDirectConnector(applicationContext, node.transport, eventLog)
+
+        // The system requires startForeground within 5 s of startForegroundService;
+        // onCreate is well inside that window.
+        startForeground(RUNNING_NOTIFICATION_ID, buildRunningNotification(0))
+
+        serviceScope.launch {
+            node.neighbors.collect { neighbors ->
+                if (runningThrottle.shouldPost(System.currentTimeMillis())) {
+                    notificationManager.notify(RUNNING_NOTIFICATION_ID, buildRunningNotification(neighbors.size))
+                }
+            }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            // The notification's Stop action: end the service and remove the group.
+            releaseMesh(StopReason.NOTIFICATION_STOP)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        handleStart()
+        // If the system restarts us after process death, resume the mesh; the
+        // connector's stale-group cleanup handles any leftover P2P group.
+        return START_STICKY
+    }
+
+    /** Starts the mesh once; a second start while running is a no-op. */
+    private fun handleStart() {
+        val next = reduceMeshServicePhase(_phase.value, ServiceEvent.Start)
+        if (next == _phase.value) {
+            eventLog.log("service: already running — ignoring duplicate start")
+            return
+        }
+        _phase.value = next
+        eventLog.log("service: mesh started (node #${node.localNodeId})")
+        node.start()
+        connector.start()
+    }
+
+    override fun onBind(intent: Intent): IBinder = LocalBinder()
+
+    /** In-process binding: the Activity gets a direct reference to this service. */
+    inner class LocalBinder : Binder() {
+        val service: MeshService get() = this@MeshService
+    }
+
+    // --- Actions forwarded by the bound Activity ------------------------------
+
+    suspend fun sendText(text: String): Boolean = node.sendText(text)
+
+    suspend fun sendLocation(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Boolean =
+        node.sendLocation(latitudeE6, longitudeE6, accuracyMeters)
+
+    fun discover() = connector.discover()
+    fun createGroup() = connector.createGroup()
+    fun retryConnect() = connector.retryConnect()
+    fun connect(device: WifiP2pDevice) = connector.connect(device)
+
+    /**
+     * The UI's Disconnect button: removes the P2P group and closes the transport,
+     * but keeps the node (and this service) alive so a new group can be formed
+     * without restarting anything.
+     */
+    fun disconnectFromGroup() = connector.disconnect()
+
+    fun clearLog() = eventLog.clear()
+
+    /** Applies a batch of permission grant results to the connector's state. */
+    fun onPermissionResults(results: Map<String, Boolean>) = connector.onPermissionResults(results)
+
+    // --- Teardown --------------------------------------------------------------
+
+    /**
+     * Tears down the mesh for [reason]. The group-removal policy is pure and tested
+     * (shouldRemoveGroupOnStop): only an explicit user disconnect, the notification
+     * Stop action, or service destruction remove the P2P group — activity stop and
+     * screen-off never do. In this design those two don't stop the mesh at all: the
+     * foreground service keeps running while the app is in the background.
+     */
+    fun releaseMesh(reason: StopReason) {
+        if (!shouldRemoveGroupOnStop(reason)) return
+        _phase.value = reduceMeshServicePhase(_phase.value, ServiceEvent.Stop)
+        eventLog.log("service: releasing the mesh ($reason)")
+        node.stop()
+        connector.destroy()
+    }
+
+    override fun onDestroy() {
+        releaseMesh(StopReason.SERVICE_DESTROYED)
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    // --- Running notification ---------------------------------------------------
+
+    private fun createRunningChannel() {
+        // Low importance + ongoing: a quiet "mesh is alive" indicator, not an alert.
+        val channel = NotificationChannel(
+            CHANNEL_RUNNING,
+            "AirMesh running",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply { description = "Shows that the mesh is active and how many neighbors are live" }
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    private fun buildRunningNotification(neighborCount: Int): Notification {
+        // Tapping the notification opens the app.
+        val openApp = PendingIntent.getActivity(
+            this, 0, Intent(this, MeshActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        // The Stop action ends the service and removes the P2P group.
+        val stopAction = PendingIntent.getService(
+            this, 1, Intent(this, MeshService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(this, CHANNEL_RUNNING)
+            .setContentTitle("AirMesh")
+            .setContentText(runningNotificationText(neighborCount))
+            .setSmallIcon(R.drawable.ic_notification_mesh)
+            .setContentIntent(openApp)
+            .addAction(NotificationCompat.Action.Builder(null, "Stop", stopAction).build())
+            .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+    }
+
+    companion object {
+        /** Intent action for the notification's Stop button. */
+        const val ACTION_STOP = "com.airmesh.service.MESH_ACTION_STOP"
+        private const val CHANNEL_RUNNING = "mesh_running"
+        private const val RUNNING_NOTIFICATION_ID = 1
+    }
+}
