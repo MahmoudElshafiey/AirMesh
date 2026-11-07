@@ -1,9 +1,15 @@
 package com.airmesh.ui
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.os.StrictMode
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -12,26 +18,34 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.airmesh.node.AirMeshNode
 import com.airmesh.node.AndroidLocationProvider
-import com.airmesh.node.EventLog
 import com.airmesh.node.LOCATION_MAX_WAIT_MS
 import com.airmesh.node.LocationFix
-import com.airmesh.node.NodeIdProvider
-import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.SharedPreferencesTestLocationStore
 import com.airmesh.node.TestLocationStore
-import com.airmesh.node.createAirMeshNode
+import com.airmesh.service.AppForeground
+import com.airmesh.service.MeshService
 import com.airmesh.transport.PermissionRequirements
 import com.airmesh.transport.PrototypeActivity
-import com.airmesh.transport.WifiDirectConnector
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,16 +55,24 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * Real mesh UI. Kept separate from the throwaway [PrototypeActivity] so the
- * prototype keeps working as a fallback and can be opened from a button.
+ * Real mesh UI. The mesh itself runs in [MeshService] (a foreground service), so
+ * it keeps working when the screen is off or this activity goes to the background;
+ * this activity only binds to the service, observes its StateFlows and forwards
+ * user actions — state survives recreation and rotation because it lives in the
+ * service. Kept separate from the throwaway [PrototypeActivity] so the prototype
+ * keeps working as a fallback and can be opened from a button.
  */
 class MeshActivity : ComponentActivity() {
 
-    private lateinit var eventLog: EventLog
-    private lateinit var node: AirMeshNode
-    private lateinit var connector: WifiDirectConnector
+    /** The bound mesh service; null until onServiceConnected (and before grant). */
+    private val meshService = mutableStateOf<MeshService?>(null)
+    private var serviceBound = false
+
+    /** Wi-Fi Direct permissions held; drives the gate screen (button vs starting). */
+    private val wifiDirectGranted = mutableStateOf(false)
+
     private lateinit var themeStore: ThemeModeStore
-    private lateinit var locationProvider: AndroidLocationProvider
+    private var locationProvider: AndroidLocationProvider? = null
 
     // Set in onCreate (applicationInfo is not available during construction).
     // BuildConfig is not generated for this module; the debuggable flag is the
@@ -79,11 +101,25 @@ class MeshActivity : ComponentActivity() {
     /** The in-flight share coroutine, so the Cancel button can stop it mid-wait. */
     private var shareJob: Job? = null
 
-    /** Requests every runtime permission AirMesh needs on this device at once. */
+    /** Wi-Fi Direct gate: once every required permission is held, start the service. */
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
-        connector.onPermissionResults(results)
+        wifiDirectGranted.value = PermissionRequirements.required(Build.VERSION.SDK_INT)
+            .all { results[it] == true }
+        if (wifiDirectGranted.value) {
+            startMeshService()
+            // Non-blocking: denying this only removes the per-message notifications.
+            requestNotificationPermissionIfNeeded()
+        }
+        // Otherwise stay on the gate screen; the button remains available.
+    }
+
+    /** Android 13+ only, asked once after the Wi-Fi Direct grant; denial is fine. */
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        log("notifications permission granted=${results[Manifest.permission.POST_NOTIFICATIONS] == true}")
     }
 
     /** Location permissions are requested only when the user taps "Share my location". */
@@ -93,13 +129,32 @@ class MeshActivity : ComponentActivity() {
         // Same per-permission lines as the Wi-Fi Direct connector, so a denied
         // dialog is visible in the event log.
         results.forEach { (permission, granted) ->
-            eventLog.log("runtime permission ${permission.substringAfterLast('.')} granted=$granted")
+            log("runtime permission ${permission.substringAfterLast('.')} granted=$granted")
         }
         if (PermissionRequirements.locationPermissionsForSharing().all(::isPermissionGranted)) {
             shareMyLocation()
         } else {
-            eventLog.log("location: permission not granted — cannot share")
+            log("location: permission not granted — cannot share")
             shareStatus.value = LocationShareStatus.FAILED
+        }
+    }
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            val service = (binder as? MeshService.LocalBinder)?.service ?: return
+            meshService.value = service
+            serviceBound = true
+            // Fresh permission snapshot so the connector's state is accurate on (re)bind.
+            service.onPermissionResults(permissionStates())
+            // Every phase of a share attempt lands in the service's event log.
+            locationProvider = AndroidLocationProvider(this@MeshActivity, service.eventLog::log)
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            // The service runs in this same process; this only fires at process
+            // death, when we are recreated and rebind from onCreate anyway.
+            meshService.value = null
+            serviceBound = false
         }
     }
 
@@ -108,78 +163,84 @@ class MeshActivity : ComponentActivity() {
 
         enableStrictModeInDebugBuilds()
 
-        // Wi-Fi Direct drops when the phone sleeps, so keep the screen on while
-        // this activity is in the foreground.
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        eventLog = EventLog()
-        val nodeId = NodeIdProvider(SharedPreferencesNodeIdStore(this)).getOrCreate()
-        node = createAirMeshNode(this, nodeId, eventLog)
-        connector = WifiDirectConnector(this, node.transport, eventLog)
         themeStore = SharedPreferencesThemeModeStore(this)
-        // Every phase of a share attempt lands in the event log.
-        locationProvider = AndroidLocationProvider(this, eventLog::log)
         isDebugBuild = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         testLocationStore = if (isDebugBuild) SharedPreferencesTestLocationStore(applicationContext) else null
         // The debug switch survives process death; release builds stay off.
         useTestLocation.value = testLocationStore?.load() ?: false
-        connector.onPermissionResults(permissionStates())
+
+        wifiDirectGranted.value = wifiDirectPermissionsGranted()
+        // The mesh runs in a foreground service, started from here once the Wi-Fi
+        // Direct permissions are held — never at boot. A second start (e.g. after
+        // process death) is a no-op inside the service.
+        if (wifiDirectGranted.value) {
+            startMeshService()
+        }
 
         setContent {
-            val connectorState by connector.state.collectAsState()
-            val neighbors by node.neighbors.collectAsState()
-            val messages by node.messages.collectAsState()
-            val locations by node.locations.collectAsState()
-            val events by eventLog.entries.collectAsState()
-            // remember (not a bare mutableStateOf): the setContent body re-runs on
-            // every recomposition, and the choice must survive it. Rotation is
-            // covered because the store persists the value across process death.
             val themeMode = remember { mutableStateOf(themeStore.load()) }
             val dark = resolveDarkTheme(themeMode.value, isSystemInDarkTheme())
 
             AirMeshTheme(darkTheme = dark) {
-                MeshScreen(
-                    nodeId = nodeId,
-                    connectorState = connectorState,
-                    neighbors = neighbors,
-                    messages = messages,
-                    locations = locations,
-                    myLastFix = myLastFix.value,
-                    shareStatus = shareStatus.value,
-                    events = events,
-                    onRequestPermissions = ::requestPermissions,
-                    onDiscover = connector::discover,
-                    onCreateGroup = connector::createGroup,
-                    onRetryTcp = connector::retryConnect,
-                    onDisconnect = connector::disconnect,
-                    onConnectPeer = connector::connect,
-                    onSendText = { text ->
-                        uiScope.launch { node.sendText(text) }
-                    },
-                    onShareLocation = ::requestLocationShare,
-                    shareDeadlineMs = shareDeadlineMs.value,
-                    onCancelShare = ::cancelLocationShare,
-                    shareFailureMessage = shareFailureMessage.value,
-                    myLatestShareWasCached = myLatestShareWasCached.value,
-                    showTestLocationToggle = isDebugBuild,
-                    useTestLocation = useTestLocation.value,
-                    onSetUseTestLocation = { value ->
-                        // Persist so the switch survives process death (debug builds only).
-                        useTestLocation.value = value
-                        testLocationStore?.save(value)
-                    },
-                    onShareTestLocation = ::shareTestLocationInstead,
-                    onClearLog = eventLog::clear,
-                    onOpenPrototype = {
-                        startActivity(Intent(this, PrototypeActivity::class.java))
-                    },
-                    themeMode = themeMode.value,
-                    // Applies immediately (state change recomposes) and persists.
-                    onSetThemeMode = { mode ->
-                        themeMode.value = mode
-                        themeStore.save(mode)
-                    },
-                )
+                when (val service = meshService.value) {
+                    null -> ServiceGate(
+                        starting = wifiDirectGranted.value,
+                        onStart = ::requestPermissions,
+                    )
+                    else -> {
+                        val connectorState by service.connectorState.collectAsState()
+                        val neighbors by service.neighbors.collectAsState()
+                        val messages by service.messages.collectAsState()
+                        val locations by service.locations.collectAsState()
+                        val events by service.events.collectAsState()
+                        val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsState()
+
+                        MeshScreen(
+                            nodeId = service.nodeId,
+                            connectorState = connectorState,
+                            neighbors = neighbors,
+                            messages = messages,
+                            locations = locations,
+                            myLastFix = myLastFix.value,
+                            shareStatus = shareStatus.value,
+                            events = events,
+                            onRequestPermissions = ::requestPermissions,
+                            onDiscover = service::discover,
+                            onCreateGroup = service::createGroup,
+                            onRetryTcp = service::retryConnect,
+                            onDisconnect = service::disconnectFromGroup,
+                            onConnectPeer = service::connect,
+                            onSendText = { text ->
+                                uiScope.launch { service.sendText(text) }
+                            },
+                            onShareLocation = ::requestLocationShare,
+                            shareDeadlineMs = shareDeadlineMs.value,
+                            onCancelShare = ::cancelLocationShare,
+                            shareFailureMessage = shareFailureMessage.value,
+                            myLatestShareWasCached = myLatestShareWasCached.value,
+                            showTestLocationToggle = isDebugBuild,
+                            useTestLocation = useTestLocation.value,
+                            onSetUseTestLocation = { value ->
+                                // Persist so the switch survives process death (debug builds only).
+                                useTestLocation.value = value
+                                testLocationStore?.save(value)
+                            },
+                            onShareTestLocation = ::shareTestLocationInstead,
+                            onClearLog = service::clearLog,
+                            onOpenPrototype = {
+                                startActivity(Intent(this, PrototypeActivity::class.java))
+                            },
+                            themeMode = themeMode.value,
+                            // Applies immediately (state change recomposes) and persists.
+                            onSetThemeMode = { mode ->
+                                themeMode.value = mode
+                                themeStore.save(mode)
+                            },
+                            messageNotificationsEnabled = messageNotificationsEnabled,
+                            onSetMessageNotificationsEnabled = service::setMessageNotificationsEnabled,
+                        )
+                    }
+                }
             }
 
             // Re-apply the system bar styles whenever the effective theme flips,
@@ -208,36 +269,62 @@ class MeshActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        node.start()
-        connector.start()
+        AppForeground.activityStarted()
+        // Keep the screen on only while this activity is in the foreground — Wi-Fi
+        // Direct drops when the phone sleeps. The mesh itself survives sleep via
+        // the foreground service; backgrounding must never stop it.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     override fun onStop() {
-        connector.stop()
-        node.stop()
+        // Backgrounding never stops the mesh: the foreground service owns it. We
+        // only drop keep-screen-on and mark ourselves invisible, so received
+        // content may post notifications while we are away.
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        AppForeground.activityStopped()
         super.onStop()
     }
 
     override fun onDestroy() {
-        connector.destroy()
-        node.close()
+        if (serviceBound) unbindService(serviceConnection)
         uiScope.cancel()
         super.onDestroy()
     }
 
+    /** Starts the foreground mesh service and binds to it. Safe to call twice — the service ignores duplicate starts. */
+    private fun startMeshService() {
+        val intent = Intent(this, MeshService::class.java)
+        startForegroundService(intent)
+        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+    }
+
     /** Requests every runtime permission this device needs; skips the dialog when all are held. */
     private fun requestPermissions() {
-        val required = connector.requiredPermissions()
-        if (required.all(::isPermissionGranted)) {
-            // Nothing to ask for: just refresh the UI state without a dialog.
-            connector.onPermissionResults(permissionStates())
-            return
-        }
+        val required = PermissionRequirements.required(Build.VERSION.SDK_INT)
+        if (required.all(::isPermissionGranted)) return
         permissionLauncher.launch(required.toTypedArray())
+    }
+
+    /** Android 13+: ask for POST_NOTIFICATIONS once, after the Wi-Fi Direct grant. Never blocks the mesh. */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (isPermissionGranted(Manifest.permission.POST_NOTIFICATIONS)) return
+        notificationPermissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
     }
 
     private fun isPermissionGranted(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    /** True when every Wi-Fi Direct runtime permission required on this device is held. */
+    private fun wifiDirectPermissionsGranted(): Boolean =
+        PermissionRequirements.required(Build.VERSION.SDK_INT).all(::isPermissionGranted)
+
+    /** Current grant state of every permission required on this device. */
+    private fun permissionStates(): Map<String, Boolean> =
+        PermissionRequirements.required(Build.VERSION.SDK_INT).associateWith(::isPermissionGranted)
+
+    /** Writes to the bound service's event log; a no-op before bind (nothing to show yet). */
+    private fun log(message: String) { meshService.value?.eventLog?.log(message) }
 
     /** Tap handler: ask for location permissions first — only now, never at startup. */
     private fun requestLocationShare() {
@@ -250,43 +337,51 @@ class MeshActivity : ComponentActivity() {
 
     /** Waits for a fix (or the debug test point), then floods it as a LOCATION frame. */
     private fun shareMyLocation() {
-        eventLog.log("location: share attempt started (source=${if (useTestLocation.value) "test-location" else "gps"})")
+        log("location: share attempt started (source=${if (useTestLocation.value) "test-location" else "gps"})")
         shareFailureMessage.value = null
         myLatestShareWasCached.value = false
         shareStatus.value = LocationShareStatus.WAITING_FOR_FIX
         // The countdown only makes sense for a real fix wait; the test point is instant.
         shareDeadlineMs.value = if (useTestLocation.value) null else System.currentTimeMillis() + LOCATION_MAX_WAIT_MS
         shareJob = uiScope.launch {
+            // Normally set in onServiceConnected before the UI can offer sharing;
+            // reset the state instead of leaving a stuck countdown if it is not.
+            val provider = locationProvider ?: run {
+                shareDeadlineMs.value = null
+                shareStatus.value = LocationShareStatus.FAILED
+                return@launch
+            }
             val fix = try {
                 if (useTestLocation.value) {
                     // Debug builds only: a fixed, clearly-labeled point instead of GPS.
                     LocationFix(TEST_LATITUDE_E6, TEST_LONGITUDE_E6, 5, System.currentTimeMillis())
                 } else {
-                    locationProvider.requestFix()
+                    provider.requestFix()
                 }
             } catch (error: CancellationException) {
                 throw error // user cancel or activity destroyed — do not swallow it
             } catch (error: Exception) {
-                eventLog.log("location: provider failed: ${error.javaClass.simpleName}: ${error.message}")
+                log("location: provider failed: ${error.javaClass.simpleName}: ${error.message}")
                 null
             }
             if (fix == null) {
                 shareDeadlineMs.value = null
                 // The provider already logged "location: failed: <reasons>"; show
                 // the same specific text in the UI instead of a generic one.
-                shareFailureMessage.value = locationProvider.lastFailureMessage
+                shareFailureMessage.value = provider.lastFailureMessage
                     ?: "no usable fix — try again, preferably outdoors"
                 shareStatus.value = LocationShareStatus.FAILED
                 return@launch
             }
-            myLatestShareWasCached.value = !useTestLocation.value && locationProvider.lastFixWasCached
+            myLatestShareWasCached.value = !useTestLocation.value && provider.lastFixWasCached
             myLastFix.value = fix
-            if (node.sendLocation(fix.latitudeE6, fix.longitudeE6, fix.accuracyMeters)) {
+            val sent = meshService.value?.sendLocation(fix.latitudeE6, fix.longitudeE6, fix.accuracyMeters) ?: false
+            if (sent) {
                 // The outgoing card in the chat list is the success confirmation.
                 shareDeadlineMs.value = null
                 shareStatus.value = LocationShareStatus.IDLE
             } else {
-                eventLog.log("location: send failed")
+                log("location: send failed")
                 shareDeadlineMs.value = null
                 shareStatus.value = LocationShareStatus.FAILED
             }
@@ -301,14 +396,14 @@ class MeshActivity : ComponentActivity() {
         shareJob?.cancel()
         shareDeadlineMs.value = null
         shareStatus.value = LocationShareStatus.IDLE
-        eventLog.log("location: share cancelled by user")
+        log("location: share cancelled by user")
     }
 
     /** Debug builds only (offered on a failed share): arm the test point and share it. */
     private fun shareTestLocationInstead() {
         useTestLocation.value = true
         testLocationStore?.save(true)
-        eventLog.log("location: sharing the debug test location instead")
+        log("location: sharing the debug test location instead")
         shareMyLocation()
     }
 
@@ -317,10 +412,6 @@ class MeshActivity : ComponentActivity() {
         private const val TEST_LATITUDE_E6 = 30_000_000
         private const val TEST_LONGITUDE_E6 = 31_000_000
     }
-
-    /** Current grant state of every permission required on this device. */
-    private fun permissionStates(): Map<String, Boolean> =
-        connector.requiredPermissions().associateWith(::isPermissionGranted)
 
     /**
      * Debug builds only: surface future main-thread network/disk violations in
@@ -339,3 +430,38 @@ class MeshActivity : ComponentActivity() {
         )
     }
 }
+
+/**
+ * Shown until the mesh service is bound: a permission button while the Wi-Fi
+ * Direct permissions are missing, "starting" while the bind is in flight. The
+ * full MeshScreen only exists once we observe the service's flows.
+ */
+@Composable
+private fun ServiceGate(starting: Boolean, onStart: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("AirMesh", style = MaterialTheme.typography.headlineMedium)
+        Spacer(modifier = Modifier.height(16.dp))
+        if (starting) {
+            Text(
+                "Starting the mesh…",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                "AirMesh phones talk to each other over Wi-Fi Direct. Grant the permissions below so the mesh can run in the background.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+            Button(onClick = onStart) { Text("Grant permissions & start") }
+        }
+    }
+}
+

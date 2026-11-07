@@ -46,12 +46,15 @@ import kotlinx.coroutines.launch
  */
 class MeshService : Service() {
 
-    private lateinit var eventLog: EventLog
+    private lateinit var _eventLog: EventLog
     private lateinit var node: AirMeshNode
     private lateinit var connector: WifiDirectConnector
 
     /** This device's mesh id; set in [onCreate]. */
     val nodeId: Int get() = node.localNodeId
+
+    /** The service's event log; the bound activity writes location phases into it. */
+    val eventLog: EventLog get() = _eventLog
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -64,7 +67,7 @@ class MeshService : Service() {
     val neighbors: StateFlow<Set<Int>> get() = node.neighbors
     val messages: StateFlow<List<MeshMessage>> get() = node.messages
     val locations: StateFlow<List<MeshLocation>> get() = node.locations
-    val events: StateFlow<List<LogEntry>> get() = eventLog.entries
+    val events: StateFlow<List<LogEntry>> get() = _eventLog.entries
     val connectorState: StateFlow<ConnectorState> get() = connector.state
 
     private lateinit var notificationManager: NotificationManager
@@ -83,13 +86,13 @@ class MeshService : Service() {
         notificationManager = getSystemService(NotificationManager::class.java)
         createChannels()
 
-        eventLog = EventLog()
+        _eventLog = EventLog()
         node = createAirMeshNode(
             applicationContext,
             NodeIdProvider(SharedPreferencesNodeIdStore(this)).getOrCreate(),
-            eventLog,
+            _eventLog,
         )
-        connector = WifiDirectConnector(applicationContext, node.transport, eventLog)
+        connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
 
         // Per-message notifications are on by default; the Network tab toggle persists the choice.
         _messageNotificationsEnabled.value = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -146,11 +149,11 @@ class MeshService : Service() {
     private fun handleStart() {
         val next = reduceMeshServicePhase(_phase.value, ServiceEvent.Start)
         if (next == _phase.value) {
-            eventLog.log("service: already running — ignoring duplicate start")
+            _eventLog.log("service: already running — ignoring duplicate start")
             return
         }
         _phase.value = next
-        eventLog.log("service: mesh started (node #${node.localNodeId})")
+        _eventLog.log("service: mesh started (node #${node.localNodeId})")
         node.start()
         connector.start()
     }
@@ -181,7 +184,7 @@ class MeshService : Service() {
      */
     fun disconnectFromGroup() = connector.disconnect()
 
-    fun clearLog() = eventLog.clear()
+    fun clearLog() = _eventLog.clear()
 
     /** Applies a batch of permission grant results to the connector's state. */
     fun onPermissionResults(results: Map<String, Boolean>) = connector.onPermissionResults(results)
@@ -198,7 +201,7 @@ class MeshService : Service() {
     fun releaseMesh(reason: StopReason) {
         if (!shouldRemoveGroupOnStop(reason)) return
         _phase.value = reduceMeshServicePhase(_phase.value, ServiceEvent.Stop)
-        eventLog.log("service: releasing the mesh ($reason)")
+        _eventLog.log("service: releasing the mesh ($reason)")
         node.stop()
         connector.destroy()
     }
@@ -265,7 +268,7 @@ class MeshService : Service() {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_MESSAGE_NOTIFICATIONS_ENABLED, enabled)
             .apply()
-        eventLog.log("service: message notifications ${if (enabled) "enabled" else "disabled"}")
+        _eventLog.log("service: message notifications ${if (enabled) "enabled" else "disabled"}")
     }
 
     private fun buildRunningNotification(neighborCount: Int): Notification {

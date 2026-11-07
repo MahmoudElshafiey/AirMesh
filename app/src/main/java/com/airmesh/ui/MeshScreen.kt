@@ -89,6 +89,10 @@ fun MeshScreen(
     onOpenPrototype: () -> Unit,
     themeMode: ThemeMode,
     onSetThemeMode: (ThemeMode) -> Unit,
+    // Per-message notifications while the app is in the background; toggled in
+    // the Network tab and persisted by the service.
+    messageNotificationsEnabled: Boolean = true,
+    onSetMessageNotificationsEnabled: (Boolean) -> Unit = {},
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(MeshTab.CHAT.ordinal) }
     val tab = MeshTab.values()[selectedTab.coerceIn(0, MeshTab.values().size - 1)]
@@ -155,6 +159,8 @@ fun MeshScreen(
                         showTestLocationToggle = showTestLocationToggle,
                         useTestLocation = useTestLocation,
                         onSetUseTestLocation = onSetUseTestLocation,
+                        messageNotificationsEnabled = messageNotificationsEnabled,
+                        onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
                     )
                 MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
             }

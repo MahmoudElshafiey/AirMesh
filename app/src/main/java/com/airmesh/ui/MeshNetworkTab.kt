@@ -61,6 +61,9 @@ fun MeshNetworkTab(
     showTestLocationToggle: Boolean = false,
     useTestLocation: Boolean = false,
     onSetUseTestLocation: (Boolean) -> Unit = {},
+    // Per-message notifications while the app is in the background; persisted by the service.
+    messageNotificationsEnabled: Boolean = true,
+    onSetMessageNotificationsEnabled: (Boolean) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -110,6 +113,11 @@ fun MeshNetworkTab(
         PeersSection(state, onConnectPeer)
 
         NeighborsSection(neighbors)
+
+        MessageNotificationsCard(
+            enabled = messageNotificationsEnabled,
+            onSetEnabled = onSetMessageNotificationsEnabled,
+        )
 
         if (showTestLocationToggle) {
             // DEBUG builds only: GPS may never fix indoors, so offer a fixed point.
@@ -282,6 +290,27 @@ private fun NeighborsSection(neighbors: Set<Int>) {
 
 /** Display label for the debug test point; must match MeshActivity's TEST_*_E6. */
 private const val TEST_LOCATION_LABEL = "30.00000 N, 31.00000 E"
+
+/** Toggle for per-message notifications while no screen is visible. */
+@Composable
+private fun MessageNotificationsCard(enabled: Boolean, onSetEnabled: (Boolean) -> Unit) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Message notifications", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "Notify for received texts and locations while the app is in the background.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onSetEnabled)
+        }
+    }
+}
 
 /** Debug-builds-only card: shares a fixed point instead of GPS (indoor testing). */
 @Composable
