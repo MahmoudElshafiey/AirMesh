@@ -22,9 +22,12 @@ import androidx.core.content.ContextCompat
 import com.airmesh.node.AirMeshNode
 import com.airmesh.node.AndroidLocationProvider
 import com.airmesh.node.EventLog
+import com.airmesh.node.LOCATION_MAX_WAIT_MS
 import com.airmesh.node.LocationFix
 import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
+import com.airmesh.node.SharedPreferencesTestLocationStore
+import com.airmesh.node.TestLocationStore
 import com.airmesh.node.createAirMeshNode
 import com.airmesh.transport.PermissionRequirements
 import com.airmesh.transport.PrototypeActivity
@@ -32,6 +35,7 @@ import com.airmesh.transport.WifiDirectConnector
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -48,16 +52,32 @@ class MeshActivity : ComponentActivity() {
     private lateinit var themeStore: ThemeModeStore
     private lateinit var locationProvider: AndroidLocationProvider
 
+    // Set in onCreate (applicationInfo is not available during construction).
+    // BuildConfig is not generated for this module; the debuggable flag is the
+    // reliable way to tell a debug build apart. The test-location toggle and its
+    // persistence are debug features, so release builds never create the store.
+    private var isDebugBuild = false
+        private set
+    private var testLocationStore: TestLocationStore? = null
+        private set
+
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** Progress of the current share request; IDLE means "nothing in flight". */
     private val shareStatus = mutableStateOf(LocationShareStatus.IDLE)
     /** Specific reason of the last failed attempt, shown above the compose bar. */
     private val shareFailureMessage = mutableStateOf<String?>(null)
-    /** DEBUG builds only: when on, a fixed test point is shared instead of GPS. */
+    /** Deadline of the in-flight real-fix wait; drives the countdown (null: none). */
+    private val shareDeadlineMs = mutableStateOf<Long?>(null)
+    /** DEBUG builds only: when on, a fixed test point is shared instead of GPS. Persisted across restarts. */
     private val useTestLocation = mutableStateOf(false)
+    /** Whether my latest shared fix was a cached last-known one (card label). */
+    private val myLatestShareWasCached = mutableStateOf(false)
     /** My own last fix — used to show "X m from you" on received location cards. */
     private val myLastFix = mutableStateOf<LocationFix?>(null)
+
+    /** The in-flight share coroutine, so the Cancel button can stop it mid-wait. */
+    private var shareJob: Job? = null
 
     /** Requests every runtime permission AirMesh needs on this device at once. */
     private val permissionLauncher = registerForActivityResult(
@@ -99,9 +119,10 @@ class MeshActivity : ComponentActivity() {
         themeStore = SharedPreferencesThemeModeStore(this)
         // Every phase of a share attempt lands in the event log.
         locationProvider = AndroidLocationProvider(this, eventLog::log)
-        // BuildConfig is not generated for this module; the debuggable flag is
-        // the reliable way to tell a debug build apart.
-        val showTestLocationToggle = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        isDebugBuild = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        testLocationStore = if (isDebugBuild) SharedPreferencesTestLocationStore(applicationContext) else null
+        // The debug switch survives process death; release builds stay off.
+        useTestLocation.value = testLocationStore?.load() ?: false
         connector.onPermissionResults(permissionStates())
 
         setContent {
@@ -136,9 +157,18 @@ class MeshActivity : ComponentActivity() {
                         uiScope.launch { node.sendText(text) }
                     },
                     onShareLocation = ::requestLocationShare,
-                    showTestLocationToggle = showTestLocationToggle,
+                    shareDeadlineMs = shareDeadlineMs.value,
+                    onCancelShare = ::cancelLocationShare,
+                    shareFailureMessage = shareFailureMessage.value,
+                    myLatestShareWasCached = myLatestShareWasCached.value,
+                    showTestLocationToggle = isDebugBuild,
                     useTestLocation = useTestLocation.value,
-                    onSetUseTestLocation = { useTestLocation.value = it },
+                    onSetUseTestLocation = { value ->
+                        // Persist so the switch survives process death (debug builds only).
+                        useTestLocation.value = value
+                        testLocationStore?.save(value)
+                    },
+                    onShareTestLocation = ::shareTestLocationInstead,
                     onClearLog = eventLog::clear,
                     onOpenPrototype = {
                         startActivity(Intent(this, PrototypeActivity::class.java))
@@ -222,8 +252,11 @@ class MeshActivity : ComponentActivity() {
     private fun shareMyLocation() {
         eventLog.log("location: share attempt started (source=${if (useTestLocation.value) "test-location" else "gps"})")
         shareFailureMessage.value = null
+        myLatestShareWasCached.value = false
         shareStatus.value = LocationShareStatus.WAITING_FOR_FIX
-        uiScope.launch {
+        // The countdown only makes sense for a real fix wait; the test point is instant.
+        shareDeadlineMs.value = if (useTestLocation.value) null else System.currentTimeMillis() + LOCATION_MAX_WAIT_MS
+        shareJob = uiScope.launch {
             val fix = try {
                 if (useTestLocation.value) {
                     // Debug builds only: a fixed, clearly-labeled point instead of GPS.
@@ -232,12 +265,13 @@ class MeshActivity : ComponentActivity() {
                     locationProvider.requestFix()
                 }
             } catch (error: CancellationException) {
-                throw error // activity destroyed while waiting — do not swallow it
+                throw error // user cancel or activity destroyed — do not swallow it
             } catch (error: Exception) {
                 eventLog.log("location: provider failed: ${error.javaClass.simpleName}: ${error.message}")
                 null
             }
             if (fix == null) {
+                shareDeadlineMs.value = null
                 // The provider already logged "location: failed: <reasons>"; show
                 // the same specific text in the UI instead of a generic one.
                 shareFailureMessage.value = locationProvider.lastFailureMessage
@@ -245,15 +279,37 @@ class MeshActivity : ComponentActivity() {
                 shareStatus.value = LocationShareStatus.FAILED
                 return@launch
             }
+            myLatestShareWasCached.value = !useTestLocation.value && locationProvider.lastFixWasCached
             myLastFix.value = fix
             if (node.sendLocation(fix.latitudeE6, fix.longitudeE6, fix.accuracyMeters)) {
                 // The outgoing card in the chat list is the success confirmation.
+                shareDeadlineMs.value = null
                 shareStatus.value = LocationShareStatus.IDLE
             } else {
                 eventLog.log("location: send failed")
+                shareDeadlineMs.value = null
                 shareStatus.value = LocationShareStatus.FAILED
             }
         }
+    }
+
+    /** Cancel button while waiting for a fix: stops the in-flight attempt now. */
+    private fun cancelLocationShare() {
+        // Cancelling the job unwinds the whole attempt (structured concurrency),
+        // which removes any pending location listener; the state is reset here,
+        // not inside the cancelled coroutine.
+        shareJob?.cancel()
+        shareDeadlineMs.value = null
+        shareStatus.value = LocationShareStatus.IDLE
+        eventLog.log("location: share cancelled by user")
+    }
+
+    /** Debug builds only (offered on a failed share): arm the test point and share it. */
+    private fun shareTestLocationInstead() {
+        useTestLocation.value = true
+        testLocationStore?.save(true)
+        eventLog.log("location: sharing the debug test location instead")
+        shareMyLocation()
     }
 
     companion object {

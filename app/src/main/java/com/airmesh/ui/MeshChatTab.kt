@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -46,9 +47,11 @@ import com.airmesh.node.LOCATION_STALE_AFTER_MS
 import com.airmesh.node.LocationFix
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
+import com.airmesh.node.formatAgeMs
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.LocationPayload
 import com.airmesh.protocol.haversineMeters
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /**
@@ -86,6 +89,15 @@ fun MeshChatTab(
     // Debug builds only: when the fixed test point is armed (toggled in the
     // Network tab), a chip next to the pin icon reminds that it is on.
     useTestLocation: Boolean = false,
+    showTestLocationToggle: Boolean = false,
+    // Countdown deadline of the in-flight real-fix wait; null while none runs.
+    shareDeadlineMs: Long? = null,
+    onCancelShare: () -> Unit = {},
+    // Specific reason of a failed attempt; null falls back to generic text.
+    shareFailureMessage: String? = null,
+    // My latest outgoing card gets a "cached X ago" label when its fix was last-known.
+    myLatestShareWasCached: Boolean = false,
+    onShareTestLocation: () -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     // Follow the newest item by default. Scrolling up pauses it so old items
@@ -122,6 +134,16 @@ fun MeshChatTab(
         )
     }
 
+    // Timestamp of my most recent outgoing location card (null when I never shared).
+    val myLatestLocationTimestamp = remember(locations, nodeId) {
+        locations.filter { it.senderId == nodeId }.maxByOrNull { it.timestamp }?.timestamp
+    }
+    // Age of the underlying fix behind that card at display time; null when the
+    // share used a fresh fix (or I never shared). Only my latest card knows.
+    val myLatestCachedAgeMs = if (myLatestShareWasCached) {
+        myLastFix?.let { System.currentTimeMillis() - it.timeMs }
+    } else null
+
     Column(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -152,6 +174,9 @@ fun MeshChatTab(
                             location = row.location,
                             isMine = row.location.senderId == nodeId,
                             distanceMeters = distanceFromMyLastFix(row.location),
+                            cachedAgeMs = if (row.location.timestamp == myLatestLocationTimestamp) {
+                                myLatestCachedAgeMs
+                            } else null,
                         )
                     }
                 }
@@ -162,6 +187,11 @@ fun MeshChatTab(
             onShareLocation = onShareLocation,
             shareStatus = shareStatus,
             useTestLocation = useTestLocation,
+            showTestLocationToggle = showTestLocationToggle,
+            shareDeadlineMs = shareDeadlineMs,
+            onCancelShare = onCancelShare,
+            shareFailureMessage = shareFailureMessage,
+            onShareTestLocation = onShareTestLocation,
         )
     }
 }
@@ -212,9 +242,15 @@ private fun MessageBubble(message: MeshMessage) {
  * Card for a delivered LOCATION item: sender id, coordinates with 5 decimals,
  * accuracy, distance from my own last fresh fix when I have one, and a copy
  * action. [distanceMeters] is precomputed by the tab so this stays previewable.
+ * [cachedAgeMs] labels a card whose fix was a last-known (not live) one.
  */
 @Composable
-fun LocationCard(location: MeshLocation, isMine: Boolean = false, distanceMeters: Double? = null) {
+fun LocationCard(
+    location: MeshLocation,
+    isMine: Boolean = false,
+    distanceMeters: Double? = null,
+    cachedAgeMs: Long? = null,
+) {
     val colors = MaterialTheme.colorScheme
     val metaColor = if (isMine) colors.onPrimaryContainer else colors.onSurfaceVariant
     Row(
@@ -240,6 +276,10 @@ fun LocationCard(location: MeshLocation, isMine: Boolean = false, distanceMeters
                 fontFamily = FontFamily.Monospace,
             )
             Text("±${location.accuracyMeters} m", style = MaterialTheme.typography.labelSmall, color = metaColor)
+            if (cachedAgeMs != null) {
+                // This card's fix was a last-known one; say how old it is.
+                Text("cached ${formatAgeMs(cachedAgeMs)} ago", style = MaterialTheme.typography.labelSmall, color = metaColor)
+            }
             if (distanceMeters != null) {
                 // Precomputed by the tab from my own last fresh fix.
                 Text("${formatDistanceMeters(distanceMeters)} from you", style = MaterialTheme.typography.labelSmall, color = metaColor)
@@ -269,6 +309,13 @@ private fun ComposeBar(
     onShareLocation: () -> Unit,
     shareStatus: LocationShareStatus,
     useTestLocation: Boolean = false,
+    showTestLocationToggle: Boolean = false,
+    // Countdown deadline of the in-flight real-fix wait; null while none runs.
+    shareDeadlineMs: Long? = null,
+    onCancelShare: () -> Unit = {},
+    // Specific reason of a failed attempt; null falls back to generic text.
+    shareFailureMessage: String? = null,
+    onShareTestLocation: () -> Unit = {},
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     // One-time confirmation before the first share in this session. Cancelling
@@ -285,20 +332,23 @@ private fun ComposeBar(
     ) {
         when (shareStatus) {
             LocationShareStatus.IDLE -> Unit
-            LocationShareStatus.WAITING_FOR_FIX -> Row(
-                modifier = Modifier.padding(bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                LinearProgressIndicator(modifier = Modifier.width(24.dp).height(3.dp))
-                Text("Getting your location…", style = MaterialTheme.typography.labelSmall)
+            LocationShareStatus.WAITING_FOR_FIX -> ShareWaitingRow(shareDeadlineMs, onCancelShare)
+            LocationShareStatus.FAILED -> Column(modifier = Modifier.padding(bottom = 4.dp)) {
+                Text(
+                    shareFailureMessage ?: "Could not get a fresh location fix — try again, preferably outdoors.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.error,
+                )
+                // Debug builds only: offer the fixed test point when real sharing failed.
+                if (showTestLocationToggle && !useTestLocation) {
+                    TextButton(
+                        onClick = onShareTestLocation,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    ) {
+                        Text("Share the test location instead", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
             }
-            LocationShareStatus.FAILED -> Text(
-                "Could not get a fresh location fix — try again, preferably outdoors.",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.error,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
         }
         // One row: pin icon, field, send. Icon triggers keep the hint on one line.
         Row(
@@ -363,6 +413,37 @@ private fun ComposeBar(
                 }
             },
         )
+    }
+}
+
+/** Waiting row above the compose bar: progress, countdown to the fix deadline, Cancel. */
+@Composable
+private fun ShareWaitingRow(deadlineMs: Long?, onCancel: () -> Unit) {
+    // Tick 4x/s while waiting; [deadlineMs] is null for the instant test point.
+    var remainingSeconds by remember { mutableIntStateOf(0) }
+    LaunchedEffect(deadlineMs) {
+        if (deadlineMs == null) return@LaunchedEffect
+        while (true) {
+            val remaining = deadlineMs - System.currentTimeMillis()
+            if (remaining <= 0) break
+            // Ceiling so the last partial second still reads "1s", never "0s".
+            remainingSeconds = ((remaining + 999) / 1000).toInt()
+            delay(250)
+        }
+    }
+    Row(
+        modifier = Modifier.padding(bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        LinearProgressIndicator(modifier = Modifier.width(24.dp).height(3.dp))
+        Text(
+            if (deadlineMs == null) "Getting your location…" else "Getting your location… ${remainingSeconds}s",
+            style = MaterialTheme.typography.labelSmall,
+        )
+        TextButton(onClick = onCancel, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
+            Text("Cancel")
+        }
     }
 }
 

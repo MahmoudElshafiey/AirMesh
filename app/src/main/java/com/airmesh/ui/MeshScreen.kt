@@ -71,11 +71,20 @@ fun MeshScreen(
     onConnectPeer: (WifiP2pDevice) -> Unit,
     onSendText: (String) -> Unit,
     onShareLocation: () -> Unit,
+    // Share progress details for the compose bar: countdown deadline of a real
+    // fix wait (null while none), its cancel action, the specific failure text
+    // of a failed attempt, and whether my latest shared card used a cached fix.
+    shareDeadlineMs: Long? = null,
+    onCancelShare: () -> Unit = {},
+    shareFailureMessage: String? = null,
+    myLatestShareWasCached: Boolean = false,
     // Debug builds only: the fixed test-location toggle lives in the Network
-    // tab; while armed, a "TEST LOCATION" chip sits next to the share icon.
+    // tab; while armed, a "TEST LOCATION" chip sits next to the share icon. A
+    // failed share additionally offers arming it from the Chat tab.
     showTestLocationToggle: Boolean = false,
     useTestLocation: Boolean = false,
     onSetUseTestLocation: (Boolean) -> Unit = {},
+    onShareTestLocation: () -> Unit = {},
     onClearLog: () -> Unit,
     onOpenPrototype: () -> Unit,
     themeMode: ThemeMode,
@@ -122,6 +131,12 @@ fun MeshScreen(
                         onSendText = onSendText,
                         onShareLocation = onShareLocation,
                         useTestLocation = useTestLocation,
+                        showTestLocationToggle = showTestLocationToggle,
+                        shareDeadlineMs = shareDeadlineMs,
+                        onCancelShare = onCancelShare,
+                        shareFailureMessage = shareFailureMessage,
+                        myLatestShareWasCached = myLatestShareWasCached,
+                        onShareTestLocation = onShareTestLocation,
                     )
                 MeshTab.NETWORK ->
                     MeshNetworkTab(
