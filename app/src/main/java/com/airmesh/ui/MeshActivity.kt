@@ -71,6 +71,11 @@ class MeshActivity : ComponentActivity() {
     /** Wi-Fi Direct permissions held; drives the gate screen (button vs starting). */
     private val wifiDirectGranted = mutableStateOf(false)
 
+    /** Pending navigation from a notification tap; consumed by the UI. The seq
+     * number makes repeated taps of the same notification re-trigger the effect. */
+    private val navRequest = mutableStateOf<NavRequest?>(null)
+    private var navSeq = 0
+
     private lateinit var themeStore: ThemeModeStore
     private var locationProvider: AndroidLocationProvider? = null
 
@@ -144,6 +149,8 @@ class MeshActivity : ComponentActivity() {
             val service = (binder as? MeshService.LocalBinder)?.service ?: return
             meshService.value = service
             serviceBound = true
+            // Notifications posted while we were opening the app are redundant now.
+            service.clearMessageNotifications()
             // Fresh permission snapshot so the connector's state is accurate on (re)bind.
             service.onPermissionResults(permissionStates())
             // Every phase of a share attempt lands in the service's event log.
@@ -177,6 +184,11 @@ class MeshActivity : ComponentActivity() {
             startMeshService()
         }
 
+        // A notification tap may have launched us; parse its navigation extras once.
+        // On recreation (savedInstanceState != null) the pending request is kept as-is:
+        // re-parsing would scroll to a stale message again after rotation.
+        if (savedInstanceState == null) handleNavIntent(intent)
+
         setContent {
             val themeMode = remember { mutableStateOf(themeStore.load()) }
             val dark = resolveDarkTheme(themeMode.value, isSystemInDarkTheme())
@@ -204,6 +216,8 @@ class MeshActivity : ComponentActivity() {
                             myLastFix = myLastFix.value,
                             shareStatus = shareStatus.value,
                             events = events,
+                            navRequest = navRequest.value,
+                            onNavConsumed = { navRequest.value = null },
                             onRequestPermissions = ::requestPermissions,
                             onDiscover = service::discover,
                             onCreateGroup = service::createGroup,
@@ -249,6 +263,22 @@ class MeshActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        // singleTop: tapping a notification while this activity is at the top of its
+        // task reuses it instead of stacking a copy; route its extras like a fresh launch.
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNavIntent(intent)
+    }
+
+    /** Parses navigation extras into a [NavRequest] for the UI (the parsing itself is pure and JVM-tested). */
+    private fun handleNavIntent(intent: Intent?) {
+        navSeq += 1
+        // The parser takes a plain map so it stays unit-testable without Android.
+        val extras = intent?.extras?.let { bundle -> bundle.keySet().associateWith { bundle[it] } } ?: emptyMap()
+        navRequest.value = NavRequest(navSeq, parseNavigationTarget(extras))
+    }
+
     /**
      * Edge-to-edge: content draws behind both bars (the Scaffold insets it), and
      * the bar icon contrast is forced to match our theme — white icons on dark,
@@ -270,6 +300,8 @@ class MeshActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         AppForeground.activityStarted()
+        // The chat list already shows received items; dismiss their notifications.
+        meshService.value?.clearMessageNotifications()
         // Keep the screen on only while this activity is in the foreground — Wi-Fi
         // Direct drops when the phone sleeps. The mesh itself survives sleep via
         // the foreground service; backgrounding must never stop it.

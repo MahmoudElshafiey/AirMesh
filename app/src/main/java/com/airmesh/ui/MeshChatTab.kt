@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -51,8 +52,10 @@ import com.airmesh.node.formatAgeMs
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.LocationPayload
 import com.airmesh.protocol.haversineMeters
+import com.airmesh.service.IncomingKind
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * One row in the chat list. New message kinds add a subtype plus one `when`
@@ -98,6 +101,10 @@ fun MeshChatTab(
     // My latest outgoing card gets a "cached X ago" label when its fix was last-known.
     myLatestShareWasCached: Boolean = false,
     onShareTestLocation: () -> Unit = {},
+    // A notification tap asked to scroll to this item (null when none); the tab
+    // consumes it via [onScrollConsumed] once the jump is done.
+    scrollToKey: MessageKey? = null,
+    onScrollConsumed: () -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     // Follow the newest item by default. Scrolling up pauses it so old items
@@ -122,6 +129,27 @@ fun MeshChatTab(
                 // Within two items of the end counts as "at the bottom".
                 follow = rows.isNotEmpty() && first >= rows.size - 2
             }
+    }
+
+    // A notification tap asked to scroll to a specific item; jump there once and
+    // hand the request back so it is not re-applied on later recompositions.
+    val rowsRef = rememberUpdatedState(rows)
+    LaunchedEffect(scrollToKey) {
+        val key = scrollToKey ?: return@LaunchedEffect
+        follow = false // do not yank back to the newest item right after the jump
+        var index = -1
+        // Cold start: the tapped item may still be loading from Room; give it a
+        // moment before giving up and landing at the bottom instead.
+        withTimeoutOrNull(3_000) {
+            while (true) {
+                val current = rowsRef.value
+                index = current.indexOfFirst { it.matchesChatRow(key) }
+                if (index >= 0 || current.isNotEmpty()) break
+                delay(250)
+            }
+        }
+        listState.animateScrollToItem(if (index >= 0) index else rowsRef.value.lastIndex.coerceAtLeast(0))
+        onScrollConsumed()
     }
 
     /** Haversine distance to my own last fix; null when I have no recent one. */
@@ -445,6 +473,14 @@ private fun ShareWaitingRow(deadlineMs: Long?, onCancel: () -> Unit) {
             Text("Cancel")
         }
     }
+}
+
+/** Whether a chat row is the item a notification tap asked to scroll to. */
+private fun ChatRow.matchesChatRow(key: MessageKey): Boolean = when (key.kind) {
+    IncomingKind.TEXT -> this is ChatRow.TextMessage &&
+        message.senderId == key.senderId && message.timestamp == key.timestampMs
+    IncomingKind.LOCATION -> this is ChatRow.LocationItem &&
+        location.senderId == key.senderId && location.timestamp == key.timestampMs
 }
 
 /** Small reminder that the debug fixed test point is armed (debug builds only). */

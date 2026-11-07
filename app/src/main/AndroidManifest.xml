@@ -52,11 +52,16 @@
             android:exported="true" />
 
         <!-- Real mesh UI: launcher. The throwaway Wi-Fi Direct prototype stays
-             reachable from a button inside MeshActivity. -->
+             reachable from a button inside MeshActivity.
+             singleTop (not singleTask): tapping a notification while this activity
+             is at the top of its task reuses it via onNewIntent instead of stacking
+             a second copy; singleTask would also pop PrototypeActivity off the stack,
+             which surprises users who opened it from the Network tab. -->
         <activity
             android:name=".ui.MeshActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

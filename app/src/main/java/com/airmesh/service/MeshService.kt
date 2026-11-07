@@ -22,7 +22,10 @@ import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.WifiDirectConnector
+import com.airmesh.ui.EXTRA_MESSAGE_KEY
+import com.airmesh.ui.EXTRA_TAB
 import com.airmesh.ui.MeshActivity
+import com.airmesh.ui.TAB_CHAT
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -80,6 +83,9 @@ class MeshService : Service() {
 
     /** Keys of incoming items already notified, so list re-emissions do not repost. */
     private val seenIncoming = LinkedHashSet<String>()
+
+    /** Ids of per-message notifications currently posted; cleared when the UI is visible. */
+    private val postedIncomingIds = mutableSetOf<Int>()
 
     override fun onCreate() {
         super.onCreate()
@@ -250,16 +256,41 @@ class MeshService : Service() {
         if (!shouldPostMessageNotification(AppForeground.anyActivityVisible, _messageNotificationsEnabled.value)) return
 
         val content = messageNotificationContent(kind, senderId, text)
+        // Tapping opens the chat scrolled to this item. The dedup key doubles as
+        // the navigation extra: parseMessageKey inverts exactly this format.
+        val openChat = PendingIntent.getActivity(
+            this, key.hashCode(), Intent(this, MeshActivity::class.java)
+                .putExtra(EXTRA_TAB, TAB_CHAT)
+                .putExtra(EXTRA_MESSAGE_KEY, key),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val notification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
             .setContentTitle(content.title)
             .setContentText(content.body)
             .setSmallIcon(R.drawable.ic_notification_mesh)
             .setGroup(GROUP_MESSAGES)
+            .setContentIntent(openChat)
             .setAutoCancel(true)
             .build()
         // Hash of the dedup key: stable per item (a repost replaces its own slot),
-        // different items almost never collide.
-        notificationManager.notify(key.hashCode(), notification)
+        // different items almost never collide. The request code matches, so a
+        // repost updates this notification's intent instead of creating a new one.
+        val id = key.hashCode()
+        postedIncomingIds.add(id)
+        notificationManager.notify(id, notification)
+    }
+
+    /**
+     * Dismisses the per-message notifications while the UI is visible — the chat
+     * list already shows those items. Never touches the ongoing running
+     * notification (a different id and channel).
+     */
+    fun clearMessageNotifications() {
+        if (postedIncomingIds.isEmpty()) return
+        val count = postedIncomingIds.size
+        postedIncomingIds.forEach { id -> notificationManager.cancel(id) }
+        postedIncomingIds.clear()
+        _eventLog.log("service: cleared $count message notification(s) — the app is visible")
     }
 
     /** Network tab toggle: persist the choice and apply it to future posts. */
@@ -272,9 +303,10 @@ class MeshService : Service() {
     }
 
     private fun buildRunningNotification(neighborCount: Int): Notification {
-        // Tapping the notification opens the app.
+        // Tapping the notification opens the chat tab; singleTop + onNewIntent in
+        // MeshActivity keep it from stacking a second copy of the activity.
         val openApp = PendingIntent.getActivity(
-            this, 0, Intent(this, MeshActivity::class.java),
+            this, 0, Intent(this, MeshActivity::class.java).putExtra(EXTRA_TAB, TAB_CHAT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         // The Stop action ends the service and removes the P2P group.

@@ -20,6 +20,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -63,6 +64,11 @@ fun MeshScreen(
     myLastFix: LocationFix?,
     shareStatus: LocationShareStatus,
     events: List<LogEntry>,
+    // A notification tap asks to switch tab and (for chat) scroll to an item.
+    // The seq re-triggers the effect on repeated taps; consumption is split —
+    // this screen handles keyless targets, the chat tab consumes its own key.
+    navRequest: NavRequest? = null,
+    onNavConsumed: () -> Unit = {},
     onRequestPermissions: () -> Unit,
     onDiscover: () -> Unit,
     onCreateGroup: () -> Unit,
@@ -96,6 +102,15 @@ fun MeshScreen(
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(MeshTab.CHAT.ordinal) }
     val tab = MeshTab.values()[selectedTab.coerceIn(0, MeshTab.values().size - 1)]
+
+    // A notification tap switches to its target tab. Keyless targets (and keys for
+    // non-chat tabs, which we never post) are consumed here; the chat tab consumes
+    // its own scroll key after it has actually scrolled.
+    LaunchedEffect(navRequest?.seq) {
+        val request = navRequest ?: return@LaunchedEffect
+        selectedTab = request.target.tab.toMeshTab().ordinal
+        if (request.target.messageKey == null || request.target.tab != NavTab.CHAT) onNavConsumed()
+    }
 
     Scaffold(
         topBar = {
@@ -141,6 +156,8 @@ fun MeshScreen(
                         shareFailureMessage = shareFailureMessage,
                         myLatestShareWasCached = myLatestShareWasCached,
                         onShareTestLocation = onShareTestLocation,
+                        scrollToKey = navRequest?.target?.messageKey,
+                        onScrollConsumed = onNavConsumed,
                     )
                 MeshTab.NETWORK ->
                     MeshNetworkTab(
@@ -191,5 +208,12 @@ private fun StatusChip(role: P2pRole, neighborCount: Int) {
             Text(statusChipText(role, neighborCount), style = MaterialTheme.typography.labelMedium)
         }
     }
+}
+
+/** Explicit mapping so the two tab enums can never drift apart silently. */
+private fun NavTab.toMeshTab(): MeshTab = when (this) {
+    NavTab.CHAT -> MeshTab.CHAT
+    NavTab.NETWORK -> MeshTab.NETWORK
+    NavTab.LOG -> MeshTab.LOG
 }
 
