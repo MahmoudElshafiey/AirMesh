@@ -3,6 +3,8 @@ package com.airmesh.node
 import com.airmesh.protocol.Frame
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.FrameType
+import com.airmesh.protocol.LocationDecodeException
+import com.airmesh.protocol.LocationPayload
 import com.airmesh.routing.DedupCache
 import com.airmesh.routing.ReplayTrigger
 import com.airmesh.routing.Router
@@ -42,6 +44,27 @@ data class MeshMessage(
     val timestamp: Long,
     val ttl: Int,
     val outgoing: Boolean,
+)
+
+/**
+ * One shared location, received or sent. Kept in its own flow, separate from
+ * [MeshMessage], so text and location items never mix in one list.
+ *
+ * @property senderId node that reported the position (the local id for TX).
+ * @property latitudeE6 latitude in micro-degrees (-90_000_000..90_000_000).
+ * @property longitudeE6 longitude in micro-degrees (-180_000_000..180_000_000).
+ * @property accuracyMeters horizontal accuracy reported by the GPS, in meters.
+ * @property timestamp local receive/send time in milliseconds.
+ * @property ttl hops remaining in the received frame (or the initial TTL for
+ *   an outgoing frame), like [MeshMessage.ttl].
+ */
+data class MeshLocation(
+    val senderId: Int,
+    val latitudeE6: Int,
+    val longitudeE6: Int,
+    val accuracyMeters: Int,
+    val timestamp: Long,
+    val ttl: Int,
 )
 
 /**
@@ -98,6 +121,10 @@ class AirMeshNode(
 
     private val _messages = MutableStateFlow<List<MeshMessage>>(emptyList())
     val messages: StateFlow<List<MeshMessage>> = _messages.asStateFlow()
+
+    /** Delivered (and locally sent) locations, separate from [messages]. */
+    private val _locations = MutableStateFlow<List<MeshLocation>>(emptyList())
+    val locations: StateFlow<List<MeshLocation>> = _locations.asStateFlow()
 
     /** Node ids with a live handshaken transport socket. */
     val neighbors: StateFlow<Set<Int>> = transport.neighbors
@@ -214,6 +241,34 @@ class AirMeshNode(
         eventLog.clear()
     }
 
+    /**
+     * Floods a position as one LOCATION frame through the same router as text:
+     * identical flooding, dedup and store-and-forward — only the payload type
+     * differs. Runs on the background dispatcher like [sendText].
+     */
+    suspend fun sendLocation(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Boolean =
+        withContext(dispatcher) {
+            try {
+                val payload = LocationPayload(latitudeE6, longitudeE6, accuracyMeters).encode()
+                val frame = router.originate(FrameType.LOCATION, payload)
+                appendLocation(
+                    MeshLocation(
+                        senderId = localNodeId,
+                        latitudeE6 = latitudeE6,
+                        longitudeE6 = longitudeE6,
+                        accuracyMeters = accuracyMeters,
+                        timestamp = clock(),
+                        ttl = frame.ttl,
+                    ),
+                )
+                eventLog.log("originated LOCATION seq=${frame.seq} ttl=${frame.ttl} (${payload.size} bytes)")
+                true
+            } catch (error: Exception) {
+                eventLog.log("send failed: ${error.javaClass.simpleName}: ${error.message}")
+                false
+            }
+        }
+
     private suspend fun onIncoming(packet: ReceivedPacket) {
         val frame = FrameCodec.decode(packet.bytes).getOrNull()
         if (frame == null) {
@@ -228,7 +283,15 @@ class AirMeshNode(
     }
 
     private fun onDelivered(frame: Frame) {
-        if (frame.type != FrameType.MSG) return
+        when (frame.type) {
+            FrameType.MSG -> deliverText(frame)
+            FrameType.LOCATION -> deliverLocation(frame)
+            // ACK/HELLO frames are protocol traffic, not user content.
+            else -> Unit
+        }
+    }
+
+    private fun deliverText(frame: Frame) {
         val text = String(frame.payload, Charsets.UTF_8)
         appendMessage(
             MeshMessage(
@@ -240,6 +303,33 @@ class AirMeshNode(
             ),
         )
         eventLog.log("delivered MSG node=${frame.nodeId} seq=${frame.seq} ttl=${frame.ttl}")
+    }
+
+    /**
+     * Delivers a LOCATION frame. A malformed payload is logged and dropped —
+     * one bad frame from a neighbor must never crash the node, so decode
+     * failures are handled instead of thrown.
+     */
+    private fun deliverLocation(frame: Frame) {
+        LocationPayload.decode(frame.payload).fold(
+            onSuccess = { payload ->
+                appendLocation(
+                    MeshLocation(
+                        senderId = frame.nodeId,
+                        latitudeE6 = payload.latitudeE6,
+                        longitudeE6 = payload.longitudeE6,
+                        accuracyMeters = payload.accuracyMeters,
+                        timestamp = clock(),
+                        ttl = frame.ttl,
+                    ),
+                )
+                eventLog.log("delivered LOCATION node=${frame.nodeId} seq=${frame.seq} ttl=${frame.ttl}")
+            },
+            onFailure = { error ->
+                val reason = (error as? LocationDecodeException)?.failure?.name ?: error.message.orEmpty()
+                eventLog.log("LOCATION from ${frame.nodeId} dropped: $reason")
+            },
+        )
     }
 
     /**
@@ -352,6 +442,12 @@ class AirMeshNode(
     private fun appendMessage(message: MeshMessage) {
         _messages.update { current ->
             (current + message).takeLast(MAX_MESSAGES)
+        }
+    }
+
+    private fun appendLocation(location: MeshLocation) {
+        _locations.update { current ->
+            (current + location).takeLast(MAX_MESSAGES)
         }
     }
 }
