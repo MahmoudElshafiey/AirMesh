@@ -113,7 +113,7 @@ fun MeshScreen(
                         onConnectPeer = onConnectPeer,
                         onOpenPrototype = onOpenPrototype,
                     )
-                MeshTab.LOG -> LogPlaceholder()
+                MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
             }
         }
     }
@@ -144,7 +144,3 @@ private fun StatusChip(role: P2pRole, neighborCount: Int) {
     }
 }
 
-@Composable
-private fun LogPlaceholder() {
-    Text("Log tab — coming in the next commit.", modifier = Modifier.padding(16.dp))
-}
