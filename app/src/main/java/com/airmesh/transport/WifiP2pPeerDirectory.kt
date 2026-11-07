@@ -171,12 +171,7 @@ class WifiP2pPeerDirectory(
 
     private fun upsertPeer(ad: AirMeshAd?, device: WifiP2pDevice?) {
         val ad = ad ?: return // not a well-formed AirMesh token; ignore
-        // Prefer the address P2P discovery reports over the one the advertiser
-        // claims in its token (both callbacks carry the peer's WifiP2pDevice).
-        val address = device?.deviceAddress
-            ?.takeIf { it.isNotEmpty() && it != PLACEHOLDER_ADDRESS }
-            ?: ad.deviceAddress
-        if (address.equals(getSelfAddress(), ignoreCase = true)) return // our own ad
+        val address = resolvePeerAddress(device?.deviceAddress, ad.deviceAddress, getSelfAddress()) ?: return
         lastSeen[address] = System.currentTimeMillis()
         _peers.update { current ->
             val peer = AirMeshPeer(address, ad.nodeId, ad.isGroupOwner)
@@ -237,8 +232,5 @@ class WifiP2pPeerDirectory(
 
         /** How often the loop wakes; discovery re-issue is gated by [shouldRefreshDiscovery]. */
         private const val CHECK_SLICE_MS = 5_000L
-
-        /** Some devices report this placeholder address before they know their own. */
-        private const val PLACEHOLDER_ADDRESS = "02:00:00:00:00:00"
     }
 }

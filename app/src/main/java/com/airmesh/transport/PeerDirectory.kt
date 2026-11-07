@@ -45,3 +45,17 @@ const val PEER_STALE_MS = 120_000L
 /** Pure staleness decision so the sweep is testable with a fake clock (no coroutines). */
 fun shouldExpirePeer(lastSeenMs: Long, nowMs: Long): Boolean =
     nowMs - lastSeenMs >= PEER_STALE_MS
+
+/** Some devices report this placeholder address before they know their own. */
+const val PEER_PLACEHOLDER_ADDRESS = "02:00:00:00:00:00"
+
+/**
+ * Picks which address identifies a discovered peer: the one P2P discovery
+ * reports is preferred over the one the ad token claims (some devices report a
+ * placeholder MAC in the device info). Returns null when the ad is our own.
+ */
+fun resolvePeerAddress(deviceAddress: String?, tokenAddress: String, selfAddress: String?): String? {
+    val address = deviceAddress?.takeIf { it.isNotEmpty() && it != PEER_PLACEHOLDER_ADDRESS } ?: tokenAddress
+    if (selfAddress != null && address.equals(selfAddress, ignoreCase = true)) return null
+    return address
+}

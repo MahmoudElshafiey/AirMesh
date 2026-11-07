@@ -110,4 +110,29 @@ class AirMeshAdCodecTest {
         assertFalse(shouldExpirePeer(50_000L, 90_000L)) // 40 s elapsed
         assertTrue(shouldExpirePeer(10_000L, 130_000L)) // 120 s elapsed
     }
+
+    // --- peer address resolution ----------------------------------------------------
+
+    @Test
+    fun `the device-reported address wins over the token address`() {
+        assertEquals("BB:00:00:00:00:02", resolvePeerAddress("BB:00:00:00:00:02", "AA:BB:CC:DD:EE:FF", null))
+    }
+
+    @Test
+    fun `a missing or placeholder device address falls back to the token`() {
+        assertEquals("AA:BB:CC:DD:EE:FF", resolvePeerAddress("", "AA:BB:CC:DD:EE:FF", null))
+        assertEquals("AA:BB:CC:DD:EE:FF", resolvePeerAddress(PEER_PLACEHOLDER_ADDRESS, "AA:BB:CC:DD:EE:FF", null))
+    }
+
+    @Test
+    fun `our own ad is filtered case-insensitively`() {
+        assertNull(resolvePeerAddress("aa:bb:cc:dd:ee:ff", "AA:BB:CC:DD:EE:FF", "AA:BB:CC:DD:EE:FF"))
+        // Even when the device reports a placeholder, the token MAC identifies us.
+        assertNull(resolvePeerAddress(PEER_PLACEHOLDER_ADDRESS, "aa:bb:cc:dd:ee:ff", "AA:BB:CC:DD:EE:FF"))
+    }
+
+    @Test
+    fun `a null self address never filters out peers`() {
+        assertEquals("AA:BB:CC:DD:EE:FF", resolvePeerAddress(null, "AA:BB:CC:DD:EE:FF", null))
+    }
 }
