@@ -69,7 +69,12 @@ class MeshActivity : ComponentActivity() {
     /** Location permissions are requested only when the user taps "Share my location". */
     private val locationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) {
+    ) { results ->
+        // Same per-permission lines as the Wi-Fi Direct connector, so a denied
+        // dialog is visible in the event log.
+        results.forEach { (permission, granted) ->
+            eventLog.log("runtime permission ${permission.substringAfterLast('.')} granted=$granted")
+        }
         if (PermissionRequirements.locationPermissionsForSharing().all(::isPermissionGranted)) {
             shareMyLocation()
         } else {
@@ -211,6 +216,7 @@ class MeshActivity : ComponentActivity() {
 
     /** Waits for a fix (or the debug test point), then floods it as a LOCATION frame. */
     private fun shareMyLocation() {
+        eventLog.log("location: share attempt started (source=${if (useTestLocation.value) "test-location" else "gps"})")
         shareStatus.value = LocationShareStatus.WAITING_FOR_FIX
         uiScope.launch {
             val fix = try {
