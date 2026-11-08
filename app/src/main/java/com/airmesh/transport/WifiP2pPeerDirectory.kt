@@ -61,6 +61,7 @@ class WifiP2pPeerDirectory(
 
     private val serviceListener = object : WifiP2pManager.DnsSdServiceResponseListener {
         override fun onDnsSdServiceAvailable(serviceType: String, instanceName: String, device: WifiP2pDevice) {
+            log("dnssd: service available '$instanceName' from ${device?.deviceAddress ?: "(no address)"}")
             // The token doubles as the instance name; the TXT callback refines it.
             upsertPeer(AirMeshAdCodec.decode(instanceName), device)
         }
@@ -72,38 +73,41 @@ class WifiP2pPeerDirectory(
             txtRecord: Map<String, String>,
             device: WifiP2pDevice,
         ) {
+            log("dnssd: TXT record $txtRecord from ${device?.deviceAddress ?: "(no address)"}")
             upsertPeer(AirMeshAdCodec.decode(txtRecord[TXT_AD_KEY]), device)
         }
     }
 
     init {
         if (manager == null) {
-            log("auto: WifiP2pManager unavailable — this device has no Wi-Fi Direct support")
+            log("dnssd: WifiP2pManager unavailable — this device has no Wi-Fi Direct support")
         } else {
             try {
                 channel = manager.initialize(appContext, Looper.getMainLooper()) {
-                    log("auto: P2P channel disconnected by the system")
+                    log("dnssd: P2P channel disconnected by the system")
                 }
                 // One pair of listeners for the lifetime of the channel. Both
                 // callbacks carry the peer's WifiP2pDevice, so we get its MAC
                 // without a TXT round-trip.
                 manager.setDnsSdResponseListeners(channel!!, serviceListener, txtListener)
+                log("dnssd: response listeners registered (service + TXT)")
             } catch (error: Exception) {
-                log("auto: initialize failed: ${error.javaClass.simpleName}: ${error.message}")
+                log("dnssd: initialize failed: ${error.javaClass.simpleName}: ${error.message}")
             }
         }
     }
 
     override fun startAdvertising(nodeId: Int, isGroupOwner: Boolean) {
-        val ch = channel ?: return log("auto: cannot advertise — no P2P channel")
+        val ch = channel ?: return log("dnssd: cannot advertise — no P2P channel")
         val self = getSelfAddress() ?: run {
-            log("auto: cannot advertise — own device address unknown yet")
+            log("dnssd: cannot advertise — own device address unknown yet")
             return
         }
         if (advertised == nodeId to isGroupOwner && serviceInfo != null) return // already advertising this role
         removeLocalServiceQuietly(ch)
 
         val token = AirMeshAdCodec.encode(self, nodeId, isGroupOwner)
+        log("dnssd: addLocalService instance='$token' txt={${TXT_AD_KEY}=$token}")
         val info = WifiP2pDnsSdServiceInfo.newInstance(
             AirMeshAdCodec.SERVICE_TYPE,
             token,                     // instance name: the token on every version
@@ -113,13 +117,13 @@ class WifiP2pPeerDirectory(
         serviceInfo = info
         manager?.addLocalService(ch, info, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                log("auto: advertising as AirMesh peer (owner=$isGroupOwner)")
+                log("dnssd: addLocalService ok (owner=$isGroupOwner)")
             }
 
             override fun onFailure(reason: Int) {
                 advertised = null // allow a later startAdvertising to retry
                 serviceInfo = null
-                log("auto: ad registration failed reason=$reason")
+                log("dnssd: addLocalService failed reason=$reason")
             }
         })
         ensureLoop()
@@ -129,7 +133,7 @@ class WifiP2pPeerDirectory(
         if (discovering == enabled) return
         discovering = enabled
         val ch = channel ?: run {
-            log("auto: cannot discover — no P2P channel")
+            log("dnssd: cannot discover — no P2P channel")
             return
         }
         if (!enabled) {
@@ -162,21 +166,35 @@ class WifiP2pPeerDirectory(
             // discoverServices is a toggle (like discoverPeers): re-issuing it
             // restarts the scan, which is exactly what we want before Android's
             // ~2 min discovery timeout kills the previous one.
-            manager?.discoverServices(ch, null)
+            log("dnssd: discoverServices() issued")
+            manager?.discoverServices(ch, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() = log("dnssd: discoverServices ok (scan started)")
+
+                override fun onFailure(reason: Int) = log("dnssd: discoverServices failed reason=$reason")
+            })
             lastDiscoveryAtMs = System.currentTimeMillis()
         } catch (error: Exception) {
-            log("auto: service discovery failed: ${error.message}")
+            log("dnssd: service discovery failed: ${error.message}")
         }
     }
 
     private fun upsertPeer(ad: AirMeshAd?, device: WifiP2pDevice?) {
-        val ad = ad ?: return // not a well-formed AirMesh token; ignore
-        val address = resolvePeerAddress(device?.deviceAddress, ad.deviceAddress, getSelfAddress()) ?: return
+        if (ad == null) {
+            // A DNS-SD hit that is not a well-formed AirMesh token; ignore it.
+            log("dnssd: ignored: no AirMesh TXT")
+            return
+        }
+        val address = resolvePeerAddress(device?.deviceAddress, ad.deviceAddress, getSelfAddress()) ?: run {
+            // The only null case today is "this is our own advertisement".
+            log("dnssd: ignored own ad (#${ad.nodeId})")
+            return
+        }
         lastSeen[address] = System.currentTimeMillis()
         _peers.update { current ->
             val peer = AirMeshPeer(address, ad.nodeId, ad.isGroupOwner)
             (current.filterNot { it.deviceAddress == address } + peer).sortedBy { it.nodeId }
         }
+        log("dnssd: accepted AirMesh peer #${ad.nodeId} owner=${if (ad.isGroupOwner) 1 else 0} ($address)")
     }
 
     private fun sweepStalePeers(nowMs: Long) {
@@ -215,10 +233,15 @@ class WifiP2pPeerDirectory(
     }
 
     private fun addServiceRequestQuietly(ch: WifiP2pManager.Channel) {
+        log("dnssd: addServiceRequest(${AirMeshAdCodec.SERVICE_TYPE})")
         try {
-            manager?.addServiceRequest(ch, serviceRequest, null)
+            manager?.addServiceRequest(ch, serviceRequest, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() = log("dnssd: addServiceRequest ok")
+
+                override fun onFailure(reason: Int) = log("dnssd: addServiceRequest failed reason=$reason")
+            })
         } catch (error: Exception) {
-            log("auto: adding service request failed: ${error.message}")
+            log("dnssd: adding service request failed: ${error.message}")
         }
     }
 

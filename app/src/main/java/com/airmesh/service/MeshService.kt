@@ -405,13 +405,16 @@ class MeshService : Service() {
     // --- Auto-mesh event funnel -------------------------------------------------
 
     /**
-     * Feeds [event] to the controller (once it exists), logs every decision with an
-     * "auto:" prefix — state, event, actions — and executes the returned actions.
-     * Tick/PeersChanged are only logged when they produce actions; otherwise a line
-     * per second would drown the log.
+     * Feeds [event] to the controller (once it exists), logs every event with an
+     * "auto: event" line plus the full peer list the directory currently sees, then
+     * logs any decision (state, actions) and executes the returned actions. Tick is
+     * not logged per second — its effects surface as state-change lines instead.
      */
     private fun autoEvent(event: AutoMeshEvent, describe: String) {
         val controller = autoController ?: return
+        if (event !is AutoMeshEvent.Tick) {
+            _eventLog.log("auto: event $describe peers=${describePeers(peerDirectory.peers.value)}")
+        }
         val actions = controller.onEvent(event)
         syncAutoUi(controller)
         if (actions.isNotEmpty() || event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.PeersChanged) {
@@ -422,6 +425,12 @@ class MeshService : Service() {
         }
         actions.forEach(::executeAutoAction)
     }
+
+    /** The full peer list in one line, e.g. "[#24066@AA:.. owner, #58081@CC:..]". */
+    private fun describePeers(peers: List<AirMeshPeer>): String =
+        if (peers.isEmpty()) "[]" else peers.joinToString(prefix = "[", postfix = "]") { p ->
+            "#${p.nodeId}@${p.deviceAddress}${if (p.isGroupOwner) " owner" else ""}"
+        }
 
     /** Executes one controller action against the connector and peer directory. */
     private fun executeAutoAction(action: AutoMeshAction) {
