@@ -46,6 +46,7 @@ import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.autoMeshBannerText
+import com.airmesh.transport.noAirMeshPeersBannerText
 import kotlinx.coroutines.delay
 
 /** Bottom tabs. The selection is stored as an ordinal so it survives rotation. */
@@ -140,7 +141,11 @@ fun MeshScreen(
             nowMs = System.currentTimeMillis()
         }
     }
-    val autoBannerText = autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs)
+    // While searching, a long wait with only non-AirMesh devices visible gets the
+    // hint banner; otherwise the state banner applies.
+    val autoBannerText = noAirMeshPeersBannerText(
+        autoMeshState, nowMs, airMeshPeers.size, connectorState.peers.size,
+    ) ?: autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs)
 
     Scaffold(
         topBar = {

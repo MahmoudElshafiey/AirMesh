@@ -261,6 +261,7 @@ private fun NetworkTabAdvancedExpandedPreview() = ThemedTabPreview(darkTheme = f
 /** Every banner text the auto-mesh controller can produce, in order of use. */
 private val bannerPreviewTexts = listOf(
     "Searching for nearby AirMesh phones…",
+    "Found 2 Wi-Fi Direct devices but none advertises AirMesh. Open Advanced to connect manually.",
     "Creating a group — waiting for another phone to join",
     "Connecting to #7…",
     "Waiting for the other phone to accept the connection request",

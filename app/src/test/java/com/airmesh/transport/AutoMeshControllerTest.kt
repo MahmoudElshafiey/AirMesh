@@ -483,4 +483,29 @@ class AutoMeshControllerTest {
         val backoff = AutoMeshState.Backoff(14_500, "connect failed (other)")
         assertEquals("Retrying in 5s — connect failed (other)", autoMeshBannerText(backoff, 0, null, 10_000)) // ceil(4.5 s)
     }
+
+    // --- "no AirMesh peers" hint banner ---------------------------------------------
+
+    @Test
+    fun `hint appears only after 45s of searching with classic devices but no AirMesh peers`() {
+        val searching = AutoMeshState.Searching(0)
+        assertNull(noAirMeshPeersBannerText(searching, 44_999, 0, 3)) // not yet 45 s
+        assertEquals("Found 3 Wi-Fi Direct devices but none advertises AirMesh. Open Advanced to connect manually.",
+            noAirMeshPeersBannerText(searching, NO_AIRMESH_PEERS_AFTER_MS, 0, 3))
+    }
+
+    @Test
+    fun `hint uses the singular form for one device`() {
+        assertEquals("Found 1 Wi-Fi Direct device but none advertises AirMesh. Open Advanced to connect manually.",
+            noAirMeshPeersBannerText(AutoMeshState.Searching(0), NO_AIRMESH_PEERS_AFTER_MS, 0, 1))
+    }
+
+    @Test
+    fun `hint is suppressed when not searching, when an AirMesh peer exists, or when nothing is visible`() {
+        val t = NO_AIRMESH_PEERS_AFTER_MS
+        assertNull(noAirMeshPeersBannerText(AutoMeshState.Idle, t, 0, 3))
+        assertNull(noAirMeshPeersBannerText(AutoMeshState.Creating, t, 0, 3))
+        assertNull(noAirMeshPeersBannerText(AutoMeshState.Searching(0), t, 1, 3)) // an AirMesh peer is visible
+        assertNull(noAirMeshPeersBannerText(AutoMeshState.Searching(0), t, 0, 0)) // nothing at all: plain searching banner
+    }
 }

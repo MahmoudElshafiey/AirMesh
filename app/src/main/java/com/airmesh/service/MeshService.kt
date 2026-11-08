@@ -36,6 +36,7 @@ import com.airmesh.transport.PeerDirectory
 import com.airmesh.transport.TieBreakToken
 import com.airmesh.transport.WifiDirectConnector
 import com.airmesh.transport.WifiP2pPeerDirectory
+import com.airmesh.transport.noAirMeshPeersBannerText
 import com.airmesh.ui.EXTRA_MESSAGE_KEY
 import com.airmesh.ui.EXTRA_TAB
 import com.airmesh.ui.MeshActivity
@@ -220,8 +221,25 @@ class MeshService : Service() {
         // --- Auto-mesh wiring ---------------------------------------------------
         // One tick per second drives backoff expiry, join timeouts and the takeover deadline.
         serviceScope.launch {
+            var noAirMeshHintShown = false
             while (isActive) {
                 delay(1_000L)
+                // Log once when the "no AirMesh peers" hint appears on screen; reset so a
+                // later recurrence (peers left, then new classic devices appeared) logs again.
+                val controller = autoController
+                val hint = if (controller != null) {
+                    noAirMeshPeersBannerText(
+                        controller.state, System.currentTimeMillis(),
+                        peerDirectory.peers.value.size, connector.state.value.peers.size,
+                    )
+                } else null
+                when {
+                    hint != null && !noAirMeshHintShown -> {
+                        _eventLog.log("auto: $hint")
+                        noAirMeshHintShown = true
+                    }
+                    hint == null -> noAirMeshHintShown = false
+                }
                 autoEvent(AutoMeshEvent.Tick, "tick")
             }
         }

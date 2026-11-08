@@ -86,6 +86,9 @@ const val AUTO_GROUP_GONE_WAIT_JITTER_MS = 2_000L
 const val AUTO_FAILURE_BASE_MS = 2_000L
 const val AUTO_FAILURE_CAP_MS = 30_000L
 
+/** Searching this long with classic devices visible but no AirMesh ad shows a hint banner. */
+const val NO_AIRMESH_PEERS_AFTER_MS = 45_000L
+
 /**
  * One random 32-bit token per process. Node ids are unique per install, but if two
  * phones ever share an id the election must still be symmetric: both sides see each
@@ -145,6 +148,25 @@ fun autoMeshBannerText(
         val secondsLeft = ((s.untilMs - nowMs) / 1000 + 1).coerceAtLeast(1)
         "Retrying in ${secondsLeft}s — ${s.reason}"
     }
+}
+
+/**
+ * Hint for the case where DNS-SD finds nothing but the radio clearly sees other
+ * Wi-Fi Direct devices (wrong app, old version, or auto-mesh off there). Shown
+ * only while Searching after [NO_AIRMESH_PEERS_AFTER_MS]; null otherwise so
+ * [autoMeshBannerText] keeps applying. We never connect to such a device on our own.
+ */
+fun noAirMeshPeersBannerText(
+    state: AutoMeshState,
+    nowMs: Long,
+    airMeshPeerCount: Int,
+    classicDeviceCount: Int,
+): String? {
+    val s = state as? AutoMeshState.Searching ?: return null
+    if (nowMs - s.sinceMs < NO_AIRMESH_PEERS_AFTER_MS) return null
+    if (airMeshPeerCount != 0 || classicDeviceCount == 0) return null
+    val noun = if (classicDeviceCount == 1) "device" else "devices"
+    return "Found $classicDeviceCount Wi-Fi Direct $noun but none advertises AirMesh. Open Advanced to connect manually."
 }
 
 /**
