@@ -49,7 +49,15 @@ sealed interface DiscoveryStrategyEvent {
 class DiscoveryStrategySelector(
     private val store: DiscoveryStrategyStore,
     defaultStrategy: Int = MIN_STRATEGY,
+    rotationOrder: List<Int> = DEFAULT_ROTATION_ORDER,
+    val silenceWindowMs: Long = WATCH_MS,
 ) {
+
+    /** Active rotation order (sanitized to 1..4, non-empty); wraps last -> first. */
+    val order: List<Int> = rotationOrder
+        .filter { it in MIN_STRATEGY..MAX_STRATEGY }
+        .distinct()
+        .ifEmpty { DEFAULT_ROTATION_ORDER }
 
     /**
      * Current strategy, 1..4. Restored from storage, or starts at [defaultStrategy]
@@ -69,7 +77,7 @@ class DiscoveryStrategySelector(
     private var scanStartedAtMs: Long? = null
     private var sawCallbackThisScan = false
 
-    /** A scan is about to start: open a fresh [WATCH_MS] window from [nowMs]. */
+    /** A scan is about to start: open a fresh [silenceWindowMs] window from [nowMs]. */
     fun scanStarted(nowMs: Long) {
         if (rotationStopped) return
         watching = true
@@ -94,9 +102,9 @@ class DiscoveryStrategySelector(
         val startedAt = scanStartedAtMs ?: return DiscoveryStrategyEvent.None
         // >= so a tick landing exactly on the boundary rotates; a callback that
         // arrives at the same instant still counts, because it is processed first.
-        if (nowMs - startedAt < WATCH_MS) return DiscoveryStrategyEvent.None
+        if (nowMs - startedAt < silenceWindowMs) return DiscoveryStrategyEvent.None
         val from = strategy
-        strategy = nextStrategy(from)
+        strategy = nextInOrder(from)
         // Disarm: the caller re-arms with scanStarted() for the next scan.
         watching = false
         scanStartedAtMs = null
@@ -107,20 +115,51 @@ class DiscoveryStrategySelector(
     /** True when the current window has run out but nobody called [tick] yet. */
     fun isWindowExpired(nowMs: Long): Boolean {
         val startedAt = scanStartedAtMs ?: return false
-        return watching && !rotationStopped && nowMs - startedAt >= WATCH_MS
+        return watching && !rotationStopped && nowMs - startedAt >= silenceWindowMs
     }
 
     /** Set by the last scan's outcome; exposed for logging only. */
     fun sawCallbackSinceScanStart(): Boolean = sawCallbackThisScan
 
+    /** One-line startup summary logged once per process. */
+    fun startupLogLine(): String =
+        "dnssd: starting strategy=$strategy (default, not persisted) " +
+            "order=${order.joinToString(",")} window=${silenceWindowMs / 1000}s"
+
+    private fun nextInOrder(current: Int): Int {
+        val clean = sanitize(current)
+        val index = order.indexOf(clean)
+        return if (index < 0) order.first() else order[(index + 1) % order.size]
+    }
+
     companion object {
-        /** How long a scan may stay silent before the strategy rotates. */
+        /** Default silence window before the strategy rotates (kept for existing tests). */
         const val WATCH_MS = 25_000L
+
+        /** Production silence window: 12 s before rotating to the next strategy. */
+        const val SERVICE_SILENCE_WINDOW_MS = 12_000L
+
+        /** Production starting strategy (unfiltered DNS-SD service request). */
+        const val SERVICE_DEFAULT_STRATEGY = 2
 
         const val MIN_STRATEGY = 1
         const val MAX_STRATEGY = 4
 
-        /** Next strategy in the fallback order, wrapping 4 → 1. */
+        /** Default fallback order: 1 -> 2 -> 3 -> 4 -> 1. */
+        val DEFAULT_ROTATION_ORDER: List<Int> = listOf(1, 2, 3, 4)
+
+        /** Production fallback order: 2 -> 4 -> 3 -> 1 -> 2 (4 is a superset of 3). */
+        val SERVICE_ROTATION_ORDER: List<Int> = listOf(2, 4, 3, 1)
+
+        /** Builds the production selector: no persistence, starts at 2, order 2,4,3,1, 12 s window. */
+        fun forService(): DiscoveryStrategySelector = DiscoveryStrategySelector(
+            store = NoDiscoveryStrategyStore,
+            defaultStrategy = SERVICE_DEFAULT_STRATEGY,
+            rotationOrder = SERVICE_ROTATION_ORDER,
+            silenceWindowMs = SERVICE_SILENCE_WINDOW_MS,
+        )
+
+        /** Next strategy in the default fallback order, wrapping 4 → 1. */
         fun nextStrategy(current: Int): Int =
             if (sanitize(current) >= MAX_STRATEGY) MIN_STRATEGY else sanitize(current) + 1
 

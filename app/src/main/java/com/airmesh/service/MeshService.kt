@@ -156,18 +156,11 @@ class MeshService : Service() {
         // owns every scan on the radio — discoverPeers cancels an ongoing DNS-SD
         // scan (and vice versa), so they must never overlap.
         val tieBreakToken = TieBreakToken.current
-        // Persisted last-good scan strategy, so a phone remembers what worked here.
-        val strategyStore = object : DiscoveryStrategyStore {
-            override fun load(): Int? {
-                val saved = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .getInt(KEY_DISCOVERY_STRATEGY, 0)
-                return if (saved == 0) null else saved
-            }
-
-            override fun save(strategy: Int) {
-                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                    .putInt(KEY_DISCOVERY_STRATEGY, strategy).apply()
-            }
+        // Every process starts at default strategy 2 (unfiltered) with NoDiscoveryStrategyStore,
+        // ignoring any value saved in SharedPreferences by older sessions.
+        val selector = DiscoveryStrategySelector.forService()
+        if (loggedStartupStrategy.compareAndSet(false, true)) {
+            _eventLog.log(selector.startupLogLine())
         }
         discoveryCoordinator = DiscoveryCoordinator(
             backend = object : DiscoveryBackend {
@@ -200,10 +193,7 @@ class MeshService : Service() {
             // Delays run on the main looper, the same thread as the P2P callbacks
             // and the directory's own state, so the sequencer needs no locking.
             schedule = { ms, block -> serviceScope.launch { delay(ms); block() } },
-            // Strategy 1 (filtered DNS-SD request) stayed silent for the full 25 s
-            // window across tested phones while strategy 2 (unfiltered) answered within
-            // 1 s, so fresh installs start at 2 to avoid wasting the first window.
-            strategySelector = DiscoveryStrategySelector(strategyStore, defaultStrategy = 2),
+            strategySelector = selector,
         )
         // The ad carries node id + token, not a MAC: our own P2P address is a
         // placeholder on many devices and nothing about advertising needs it.
@@ -672,7 +662,7 @@ class MeshService : Service() {
         private const val KEY_MESSAGE_NOTIFICATIONS_ENABLED = "message_notifications_enabled"
         /** Network tab switch: whether auto-mesh is on (default true). */
         private const val KEY_AUTO_MESH_ENABLED = "auto_mesh_enabled"
-        /** Last discovery strategy that produced a DNS-SD callback (1..4, 0 = none). */
-        private const val KEY_DISCOVERY_STRATEGY = "discovery_strategy"
+        /** Ensures the initial DNS-SD strategy configuration is logged once per process. */
+        private val loggedStartupStrategy = java.util.concurrent.atomic.AtomicBoolean(false)
     }
 }

@@ -220,7 +220,7 @@ class DiscoveryCoordinator(
     private fun rotateIfSilent(nowMs: Long) {
         val event = strategySelector.tick(nowMs)
         if (event !is DiscoveryStrategyEvent.Rotate) return
-        log("dnssd: strategy ${event.from} silent for ${DiscoveryStrategySelector.WATCH_MS / 1000} s — rotating to ${event.to}")
+        log("dnssd: strategy ${event.from} silent for ${strategySelector.silenceWindowMs / 1000} s — rotating to ${event.to}")
         // Abandon whatever the old strategy was doing and start the new plan now.
         sequencer.reset()
         lastCycleAtMs = null
