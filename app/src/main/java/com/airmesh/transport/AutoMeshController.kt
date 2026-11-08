@@ -87,22 +87,32 @@ const val AUTO_FAILURE_BASE_MS = 2_000L
 const val AUTO_FAILURE_CAP_MS = 30_000L
 
 /**
- * The owner to join when several are visible: lowest node id wins, ties broken
- * by device address so every phone computes the same winner.
+ * One random 32-bit token per process. Node ids are unique per install, but if two
+ * phones ever share an id the election must still be symmetric: both sides see each
+ * other's token in the ad and rank by (node id, token). Generated once at class load
+ * so it is stable for the whole process lifetime.
  */
-fun chooseAutoMeshOwner(peers: List<AirMeshPeer>): AirMeshPeer? =
-    peers.filter { it.isGroupOwner }.minWithOrNull(compareBy({ it.nodeId }, { it.deviceAddress }))
+object TieBreakToken {
+    // nextInt is an instance method on java.util.Random, so a throwaway instance.
+    val current: Int = Random().nextInt()
+}
 
 /**
- * Whether I create the group when no owner is visible: the highest node id among
- * {me ∪ visible peers} creates, everyone else waits for the takeover window.
- * Equal ids fall back to device address (largest wins), which is symmetric —
- * both phones compute the same winner.
+ * The owner to join when several are visible: lowest node id wins, ties broken by
+ * tie-break token so every phone computes the same winner (no own address needed).
  */
-fun iAmAutoMeshCreator(myNodeId: Int, myDeviceAddress: String, peers: List<AirMeshPeer>): Boolean {
-    val me = myNodeId to myDeviceAddress
-    val candidates = peers.map { it.nodeId to it.deviceAddress } + me
-    return candidates.maxWith(compareBy<Pair<Int, String>>({ it.first }, { it.second })) == me
+fun chooseAutoMeshOwner(peers: List<AirMeshPeer>): AirMeshPeer? =
+    peers.filter { it.isGroupOwner }.minWithOrNull(compareBy({ it.nodeId }, { it.tieBreakToken }))
+
+/**
+ * Whether I create the group when no owner is visible: the highest (node id, token)
+ * pair among {me ∪ visible peers} creates, everyone else waits for the takeover
+ * window. The comparison uses only values both sides advertise, so it is symmetric.
+ */
+fun iAmAutoMeshCreator(myNodeId: Int, myTieBreakToken: Int, peers: List<AirMeshPeer>): Boolean {
+    val me = myNodeId to myTieBreakToken
+    val candidates = peers.map { it.nodeId to it.tieBreakToken } + me
+    return candidates.maxWith(compareBy<Pair<Int, Int>>({ it.first }, { it.second })) == me
 }
 
 /** Pure backoff schedule: 2/4/8/16 s for the first four failures, then 30 s + up to 5 s jitter. */
@@ -146,19 +156,12 @@ fun autoMeshBannerText(
  */
 class AutoMeshController(
     private val myNodeId: Int,
-    // Upgraded by setMyDeviceAddress once THIS_DEVICE_CHANGED reports the real MAC.
-    private var myDeviceAddress: String,
+    /** Our process-lifetime election token; advertised in our DNS-SD ad. */
+    private val tieBreakToken: Int,
     private val clock: () -> Long = System::currentTimeMillis,
     private val random: Random = Random(),
     autoEnabled: Boolean = true,
 ) {
-
-    /**
-     * Upgrade our own address once it is known. The address only breaks ties in the
-     * symmetric election (node ids decide otherwise), so updating it at any point —
-     * even mid-search — is safe; peers' addresses are never affected.
-     */
-    fun setMyDeviceAddress(address: String) { myDeviceAddress = address }
 
     var state: AutoMeshState = AutoMeshState.Idle
         private set
@@ -267,7 +270,7 @@ class AutoMeshController(
         // Rule (c): peers visible but no owner. The highest node id among
         // {me ∪ peers} creates immediately; everyone else waits for the takeover
         // deadline in case the elected creator never shows up.
-        if (iAmAutoMeshCreator(myNodeId, myDeviceAddress, peers)) {
+        if (iAmAutoMeshCreator(myNodeId, tieBreakToken, peers)) {
             state = AutoMeshState.Creating
             return listOf(AutoMeshAction.CreateGroup)
         }

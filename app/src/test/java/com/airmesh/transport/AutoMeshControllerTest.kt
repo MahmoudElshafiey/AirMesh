@@ -14,10 +14,11 @@ class AutoMeshControllerTest {
     private var now = 0L
     private val clock: () -> Long = { now }
 
-    private fun controller(nodeId: Int, address: String, seed: Long = 1, enabled: Boolean = true) =
-        AutoMeshController(nodeId, address, clock, Random(seed), enabled)
+    private fun controller(nodeId: Int, token: Int = 0x1000, seed: Long = 1, enabled: Boolean = true) =
+        AutoMeshController(nodeId, token, clock, Random(seed), enabled)
 
-    private fun peer(nodeId: Int, address: String, owner: Boolean = false) = AirMeshPeer(address, nodeId, owner)
+    private fun peer(nodeId: Int, address: String, owner: Boolean = false, token: Int = 0x2000) =
+        AirMeshPeer(address, nodeId, owner, token)
 
     private fun start(c: AutoMeshController): List<AutoMeshAction> =
         c.onEvent(AutoMeshEvent.PermissionsChanged(true))
@@ -35,8 +36,8 @@ class AutoMeshControllerTest {
 
     @Test
     fun `two phones elect the higher node id as owner exactly once`() {
-        val a = controller(5, "AA:00:00:00:00:01")
-        val b = controller(9, "BB:00:00:00:00:02")
+        val a = controller(5, 0x1000)
+        val b = controller(9, 0x2000)
         start(a)
         start(b)
 
@@ -68,7 +69,7 @@ class AutoMeshControllerTest {
     }
 
     @Test
-    fun `the lowest node id owner wins with an address tie-break`() {
+    fun `the lowest node id owner wins with a token tie-break`() {
         val peers = listOf(
             peer(9, "BB:00:00:00:00:02"),
             peer(3, "AA:00:00:00:00:01", owner = true),
@@ -76,35 +77,72 @@ class AutoMeshControllerTest {
         )
         assertEquals("AA:00:00:00:00:01", chooseAutoMeshOwner(peers)?.deviceAddress)
 
-        val tied = listOf(peer(4, "BB:00:00:00:00:02", owner = true), peer(4, "AA:00:00:00:00:01", owner = true))
+        val tied = listOf(
+            peer(4, "BB:00:00:00:00:02", owner = true, token = 0x90),
+            peer(4, "AA:00:00:00:00:01", owner = true, token = 0x10),
+        )
         assertEquals("AA:00:00:00:00:01", chooseAutoMeshOwner(tied)?.deviceAddress)
 
-        assertFalse(iAmAutoMeshCreator(5, "BB:00:00:00:00:02", listOf(peer(9, "CC:00:00:00:00:03"))))
-        assertTrue(iAmAutoMeshCreator(9, "CC:00:00:00:00:03", listOf(peer(5, "BB:00:00:00:00:02"))))
+        assertFalse(iAmAutoMeshCreator(5, 0x2000, listOf(peer(9, "CC:00:00:00:00:03"))))
+        assertTrue(iAmAutoMeshCreator(9, 0x1000, listOf(peer(5, "BB:00:00:00:00:02"))))
     }
 
     @Test
-    fun `equal node ids fall back to the device address`() {
-        val low = controller(5, "AA:00:00:00:00:01")
-        val high = controller(5, "BB:00:00:00:00:02") // same id, larger address → creator
+    fun `equal node ids fall back to the tie-break token`() {
+        val low = controller(5, 0x1000)
+        val high = controller(5, 0x2000) // same id, larger token → creator
         start(low)
         start(high)
 
         now += 1_000
-        assertTrue(feed(low, listOf(peer(5, "BB:00:00:00:00:02"))).isEmpty())
+        assertTrue(feed(low, listOf(peer(5, "BB:00:00:00:00:02", token = 0x2000))).isEmpty())
         assertEquals(listOf<AutoMeshAction>(AutoMeshAction.CreateGroup),
-            feed(high, listOf(peer(5, "AA:00:00:00:00:01"))))
+            feed(high, listOf(peer(5, "AA:00:00:00:00:01", token = 0x1000))))
 
-        // Symmetric: with reversed addresses the other phone wins.
-        assertTrue(iAmAutoMeshCreator(5, "CC:00:00:00:00:03", listOf(peer(5, "BB:00:00:00:00:02"))))
-        assertFalse(iAmAutoMeshCreator(5, "BB:00:00:00:00:02", listOf(peer(5, "CC:00:00:00:00:03"))))
+        // Symmetric: with reversed tokens the other phone wins.
+        assertTrue(iAmAutoMeshCreator(5, 0x3000, listOf(peer(5, "BB:00:00:00:00:02", token = 0x2000))))
+        assertFalse(iAmAutoMeshCreator(5, 0x2000, listOf(peer(5, "CC:00:00:00:00:03", token = 0x3000))))
+    }
+
+    @Test
+    fun `two phones with unknown own addresses still converge to one group`() {
+        // Reproduces the Samsung field case (Galaxy A54/A55): neither phone ever
+        // learns its own P2P address — the system reports a placeholder. The election
+        // must not depend on it: both sides rank by (node id, token) only.
+        val a54 = controller(55_885, 0x1111)
+        val a55 = controller(58_081, 0x2222) // higher id → creator
+        start(a54)
+        start(a55)
+
+        now += 1_000
+        var creates = 0
+        val aActions = feed(a54, listOf(peer(58_081, "BB:00:00:00:00:02", token = 0x2222)))
+        val bActions = feed(a55, listOf(peer(55_885, "AA:00:00:00:00:01", token = 0x1111)))
+        creates += aActions.count { it is AutoMeshAction.CreateGroup } +
+            bActions.count { it is AutoMeshAction.CreateGroup }
+
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.CreateGroup), bActions) // higher id creates
+        assertTrue(aActions.isEmpty()) // lower id waits for the takeover window
+
+        now += 1_000
+        a55.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.ConnectTo("BB:00:00:00:00:02")),
+            feed(a54, listOf(peer(58_081, "BB:00:00:00:00:02", owner = true, token = 0x2222))))
+
+        now += 1_000
+        a54.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.CLIENT))
+
+        repeat(30) { tick(a54); tick(a55) }
+        assertEquals("exactly one create", 1, creates)
+        assertTrue(a55.state == AutoMeshState.Owner)
+        assertTrue(a54.state == AutoMeshState.Client)
     }
 
     @Test
     fun `three phones starting at different times converge to one group`() {
-        val a = controller(2, "AA:00:00:00:00:01")
-        val b = controller(7, "BB:00:00:00:00:02")
-        val c = controller(5, "CC:00:00:00:00:03")
+        val a = controller(2, 0x1000)
+        val b = controller(7, 0x2000)
+        val c = controller(5, 0x3000)
 
         start(b) // t=0
         now += 3_000; start(a) // t=3 s
@@ -138,7 +176,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `takeover creates a group when the elected creator never appears`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         start(a)
 
         now += 1_000
@@ -160,7 +198,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `flapping peers do not cause repeated creates`() {
-        val a = controller(5, "AA:00:00:00:00:01") // B (id 9) flaps; A is never the max while B is visible
+        val a = controller(5, 0x1000) // B (id 9) flaps; A is never the max while B is visible
         start(a)
 
         var creates = 0
@@ -197,8 +235,8 @@ class AutoMeshControllerTest {
     fun `when the owner leaves the remaining phones re-elect exactly one new owner`() {
         for (seed in 1L..20L) {
             now = 0L
-            val a = controller(2, "AA:00:00:00:00:01", seed)
-            val c = controller(5, "CC:00:00:00:00:03", seed) // B (id 7, owner) is not a controller here
+            val a = controller(2, 0x1000, seed)
+            val c = controller(5, 0x3000, seed) // B (id 7, owner) is not a controller here
             start(a)
             start(c)
 
@@ -249,7 +287,7 @@ class AutoMeshControllerTest {
     fun `a lost group waits one to three seconds before searching again`() {
         for (seed in 1L..10L) {
             now = 0L
-            val a = controller(5, "AA:00:00:00:00:01", seed)
+            val a = controller(5, 0x1000, seed)
             start(a)
             now += 1_000
             feed(a, listOf(peer(9, "BB:00:00:00:00:02", owner = true)))
@@ -289,7 +327,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `repeated failures escalate the backoff`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         start(a)
         now += 1_000
         feed(a, listOf(peer(9, "BB:00:00:00:00:02", owner = true))) // Joining
@@ -319,7 +357,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `BUSY triggers removeGroup and exactly one retry`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         start(a)
         now += 1_000
         feed(a, listOf(peer(9, "BB:00:00:00:00:02", owner = true))) // Joining(B)
@@ -339,7 +377,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `a join that never forms a group is cancelled after the timeout`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         start(a)
         now += 1_000
         feed(a, listOf(peer(9, "BB:00:00:00:00:02", owner = true))) // Joining at t=1 s
@@ -360,7 +398,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `missing permissions keep the controller idle with a visible reason`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         assertTrue(a.onEvent(AutoMeshEvent.PermissionsChanged(false, "NEARBY_WIFI_DEVICES not granted")).isEmpty())
         assertTrue(a.state is AutoMeshState.Idle)
         assertEquals("NEARBY_WIFI_DEVICES not granted", a.idleReason)
@@ -377,7 +415,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `losing permissions mid-search cancels the search`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         start(a)
         now += 1_000
         feed(a, listOf(peer(9, "BB:00:00:00:00:02"))) // Searching with a takeover deadline pending
@@ -389,7 +427,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `manual mode pauses the controller until auto is re-enabled`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         start(a)
         now += 1_000
         assertTrue(feed(a, listOf(peer(9, "BB:00:00:00:00:02"))).isEmpty()) // waiting for takeover (not the max id)
@@ -413,7 +451,7 @@ class AutoMeshControllerTest {
 
     @Test
     fun `a group formed while paused is still accepted`() {
-        val a = controller(5, "AA:00:00:00:00:01")
+        val a = controller(5, 0x1000)
         start(a) // Searching
         assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery), a.setAutoEnabled(false)) // pause stops discovery
 

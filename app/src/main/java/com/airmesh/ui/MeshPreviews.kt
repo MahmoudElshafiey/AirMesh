@@ -60,7 +60,9 @@ private val previewState = ConnectorState(
 private val previewNeighbors = setOf(2, 3)
 
 // Same MAC as [previewPeer], so the manual peer list shows it tagged "AirMesh #2".
-private val previewAirMeshPeers = listOf(AirMeshPeer("AA:BB:CC:DD:EE:FF", nodeId = 2, isGroupOwner = true))
+private val previewAirMeshPeers = listOf(
+    AirMeshPeer("AA:BB:CC:DD:EE:FF", nodeId = 2, isGroupOwner = true, tieBreakToken = 0x1234),
+)
 
 private val previewEvents = listOf(
     LogEntry(1_700_000_000_000L, "P2P: group formed, role=GROUP_OWNER"),

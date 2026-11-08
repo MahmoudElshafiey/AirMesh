@@ -36,7 +36,10 @@ import kotlinx.coroutines.launch
  */
 class WifiP2pPeerDirectory(
     context: Context,
-    private val getSelfAddress: () -> String? = { null },
+    /** Our mesh id; the ad carries it instead of a MAC. */
+    private val myNodeId: Int,
+    /** Our process-lifetime election token; advertised in the TXT record. */
+    private val tieBreakToken: Int,
     private val coordinator: DiscoveryCoordinator,
     private val log: (String) -> Unit = {},
 ) : PeerDirectory {
@@ -49,8 +52,8 @@ class WifiP2pPeerDirectory(
     private val _peers = MutableStateFlow<List<AirMeshPeer>>(emptyList())
     override val peers: StateFlow<List<AirMeshPeer>> = _peers.asStateFlow()
 
-    /** The (nodeId, ownerFlag) pair currently registered; null when not advertising. */
-    private var advertised: Pair<Int, Boolean>? = null
+    /** The owner flag of the ad currently registered; null when not advertising. */
+    private var advertisedOwnerFlag: Boolean? = null
     /** The service info we registered, so removeLocalService can match it. */
     private var serviceInfo: WifiP2pDnsSdServiceInfo? = null
     private val serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
@@ -98,23 +101,21 @@ class WifiP2pPeerDirectory(
         }
     }
 
-    override fun startAdvertising(nodeId: Int, isGroupOwner: Boolean) {
+    override fun startAdvertising(isGroupOwner: Boolean) {
         val ch = channel ?: return log("dnssd: cannot advertise — no P2P channel")
-        val self = getSelfAddress() ?: run {
-            log("dnssd: cannot advertise — own device address unknown yet")
-            return
-        }
-        if (advertised == nodeId to isGroupOwner && serviceInfo != null) return // already advertising this role
+        if (advertisedOwnerFlag == isGroupOwner && serviceInfo != null) return // already advertising this role
         removeLocalServiceQuietly(ch)
 
-        val token = AirMeshAdCodec.encode(self, nodeId, isGroupOwner)
+        // No own MAC needed: the ad carries node id + token, and peers are addressed
+        // by the source device of the DNS-SD callback.
+        val token = AirMeshAdCodec.encode(myNodeId, tieBreakToken, isGroupOwner)
         log("dnssd: addLocalService instance='$token' txt={${TXT_AD_KEY}=$token}")
         val info = WifiP2pDnsSdServiceInfo.newInstance(
             AirMeshAdCodec.SERVICE_TYPE,
             token,                     // instance name: the token on every version
             mapOf(TXT_AD_KEY to token), // TXT record: same token under one key
         )
-        advertised = nodeId to isGroupOwner
+        advertisedOwnerFlag = isGroupOwner
         serviceInfo = info
         manager?.addLocalService(ch, info, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
@@ -122,7 +123,7 @@ class WifiP2pPeerDirectory(
             }
 
             override fun onFailure(reason: Int) {
-                advertised = null // allow a later startAdvertising to retry
+                advertisedOwnerFlag = null // allow a later startAdvertising to retry
                 serviceInfo = null
                 log("dnssd: addLocalService failed reason=$reason")
             }
@@ -212,14 +213,20 @@ class WifiP2pPeerDirectory(
             log("dnssd: ignored: no AirMesh TXT")
             return
         }
-        val address = resolvePeerAddress(device?.deviceAddress, ad.deviceAddress, getSelfAddress()) ?: run {
-            // The only null case today is "this is our own advertisement".
+        if (ad.nodeId == myNodeId) {
+            // Our own advertisement bouncing back; never a peer.
             log("dnssd: ignored own ad (#${ad.nodeId})")
+            return
+        }
+        val address = device?.deviceAddress
+        if (address.isNullOrEmpty() || address == PEER_PLACEHOLDER_ADDRESS) {
+            // A peer we can see but never connect to must not block our own creation.
+            log("dnssd: ignored #${ad.nodeId} — no usable source device address")
             return
         }
         lastSeen[address] = System.currentTimeMillis()
         _peers.update { current ->
-            val peer = AirMeshPeer(address, ad.nodeId, ad.isGroupOwner)
+            val peer = AirMeshPeer(address, ad.nodeId, ad.isGroupOwner, ad.tieBreakToken)
             (current.filterNot { it.deviceAddress == address } + peer).sortedBy { it.nodeId }
         }
         log("dnssd: accepted AirMesh peer #${ad.nodeId} owner=${if (ad.isGroupOwner) 1 else 0} ($address)")
@@ -245,7 +252,7 @@ class WifiP2pPeerDirectory(
             try { ch.close() } catch (_: Exception) {}
         }
         channel = null
-        advertised = null
+        advertisedOwnerFlag = null
         serviceInfo = null
         lastSeen.clear()
         _peers.value = emptyList()

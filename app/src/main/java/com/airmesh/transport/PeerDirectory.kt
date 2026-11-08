@@ -7,6 +7,8 @@ data class AirMeshPeer(
     val deviceAddress: String,
     val nodeId: Int,
     val isGroupOwner: Boolean,
+    /** The peer's random 32-bit election token; breaks node-id ties symmetrically. */
+    val tieBreakToken: Int,
 )
 
 /**
@@ -20,7 +22,7 @@ interface PeerDirectory {
     val peers: StateFlow<List<AirMeshPeer>>
 
     /** Publish our ad; call again when the group-owner role changes. */
-    fun startAdvertising(nodeId: Int, isGroupOwner: Boolean)
+    fun startAdvertising(isGroupOwner: Boolean)
 
     /** Start/stop the periodic service request (Android stops discovery after ~2 min). */
     fun setDiscovering(enabled: Boolean)
@@ -48,14 +50,3 @@ fun shouldExpirePeer(lastSeenMs: Long, nowMs: Long): Boolean =
 
 /** Some devices report this placeholder address before they know their own. */
 const val PEER_PLACEHOLDER_ADDRESS = "02:00:00:00:00:00"
-
-/**
- * Picks which address identifies a discovered peer: the one P2P discovery
- * reports is preferred over the one the ad token claims (some devices report a
- * placeholder MAC in the device info). Returns null when the ad is our own.
- */
-fun resolvePeerAddress(deviceAddress: String?, tokenAddress: String, selfAddress: String?): String? {
-    val address = deviceAddress?.takeIf { it.isNotEmpty() && it != PEER_PLACEHOLDER_ADDRESS } ?: tokenAddress
-    if (selfAddress != null && address.equals(selfAddress, ignoreCase = true)) return null
-    return address
-}

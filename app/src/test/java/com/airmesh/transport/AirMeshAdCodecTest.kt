@@ -9,37 +9,40 @@ import org.junit.Test
 /** JVM tests for the DNS-SD ad token codec, discovery refresh and peer staleness timing. */
 class AirMeshAdCodecTest {
 
-    private val mac = "AA:BB:CC:DD:EE:FF"
-
     // --- encode ------------------------------------------------------------------
 
     @Test
     fun `encode produces the expected token`() {
-        assertEquals("airmesh-aabbccddeeff-n42-v1-o0", AirMeshAdCodec.encode(mac, 42, false))
-        assertEquals("airmesh-aabbccddeeff-n42-v1-o1", AirMeshAdCodec.encode(mac, 42, true))
+        assertEquals("airmesh-n42-v2-t00001234-o0", AirMeshAdCodec.encode(42, 0x1234, false))
+        assertEquals("airmesh-n42-v2-t00001234-o1", AirMeshAdCodec.encode(42, 0x1234, true))
     }
 
     @Test
-    fun `encode lowercases and strips colons`() {
-        assertEquals("airmesh-0a1b2c3d4e5f-n7-v1-o0", AirMeshAdCodec.encode("0A:1B:2C:3D:4E:5F", 7, false))
+    fun `encode pads the token to eight hex digits`() {
+        assertEquals("airmesh-n7-v2-t00000001-o0", AirMeshAdCodec.encode(7, 1, false))
+        assertEquals("airmesh-n65535-v2-tffffffff-o1", AirMeshAdCodec.encode(65535, -1, true))
+    }
+
+    @Test
+    fun `encode represents negative tokens as unsigned hex`() {
+        // The token is a signed Int but travels as an unsigned 8-hex value.
+        assertEquals("airmesh-n7-v2-tffffffff-o0", AirMeshAdCodec.encode(7, -1, false))
+        assertEquals("airmesh-n7-v2-tfffffffe-o0", AirMeshAdCodec.encode(7, -2, false))
     }
 
     // --- decode ------------------------------------------------------------------
 
     @Test
     fun `decode round-trips`() {
-        val ad = AirMeshAdCodec.decode(AirMeshAdCodec.encode(mac, 65535, true))!!
-        assertEquals("AA:BB:CC:DD:EE:FF", ad.deviceAddress)
-        assertEquals(65535, ad.nodeId)
-        assertEquals(AirMeshAdCodec.PROTOCOL_VERSION, ad.protocolVersion)
-        assertTrue(ad.isGroupOwner)
-    }
-
-    @Test
-    fun `decode accepts an uppercase mac and normalizes it`() {
-        val ad = AirMeshAdCodec.decode("airmesh-AABBCCDDEEFF-n7-v1-o0")!!
-        assertEquals("AA:BB:CC:DD:EE:FF", ad.deviceAddress)
-        assertFalse(ad.isGroupOwner)
+        for (token in listOf(0, 1, 0x1234, Int.MAX_VALUE, -1, -2)) {
+            for (owner in listOf(false, true)) {
+                val ad = AirMeshAdCodec.decode(AirMeshAdCodec.encode(65535, token, owner))!!
+                assertEquals("token $token", 65535, ad.nodeId)
+                assertEquals(token, ad.tieBreakToken)
+                assertEquals(owner, ad.isGroupOwner)
+                assertEquals(AirMeshAdCodec.PROTOCOL_VERSION, ad.protocolVersion)
+            }
+        }
     }
 
     @Test
@@ -50,32 +53,43 @@ class AirMeshAdCodecTest {
 
     @Test
     fun `decode rejects wrong part counts`() {
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n7-v1")) // missing owner flag
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n7-v1-o0-x")) // extra part
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-t00000001")) // missing owner flag
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-t00000001-o0-x")) // extra part
     }
 
     @Test
     fun `decode rejects a wrong prefix`() {
-        assertNull(AirMeshAdCodec.decode("other-aabbccddeeff-n7-v1-o0"))
+        assertNull(AirMeshAdCodec.decode("other-n7-v2-t00000001-o0"))
     }
 
     @Test
-    fun `decode rejects malformed macs`() {
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeef-n7-v1-o0")) // 11 hex chars
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeefg-n7-v1-o0")) // 12 chars, 'g' is not hex
+    fun `decode rejects old v1 MAC tokens`() {
+        // The v1 layout carried the MAC as part two; it must never decode as v2.
+        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n42-v1-o0"))
+        // Even an all-digit MAC fails: the 12-digit "node id" is out of range.
+        assertNull(AirMeshAdCodec.decode("airmesh-001122334455-n42-v1-o0"))
+    }
+
+    @Test
+    fun `decode rejects malformed token hex`() {
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-t0000123-o0")) // 7 chars
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-t000012345-o0")) // 9 chars
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-tABCDEF01-o0")) // uppercase
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-t000012g4-o0")) // 'g' is not hex
     }
 
     @Test
     fun `decode rejects out-of-range node ids`() {
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n0-v1-o0")) // below 1..65535
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n65536-v1-o0")) // above 1..65535
+        assertNull(AirMeshAdCodec.decode("airmesh-n0-v2-t00000001-o0")) // below 1..65535
+        assertNull(AirMeshAdCodec.decode("airmesh-n65536-v2-t00000001-o0")) // above 1..65535
     }
 
     @Test
     fun `decode rejects unknown versions and bad owner flags`() {
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n7-v2-o0"))
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n7-v1-ox"))
-        assertNull(AirMeshAdCodec.decode("airmesh-aabbccddeeff-n7-v1-o11"))
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v1-t00000001-o0"))
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v3-t00000001-o0"))
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-t00000001-ox"))
+        assertNull(AirMeshAdCodec.decode("airmesh-n7-v2-t00000001-o11"))
     }
 
     // --- discovery refresh timing ---------------------------------------------------
@@ -109,30 +123,5 @@ class AirMeshAdCodecTest {
     fun `peer staleness window is 120 seconds`() {
         assertFalse(shouldExpirePeer(50_000L, 90_000L)) // 40 s elapsed
         assertTrue(shouldExpirePeer(10_000L, 130_000L)) // 120 s elapsed
-    }
-
-    // --- peer address resolution ----------------------------------------------------
-
-    @Test
-    fun `the device-reported address wins over the token address`() {
-        assertEquals("BB:00:00:00:00:02", resolvePeerAddress("BB:00:00:00:00:02", "AA:BB:CC:DD:EE:FF", null))
-    }
-
-    @Test
-    fun `a missing or placeholder device address falls back to the token`() {
-        assertEquals("AA:BB:CC:DD:EE:FF", resolvePeerAddress("", "AA:BB:CC:DD:EE:FF", null))
-        assertEquals("AA:BB:CC:DD:EE:FF", resolvePeerAddress(PEER_PLACEHOLDER_ADDRESS, "AA:BB:CC:DD:EE:FF", null))
-    }
-
-    @Test
-    fun `our own ad is filtered case-insensitively`() {
-        assertNull(resolvePeerAddress("aa:bb:cc:dd:ee:ff", "AA:BB:CC:DD:EE:FF", "AA:BB:CC:DD:EE:FF"))
-        // Even when the device reports a placeholder, the token MAC identifies us.
-        assertNull(resolvePeerAddress(PEER_PLACEHOLDER_ADDRESS, "aa:bb:cc:dd:ee:ff", "AA:BB:CC:DD:EE:FF"))
-    }
-
-    @Test
-    fun `a null self address never filters out peers`() {
-        assertEquals("AA:BB:CC:DD:EE:FF", resolvePeerAddress(null, "AA:BB:CC:DD:EE:FF", null))
     }
 }

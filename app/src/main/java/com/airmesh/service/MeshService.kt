@@ -33,6 +33,7 @@ import com.airmesh.transport.DiscoveryBackend
 import com.airmesh.transport.DiscoveryCoordinator
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
+import com.airmesh.transport.TieBreakToken
 import com.airmesh.transport.WifiDirectConnector
 import com.airmesh.transport.WifiP2pPeerDirectory
 import com.airmesh.ui.EXTRA_MESSAGE_KEY
@@ -143,18 +144,24 @@ class MeshService : Service() {
         // state machine that decides when to join or create groups. One coordinator
         // owns every scan on the radio — discoverPeers cancels an ongoing DNS-SD
         // scan (and vice versa), so they must never overlap.
+        val tieBreakToken = TieBreakToken.current
         discoveryCoordinator = DiscoveryCoordinator(backend = object : DiscoveryBackend {
             override fun clearServiceRequests() = peerDirectory.clearServiceRequestsRaw()
             override fun addServiceRequest() = peerDirectory.addServiceRequestRaw()
             override fun discoverServices() = peerDirectory.startServiceScanRaw()
             override fun discoverPeers() = connector.discover()
         })
+        // The ad carries node id + token, not a MAC: our own P2P address is a
+        // placeholder on many devices and nothing about advertising needs it.
         peerDirectory = WifiP2pPeerDirectory(
             applicationContext,
-            getSelfAddress = { connector.selfAddress.value },
+            myNodeId = node.localNodeId,
+            tieBreakToken = tieBreakToken,
             coordinator = discoveryCoordinator,
             log = { line -> _eventLog.log(line) },
         )
+        // Advertise immediately — other phones find us through this ad.
+        peerDirectory.startAdvertising(isGroupOwner = false)
         connector.autoMeshListener = object : AutoMeshListener {
             override fun onConnectFailed(reason: AutoFailureReason) =
                 autoEvent(AutoMeshEvent.ConnectFailed(reason), "connect failed (${reason.name.lowercase()})")
@@ -167,17 +174,15 @@ class MeshService : Service() {
         _autoMeshEnabled.value = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_AUTO_MESH_ENABLED, true)
 
-        // Create the controller right away with a placeholder address: some OEMs
-        // (e.g. Samsung) only deliver THIS_DEVICE_CHANGED once P2P state changes —
-        // and starting discovery is what triggers it, so waiting for the MAC would
-        // deadlock auto-mesh. Node ids decide the election; the address is only a
-        // tie-break, upgraded by setMyDeviceAddress when the real one arrives.
+        // The election ranks by (node id, tie-break token); our own Wi-Fi Direct
+        // address is not used at all — on many devices it stays a placeholder that
+        // never becomes known.
         autoController = AutoMeshController(
             myNodeId = node.localNodeId,
-            myDeviceAddress = "",
+            tieBreakToken = tieBreakToken,
             autoEnabled = _autoMeshEnabled.value,
         )
-        _eventLog.log("auto: controller ready (node #${node.localNodeId}, own address pending)")
+        _eventLog.log("auto: controller ready (node #${node.localNodeId}, tie-break=${tieBreakToken.toUInt().toString(16)})")
 
         // The system requires startForeground within 5 s of startForegroundService;
         // onCreate is well inside that window.
@@ -215,27 +220,8 @@ class MeshService : Service() {
         // --- Auto-mesh wiring ---------------------------------------------------
         // One tick per second drives backoff expiry, join timeouts and the takeover deadline.
         serviceScope.launch {
-            val startedAtMs = System.currentTimeMillis()
-            var lastNudgeAtMs = 0L
             while (isActive) {
                 delay(1_000L)
-                // Some OEMs only report THIS_DEVICE_CHANGED after a discovery pass; if our
-                // MAC is still unknown, nudge the system with one classic discovery. This
-                // calls the connector directly so it does NOT pause auto-mesh (the public
-                // discover() wrapper would).
-                val cs = connector.state.value
-                val permOk = autoMeshPermissionReason(
-                    cs.wifiDirectPermissionGranted, cs.localNetworkRequired, cs.localNetworkGranted,
-                ) == null
-                val nowMs = System.currentTimeMillis()
-                if (permOk && _autoMeshEnabled.value && connector.selfAddress.value == null &&
-                    nowMs - startedAtMs > 30_000L && nowMs - lastNudgeAtMs > 60_000L
-                ) {
-                    lastNudgeAtMs = nowMs
-                    _eventLog.log("auto: own Wi-Fi Direct address still unknown — starting a discovery pass to make the system report it")
-                    // Through the coordinator so this classic scan cannot overlap the DNS-SD cycle.
-                    discoveryCoordinator.requestPeerScan()
-                }
                 autoEvent(AutoMeshEvent.Tick, "tick")
             }
         }
@@ -276,28 +262,8 @@ class MeshService : Service() {
                     }
                 }
 
-                if (connector.selfAddress.value != null) {
-                    peerDirectory.startAdvertising(node.localNodeId, cs.groupFormed && newRole == P2pRole.GROUP_OWNER)
-                }
-            }
-        }
-
-        // Once THIS_DEVICE_CHANGED reports our real MAC: upgrade the election tie-break
-        // and publish our ad (it must carry an address peers can actually connect to).
-        serviceScope.launch {
-            var staleGroupReported = false
-            connector.selfAddress.collect { address ->
-                if (address == null) return@collect
-                autoController?.setMyDeviceAddress(address)
-                _eventLog.log("auto: learned our Wi-Fi Direct address $address")
-                val cs = connector.state.value
-                peerDirectory.startAdvertising(node.localNodeId, cs.groupFormed && cs.role == P2pRole.GROUP_OWNER)
-                // A group that already existed at startup (left over from a killed run)
-                // produced no role transition; tell the controller about it once.
-                if (!staleGroupReported && cs.groupFormed && cs.role != P2pRole.NONE) {
-                    staleGroupReported = true
-                    autoEvent(AutoMeshEvent.GroupFormed(autoRoleOf(cs.role)), "group already formed as ${cs.role.name.lowercase()}")
-                }
+                // Keep our ad's owner flag current; advertising needs no own MAC.
+                peerDirectory.startAdvertising(cs.groupFormed && newRole == P2pRole.GROUP_OWNER)
             }
         }
     }
