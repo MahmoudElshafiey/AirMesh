@@ -48,6 +48,9 @@ class DnsSdStats {
     fun statsLine(): String =
         "dnssd: stats scans=$scans rawService=$rawService rawTxt=$rawTxt accepted=$accepted ignored=$ignored"
 
+    /** Total raw callbacks this window (service + TXT), reported alongside the strategy. */
+    val rawCallbacks: Int get() = rawService + rawTxt
+
     /** Zero every counter, starting a new report window. */
     fun reset() {
         scans = 0

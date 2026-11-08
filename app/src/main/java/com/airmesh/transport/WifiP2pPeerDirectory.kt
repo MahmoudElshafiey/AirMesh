@@ -56,7 +56,8 @@ class WifiP2pPeerDirectory(
     private var advertisedOwnerFlag: Boolean? = null
     /** The service info we registered, so removeLocalService can match it. */
     private var serviceInfo: WifiP2pDnsSdServiceInfo? = null
-    private val serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
+    /** The request registered most recently; strategy 2 swaps in an unfiltered one. */
+    private var serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
 
     private var discovering = false
     /** When each peer was last seen; entries older than [PEER_STALE_MS] are swept. */
@@ -76,6 +77,9 @@ class WifiP2pPeerDirectory(
                     "name=${device?.deviceName ?: "(no name)"}",
             )
             stats.onRawService()
+            // Every raw callback feeds the strategy selector: any hit proves the
+            // current strategy works, even if the peer is later filtered out.
+            coordinator.notifyRawCallback()
             // Not an AirMesh service? Drop it before it reaches the peer list.
             if (!isAirMeshService(serviceType, instanceName)) {
                 stats.onIgnored()
@@ -100,6 +104,7 @@ class WifiP2pPeerDirectory(
                     "src=${device?.deviceAddress ?: "(no address)"}",
             )
             stats.onRawTxt()
+            coordinator.notifyRawCallback()
             // This callback has no instance name, so the type must match.
             if (!isAirMeshService(serviceType, instanceName = null)) {
                 stats.onIgnored()
@@ -215,12 +220,23 @@ class WifiP2pPeerDirectory(
         }
     }
 
-    fun addServiceRequestRaw(onDone: (Boolean, Int) -> Unit = { _, _ -> }) {
+    fun addServiceRequestRaw(
+        filtered: Boolean = true,
+        onDone: (Boolean, Int) -> Unit = { _, _ -> },
+    ) {
         val ch = channel ?: return onDone(false, NO_CHANNEL_REASON)
         val mgr = manager ?: return onDone(false, NO_CHANNEL_REASON)
-        log("dnssd: addServiceRequest(${AirMeshAdCodec.SERVICE_TYPE})")
+        // Strategy 1 lets the framework filter by type. From strategy 2 on we
+        // register the request without a type and filter in our own listeners.
+        val request = if (filtered) {
+            WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
+        } else {
+            WifiP2pDnsSdServiceRequest.newInstance()
+        }
+        serviceRequest = request
+        log("dnssd: addServiceRequest(filtered=$filtered)")
         try {
-            mgr.addServiceRequest(ch, serviceRequest, object : WifiP2pManager.ActionListener {
+            mgr.addServiceRequest(ch, request, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     log("dnssd: addServiceRequest ok")
                     onDone(true, 0)
@@ -233,6 +249,61 @@ class WifiP2pPeerDirectory(
             })
         } catch (error: Exception) {
             log("dnssd: adding service request failed: ${error.message}")
+            onDone(false, NO_CHANNEL_REASON)
+        }
+    }
+
+    /**
+     * Strategy 4: drop our own DNS-SD registration and add it back right before
+     * the scan, in case the framework stopped re-publishing it.
+     */
+    fun reRegisterLocalServiceRaw(onDone: (Boolean, Int) -> Unit = { _, _ -> }) {
+        val ch = channel ?: return onDone(false, NO_CHANNEL_REASON)
+        val mgr = manager ?: return onDone(false, NO_CHANNEL_REASON)
+        val info = serviceInfo
+        if (info == null) {
+            log("dnssd: re-register skipped — not advertising")
+            return onDone(true, 0) // nothing to re-add; not a failure of the scan
+        }
+        try {
+            mgr.removeLocalService(ch, info, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    log("dnssd: re-register: removeLocalService ok")
+                    addLocalServiceAgain(mgr, ch, info, onDone)
+                }
+
+                override fun onFailure(reason: Int) {
+                    // Try to add anyway: on some devices remove fails but add still works.
+                    log("dnssd: re-register: removeLocalService failed reason=$reason")
+                    addLocalServiceAgain(mgr, ch, info, onDone)
+                }
+            })
+        } catch (error: Exception) {
+            log("dnssd: re-register failed: ${error.message}")
+            onDone(false, NO_CHANNEL_REASON)
+        }
+    }
+
+    private fun addLocalServiceAgain(
+        mgr: WifiP2pManager,
+        ch: WifiP2pManager.Channel,
+        info: WifiP2pDnsSdServiceInfo,
+        onDone: (Boolean, Int) -> Unit,
+    ) {
+        try {
+            mgr.addLocalService(ch, info, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    log("dnssd: re-register: addLocalService ok")
+                    onDone(true, 0)
+                }
+
+                override fun onFailure(reason: Int) {
+                    log("dnssd: re-register: addLocalService failed reason=$reason")
+                    onDone(false, reason)
+                }
+            })
+        } catch (error: Exception) {
+            log("dnssd: re-register: addLocalService threw: ${error.message}")
             onDone(false, NO_CHANNEL_REASON)
         }
     }
@@ -301,7 +372,9 @@ class WifiP2pPeerDirectory(
         }
         if (nowMs - lastStatsMs < STATS_INTERVAL_MS) return
         lastStatsMs = nowMs
-        log(stats.statsLine())
+        // Strategy and the total raw callback count only exist here, so they are
+        // appended to the stats line instead of changing DnsSdStats' own format.
+        log("${stats.statsLine()} strategy=${coordinator.currentStrategy} raw=${stats.rawCallbacks}")
         stats.reset()
     }
 

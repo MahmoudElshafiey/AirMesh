@@ -31,6 +31,8 @@ import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.DiscoveryBackend
 import com.airmesh.transport.DiscoveryCoordinator
+import com.airmesh.transport.DiscoveryStrategySelector
+import com.airmesh.transport.DiscoveryStrategyStore
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
 import com.airmesh.transport.TieBreakToken
@@ -146,6 +148,19 @@ class MeshService : Service() {
         // owns every scan on the radio — discoverPeers cancels an ongoing DNS-SD
         // scan (and vice versa), so they must never overlap.
         val tieBreakToken = TieBreakToken.current
+        // Persisted last-good scan strategy, so a phone remembers what worked here.
+        val strategyStore = object : DiscoveryStrategyStore {
+            override fun load(): Int? {
+                val saved = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getInt(KEY_DISCOVERY_STRATEGY, 0)
+                return if (saved == 0) null else saved
+            }
+
+            override fun save(strategy: Int) {
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                    .putInt(KEY_DISCOVERY_STRATEGY, strategy).apply()
+            }
+        }
         discoveryCoordinator = DiscoveryCoordinator(
             backend = object : DiscoveryBackend {
                 override fun clearServiceRequests() = peerDirectory.clearServiceRequestsRaw()
@@ -159,15 +174,25 @@ class MeshService : Service() {
                     peerDirectory.clearServiceRequestsRaw(onDone)
 
                 override fun addServiceRequest(onDone: (Boolean, Int) -> Unit) =
-                    peerDirectory.addServiceRequestRaw(onDone)
+                    peerDirectory.addServiceRequestRaw(filtered = true, onDone = onDone)
 
                 override fun discoverServices(onDone: (Boolean, Int) -> Unit) =
                     peerDirectory.startServiceScanRaw(onDone)
+
+                override fun discoverPeers(onDone: (Boolean, Int) -> Unit) =
+                    connector.discover(onDone)
+
+                override fun addServiceRequest(filtered: Boolean, onDone: (Boolean, Int) -> Unit) =
+                    peerDirectory.addServiceRequestRaw(filtered = filtered, onDone = onDone)
+
+                override fun reRegisterLocalService(onDone: (Boolean, Int) -> Unit) =
+                    peerDirectory.reRegisterLocalServiceRaw(onDone)
             },
             log = { line -> _eventLog.log(line) },
             // Delays run on the main looper, the same thread as the P2P callbacks
             // and the directory's own state, so the sequencer needs no locking.
             schedule = { ms, block -> serviceScope.launch { delay(ms); block() } },
+            strategySelector = DiscoveryStrategySelector(strategyStore),
         )
         // The ad carries node id + token, not a MAC: our own P2P address is a
         // placeholder on many devices and nothing about advertising needs it.
@@ -632,5 +657,7 @@ class MeshService : Service() {
         private const val KEY_MESSAGE_NOTIFICATIONS_ENABLED = "message_notifications_enabled"
         /** Network tab switch: whether auto-mesh is on (default true). */
         private const val KEY_AUTO_MESH_ENABLED = "auto_mesh_enabled"
+        /** Last discovery strategy that produced a DNS-SD callback (1..4, 0 = none). */
+        private const val KEY_DISCOVERY_STRATEGY = "discovery_strategy"
     }
 }

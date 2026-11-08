@@ -94,6 +94,12 @@ class WifiDirectConnector(
 
         /** Timeout for the raw reachability probe before HELLO attempts start. */
         private const val PROBE_TIMEOUT_MS = 5_000L
+
+        /** Reason reported when we could not even issue the framework call. */
+        const val NO_CHANNEL_REASON = -1
+
+        /** Reason reported when the Wi-Fi Direct runtime permission is missing. */
+        const val NO_PERMISSION_REASON = -2
     }
 
     private val appContext = context.applicationContext
@@ -292,19 +298,38 @@ class WifiDirectConnector(
     // --- Wi-Fi Direct actions ---------------------------------------------
 
     @SuppressLint("MissingPermission")
-    fun discover() {
-        val manager = p2p ?: return log("discover impossible: Wi-Fi Direct unsupported")
-        val currentChannel = channel ?: return log("discover impossible: no channel")
+    fun discover() = discover { _, _ -> }
+
+    /**
+     * Classic peer scan. [onDone] reports (success, reason) so the DNS-SD refresh
+     * cycle can chain discoverServices after the framework accepted this scan.
+     */
+    @SuppressLint("MissingPermission")
+    fun discover(onDone: (Boolean, Int) -> Unit) {
+        val manager = p2p ?: return noChannel("discover impossible: Wi-Fi Direct unsupported", onDone)
+        val currentChannel = channel ?: return noChannel("discover impossible: no channel", onDone)
         if (!hasP2pPermission()) {
             log("discover blocked: ${requiredPermission().substringAfterLast('.')} not granted")
-            return
+            return onDone(false, NO_PERMISSION_REASON)
         }
 
         log("discoverPeers() called")
         manager.discoverPeers(currentChannel, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() = log("discoverPeers: onSuccess (discovery started)")
-            override fun onFailure(reason: Int) = log("discoverPeers: onFailure ${errorName(reason)}")
+            override fun onSuccess() {
+                log("discoverPeers: onSuccess (discovery started)")
+                onDone(true, 0)
+            }
+
+            override fun onFailure(reason: Int) {
+                log("discoverPeers: onFailure ${errorName(reason)}")
+                onDone(false, reason)
+            }
         })
+    }
+
+    private fun noChannel(message: String, onDone: (Boolean, Int) -> Unit) {
+        log(message)
+        onDone(false, NO_CHANNEL_REASON)
     }
 
     @SuppressLint("MissingPermission")

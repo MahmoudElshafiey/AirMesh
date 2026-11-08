@@ -37,6 +37,26 @@ interface DiscoveryBackend {
         discoverServices()
         onDone(true, 0)
     }
+
+    /** Chained classic discoverPeers; strategies 3 and 4 wait for its callback. */
+    fun discoverPeers(onDone: (Boolean, Int) -> Unit) {
+        discoverPeers()
+        onDone(true, 0)
+    }
+
+    /**
+     * Chained addServiceRequest. [filtered] false registers the request without a
+     * service type (strategy 2); the default ignores the flag and keeps the old
+     * behaviour for fakes.
+     */
+    fun addServiceRequest(filtered: Boolean, onDone: (Boolean, Int) -> Unit) {
+        addServiceRequest(onDone)
+    }
+
+    /** Strategy 4: removeLocalService then addLocalService right before the scan. */
+    fun reRegisterLocalService(onDone: (Boolean, Int) -> Unit) {
+        onDone(true, 0)
+    }
 }
 
 /**
@@ -48,14 +68,24 @@ interface DiscoveryBackend {
  */
 class DiscoveryCoordinator(
     private val backend: DiscoveryBackend,
-    private val clock: () -> Long = System::currentTimeMillis,
     /** Runs [block] after the given delay. Default executes immediately (JVM tests). */
     private val schedule: (Long, () -> Unit) -> Unit = { _, block -> block() },
     private val log: (String) -> Unit = {},
+    /** Picks the scan variant and remembers the one that worked. */
+    private val strategySelector: DiscoveryStrategySelector =
+        DiscoveryStrategySelector(NoDiscoveryStrategyStore),
+    // Clock stays last: existing callers use `DiscoveryCoordinator(backend) { now }`.
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
     /** Strict clear → add → (500 ms) → discover chaining, driven by callbacks. */
     private val sequencer = DnsSdRefreshSequencer(clock)
+
+    /** Strategy the running cycle was built for (1 filtered, 2..4 fallbacks). */
+    private var activeStrategy: Int = DiscoveryStrategySelector.MIN_STRATEGY
+
+    /** Current strategy, for logs and the 60 s stats line. */
+    val currentStrategy: Int get() = strategySelector.strategy
 
     /** Last time a full service cycle (clear → add → scan) was issued; null when none is active. */
     var lastCycleAtMs: Long? = null
@@ -77,11 +107,14 @@ class DiscoveryCoordinator(
      * running (its retries own the radio until it finishes or is reset).
      */
     fun issueServiceCycle(): Boolean {
-        val action = sequencer.requestRefresh()
+        val strategy = strategySelector.strategy
+        val action = sequencer.requestRefresh(strategy)
         if (action == DnsSdRefreshAction.Ignored) {
             log("dnssd: refresh already in progress — request ignored")
             return false
         }
+        activeStrategy = strategy
+        log("dnssd: strategy=$strategy")
         lastCycleAtMs = clock()
         serviceDiscoveryActive = true
         execute(action)
@@ -113,10 +146,25 @@ class DiscoveryCoordinator(
     private fun runStep(step: DnsSdRefreshStep) {
         val onDone: (Boolean, Int) -> Unit = { success, reason -> onStepDone(step, success, reason) }
         when (step) {
+            DnsSdRefreshStep.DISCOVER_PEERS -> backend.discoverPeers(onDone)
             DnsSdRefreshStep.CLEAR_REQUESTS -> backend.clearServiceRequests(onDone)
-            DnsSdRefreshStep.ADD_REQUEST -> backend.addServiceRequest(onDone)
-            DnsSdRefreshStep.DISCOVER_SERVICES -> backend.discoverServices(onDone)
+            // Strategy 1 asks the framework to filter by service type; from 2 on we
+            // register the request unfiltered and filter in our own listener.
+            DnsSdRefreshStep.ADD_REQUEST ->
+                backend.addServiceRequest(filtered = activeStrategy == 1, onDone)
+
+            DnsSdRefreshStep.RE_REGISTER_LOCAL_SERVICE -> backend.reRegisterLocalService(onDone)
+            DnsSdRefreshStep.DISCOVER_SERVICES -> {
+                // A scan is starting: open the 25 s silence watch for this strategy.
+                strategySelector.scanStarted(clock())
+                backend.discoverServices(onDone)
+            }
         }
+    }
+
+    /** Feed a RAW DNS-SD callback (before any filtering) into the strategy selector. */
+    fun notifyRawCallback(nowMs: Long = clock()) {
+        strategySelector.rawCallback(nowMs)
     }
 
     private fun onStepDone(step: DnsSdRefreshStep, success: Boolean, reason: Int) {
@@ -159,6 +207,20 @@ class DiscoveryCoordinator(
             peerScanStartedAtMs = null
         }
         if (serviceWanted && !peerScanActive && !serviceDiscoveryActive) issueServiceCycle()
+        // A strategy whose scan stayed silent for 25 s rotates to the next fallback.
+        if (serviceWanted && !peerScanActive) rotateIfSilent(nowMs)
+    }
+
+    /** Rotate the discovery strategy when the current scan window passed with no raw callback. */
+    private fun rotateIfSilent(nowMs: Long) {
+        val event = strategySelector.tick(nowMs)
+        if (event !is DiscoveryStrategyEvent.Rotate) return
+        log("dnssd: strategy ${event.from} silent for ${DiscoveryStrategySelector.WATCH_MS / 1000} s — rotating to ${event.to}")
+        // Abandon whatever the old strategy was doing and start the new plan now.
+        sequencer.reset()
+        lastCycleAtMs = null
+        serviceDiscoveryActive = true // let the fresh cycle below own the radio
+        issueServiceCycle()
     }
 
     /** Stop the service scan entirely (auto-mesh paused, or the directory stopped). */

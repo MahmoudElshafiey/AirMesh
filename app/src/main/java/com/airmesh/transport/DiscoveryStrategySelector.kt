@@ -13,6 +13,13 @@ interface DiscoveryStrategyStore {
     fun save(strategy: Int)
 }
 
+/** Store used when nothing should be persisted (JVM tests, default wiring). */
+object NoDiscoveryStrategyStore : DiscoveryStrategyStore {
+    override fun load(): Int? = null
+
+    override fun save(strategy: Int) = Unit
+}
+
 /** What [DiscoveryStrategySelector.tick] wants the caller to do. */
 sealed interface DiscoveryStrategyEvent {
     /** Start a scan with [to] instead of [from]. */

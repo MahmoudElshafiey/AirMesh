@@ -1,9 +1,13 @@
 package com.airmesh.transport
 
-/** The three DNS-SD calls of one refresh cycle, in order. */
+/** The DNS-SD / peer-scan calls that can appear in one refresh cycle. */
 enum class DnsSdRefreshStep {
+    /** Classic discoverPeers; strategy 3 and 4 wait for it before the service scan. */
+    DISCOVER_PEERS,
     CLEAR_REQUESTS,
     ADD_REQUEST,
+    /** Strategy 4: removeLocalService + addLocalService right before the scan. */
+    RE_REGISTER_LOCAL_SERVICE,
     DISCOVER_SERVICES,
 }
 
@@ -29,6 +33,10 @@ sealed interface DnsSdRefreshAction {
  * 30 s, then 30 s); any successful step resets the backoff. Pure Kotlin: the
  * caller owns timers, the injected [clock] only timestamps activity, so tests
  * drive everything through callbacks and a fake clock.
+ *
+ * The step plan depends on the discovery strategy (see [DiscoveryStrategySelector]):
+ * 1/2 clear → add → discover; 3 adds discoverPeers first; 4 also re-registers
+ * the local service right before the scan.
  */
 class DnsSdRefreshSequencer(
     private val clock: () -> Long = System::currentTimeMillis,
@@ -50,40 +58,46 @@ class DnsSdRefreshSequencer(
     var lastActivityMs: Long = 0L
         private set
 
+    /** Strategy the current (or last) cycle was built for. */
+    var strategy: Int = 1
+        private set
+
+    /** Remaining steps of the current cycle, each with the delay before it is issued. */
+    private var plan: List<Pair<DnsSdRefreshStep, Long>> = emptyList()
+    private var planIndex = 0
+
     /**
-     * Start a cycle. Ignored while one is already running: a second refresh must
-     * never interleave clear/add/discover calls on the radio.
+     * Start a cycle for [strategy] (1..4, see [DiscoveryStrategySelector]).
+     * Ignored while one is already running: a second refresh must never
+     * interleave clear/add/scan calls on the radio.
      */
-    fun requestRefresh(): DnsSdRefreshAction {
+    fun requestRefresh(strategy: Int = 1): DnsSdRefreshAction {
         if (running) return DnsSdRefreshAction.Ignored
+        this.strategy = strategy
+        plan = planFor(strategy)
+        planIndex = 0
         running = true
         consecutiveFailures = 0
-        currentStep = DnsSdRefreshStep.CLEAR_REQUESTS
         lastActivityMs = clock()
-        return DnsSdRefreshAction.RunStep(DnsSdRefreshStep.CLEAR_REQUESTS, 0L)
+        val first = plan[0]
+        currentStep = first.first
+        return DnsSdRefreshAction.RunStep(first.first, first.second)
     }
 
-    /** A step reported success: move to the next step. */
+    /** A step reported success: move to the next step of the plan. */
     fun onStepSuccess(step: DnsSdRefreshStep): DnsSdRefreshAction {
         if (!running || step != currentStep) return DnsSdRefreshAction.Ignored
         consecutiveFailures = 0
         lastActivityMs = clock()
-        val action = when (step) {
-            DnsSdRefreshStep.CLEAR_REQUESTS ->
-                DnsSdRefreshAction.RunStep(DnsSdRefreshStep.ADD_REQUEST, 0L)
-
-            // 500 ms so the framework settles the request before the scan starts.
-            DnsSdRefreshStep.ADD_REQUEST ->
-                DnsSdRefreshAction.RunStep(DnsSdRefreshStep.DISCOVER_SERVICES, ADD_TO_DISCOVER_DELAY_MS)
-
-            DnsSdRefreshStep.DISCOVER_SERVICES -> {
-                running = false
-                currentStep = null
-                DnsSdRefreshAction.CycleComplete
-            }
+        planIndex++
+        if (planIndex >= plan.size) {
+            running = false
+            currentStep = null
+            return DnsSdRefreshAction.CycleComplete
         }
-        if (action is DnsSdRefreshAction.RunStep) currentStep = action.step
-        return action
+        val next = plan[planIndex]
+        currentStep = next.first
+        return DnsSdRefreshAction.RunStep(next.first, next.second)
     }
 
     /** A step failed: retry the same step after the next backoff delay. */
@@ -104,6 +118,34 @@ class DnsSdRefreshSequencer(
 
     /** True when a scheduled step may still run: the cycle was not abandoned meanwhile. */
     fun isRunningStep(step: DnsSdRefreshStep): Boolean = running && currentStep == step
+
+    /** Step order each strategy runs (the delay travels with the step it precedes). */
+    private fun planFor(strategy: Int): List<Pair<DnsSdRefreshStep, Long>> = when (strategy) {
+        // 1: filtered request, 2: unfiltered request — only the coordinator's
+        // addServiceRequest(filtered=…) differs, the call order is the same.
+        1, 2 -> listOf(
+            DnsSdRefreshStep.CLEAR_REQUESTS to 0L,
+            DnsSdRefreshStep.ADD_REQUEST to 0L,
+            DnsSdRefreshStep.DISCOVER_SERVICES to ADD_TO_DISCOVER_DELAY_MS,
+        )
+
+        // 3: take the radio with discoverPeers first, scan only after it succeeds.
+        3 -> listOf(
+            DnsSdRefreshStep.DISCOVER_PEERS to 0L,
+            DnsSdRefreshStep.CLEAR_REQUESTS to 0L,
+            DnsSdRefreshStep.ADD_REQUEST to 0L,
+            DnsSdRefreshStep.DISCOVER_SERVICES to ADD_TO_DISCOVER_DELAY_MS,
+        )
+
+        // 4: also re-register our own local service right before the scan.
+        else -> listOf(
+            DnsSdRefreshStep.DISCOVER_PEERS to 0L,
+            DnsSdRefreshStep.CLEAR_REQUESTS to 0L,
+            DnsSdRefreshStep.ADD_REQUEST to 0L,
+            DnsSdRefreshStep.RE_REGISTER_LOCAL_SERVICE to ADD_TO_DISCOVER_DELAY_MS,
+            DnsSdRefreshStep.DISCOVER_SERVICES to 0L,
+        )
+    }
 
     companion object {
         /** Gap between "add request ok" and discoverServices, per the chaining spec. */

@@ -169,4 +169,95 @@ class DnsSdRefreshSequencerTest {
         sequencer.onStepFailure(DnsSdRefreshStep.ADD_REQUEST, 4)
         assertEquals(12_000L, sequencer.lastActivityMs)
     }
+
+    // --- Strategy-specific plans ------------------------------------------------
+
+    @Test
+    fun `strategy 3 starts with discoverPeers then the normal chain`() {
+        val sequencer = DnsSdRefreshSequencer(clock)
+
+        assertEquals(
+            step(DnsSdRefreshStep.DISCOVER_PEERS, 0L),
+            sequencer.requestRefresh(strategy = 3),
+        )
+        assertEquals(3, sequencer.strategy)
+        assertEquals(
+            step(DnsSdRefreshStep.CLEAR_REQUESTS, 0L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.DISCOVER_PEERS),
+        )
+        assertEquals(
+            step(DnsSdRefreshStep.ADD_REQUEST, 0L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.CLEAR_REQUESTS),
+        )
+        assertEquals(
+            step(DnsSdRefreshStep.DISCOVER_SERVICES, 500L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.ADD_REQUEST),
+        )
+    }
+
+    @Test
+    fun `strategy 4 re-registers the local service right before the scan`() {
+        val sequencer = DnsSdRefreshSequencer(clock)
+
+        assertEquals(
+            step(DnsSdRefreshStep.DISCOVER_PEERS, 0L),
+            sequencer.requestRefresh(strategy = 4),
+        )
+        assertEquals(
+            step(DnsSdRefreshStep.CLEAR_REQUESTS, 0L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.DISCOVER_PEERS),
+        )
+        assertEquals(
+            step(DnsSdRefreshStep.ADD_REQUEST, 0L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.CLEAR_REQUESTS),
+        )
+        // Same 500 ms settle wait, then the re-register step, then the scan.
+        assertEquals(
+            step(DnsSdRefreshStep.RE_REGISTER_LOCAL_SERVICE, 500L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.ADD_REQUEST),
+        )
+        assertEquals(
+            step(DnsSdRefreshStep.DISCOVER_SERVICES, 0L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.RE_REGISTER_LOCAL_SERVICE),
+        )
+        assertEquals(
+            DnsSdRefreshAction.CycleComplete,
+            sequencer.onStepSuccess(DnsSdRefreshStep.DISCOVER_SERVICES),
+        )
+    }
+
+    @Test
+    fun `default plan stays at strategy 1 and starts with clear`() {
+        val sequencer = DnsSdRefreshSequencer(clock)
+
+        assertEquals(step(DnsSdRefreshStep.CLEAR_REQUESTS, 0L), sequencer.requestRefresh())
+        assertEquals(1, sequencer.strategy)
+    }
+
+    @Test
+    fun `strategy 2 keeps the strategy 1 call order`() {
+        val sequencer = DnsSdRefreshSequencer(clock)
+
+        assertEquals(step(DnsSdRefreshStep.CLEAR_REQUESTS, 0L), sequencer.requestRefresh(strategy = 2))
+        assertEquals(
+            step(DnsSdRefreshStep.ADD_REQUEST, 0L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.CLEAR_REQUESTS),
+        )
+        assertEquals(
+            step(DnsSdRefreshStep.DISCOVER_SERVICES, 500L),
+            sequencer.onStepSuccess(DnsSdRefreshStep.ADD_REQUEST),
+        )
+    }
+
+    @Test
+    fun `a failed strategy 3 step retries that step, not the whole plan`() {
+        val sequencer = DnsSdRefreshSequencer(clock)
+        sequencer.requestRefresh(strategy = 3)
+
+        assertEquals(
+            step(DnsSdRefreshStep.DISCOVER_PEERS, 2_000L),
+            sequencer.onStepFailure(DnsSdRefreshStep.DISCOVER_PEERS, reason = 3),
+        )
+        assertEquals(DnsSdRefreshStep.DISCOVER_PEERS, sequencer.currentStep)
+    }
 }
