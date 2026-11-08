@@ -63,8 +63,19 @@ class WifiP2pPeerDirectory(
     private val lastSeen = mutableMapOf<String, Long>()
     private var loopJob: Job? = null
 
+    /** Callback/accept/ignore counters, reported once per [STATS_INTERVAL_MS]. */
+    private val stats = DnsSdStats()
+    private var lastStatsMs = 0L
+
     private val serviceListener = object : WifiP2pManager.DnsSdServiceResponseListener {
         override fun onDnsSdServiceAvailable(serviceType: String, instanceName: String, device: WifiP2pDevice) {
+            // First statement, before any filtering: log what the framework actually delivered.
+            log(
+                "dnssd: raw service instance='$instanceName' type='$serviceType' " +
+                    "src=${device?.deviceAddress ?: "(no address)"} " +
+                    "name=${device?.deviceName ?: "(no name)"}",
+            )
+            stats.onRawService()
             log("dnssd: service available '$instanceName' from ${device?.deviceAddress ?: "(no address)"}")
             // The token doubles as the instance name; the TXT callback refines it.
             upsertPeer(AirMeshAdCodec.decode(instanceName), device)
@@ -77,6 +88,12 @@ class WifiP2pPeerDirectory(
             txtRecord: Map<String, String>,
             device: WifiP2pDevice,
         ) {
+            // First statement, before any filtering: log what the framework actually delivered.
+            log(
+                "dnssd: raw txt fullDomain='$serviceType' map=$txtRecord " +
+                    "src=${device?.deviceAddress ?: "(no address)"}",
+            )
+            stats.onRawTxt()
             log("dnssd: TXT record $txtRecord from ${device?.deviceAddress ?: "(no address)"}")
             upsertPeer(AirMeshAdCodec.decode(txtRecord[TXT_AD_KEY]), device)
         }
@@ -154,6 +171,7 @@ class WifiP2pPeerDirectory(
                 coordinator.tick(nowMs, discovering)
                 coordinator.refreshIfDue(nowMs)
                 sweepStalePeers(nowMs)
+                reportStatsIfDue(nowMs)
                 delay(CHECK_SLICE_MS)
             }
         }
@@ -197,6 +215,7 @@ class WifiP2pPeerDirectory(
             // restarts the scan, which is exactly what we want before Android's
             // ~2 min discovery timeout kills the previous one.
             log("dnssd: discoverServices() issued")
+            stats.onScan()
             manager?.discoverServices(ch, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() = log("dnssd: discoverServices ok (scan started)")
 
@@ -210,17 +229,20 @@ class WifiP2pPeerDirectory(
     private fun upsertPeer(ad: AirMeshAd?, device: WifiP2pDevice?) {
         if (ad == null) {
             // A DNS-SD hit that is not a well-formed AirMesh token; ignore it.
+            stats.onIgnored()
             log("dnssd: ignored: no AirMesh TXT")
             return
         }
         if (ad.nodeId == myNodeId) {
             // Our own advertisement bouncing back; never a peer.
+            stats.onIgnored()
             log("dnssd: ignored own ad (#${ad.nodeId})")
             return
         }
         val address = device?.deviceAddress
         if (address.isNullOrEmpty() || address == PEER_PLACEHOLDER_ADDRESS) {
             // A peer we can see but never connect to must not block our own creation.
+            stats.onIgnored()
             log("dnssd: ignored #${ad.nodeId} — no usable source device address")
             return
         }
@@ -229,7 +251,21 @@ class WifiP2pPeerDirectory(
             val peer = AirMeshPeer(address, ad.nodeId, ad.isGroupOwner, ad.tieBreakToken)
             (current.filterNot { it.deviceAddress == address } + peer).sortedBy { it.nodeId }
         }
+        stats.onAccepted()
         log("dnssd: accepted AirMesh peer #${ad.nodeId} owner=${if (ad.isGroupOwner) 1 else 0} ($address)")
+    }
+
+    /** Print one counters line per [STATS_INTERVAL_MS], then start a new window. */
+    private fun reportStatsIfDue(nowMs: Long) {
+        if (lastStatsMs == 0L) {
+            // First tick starts the window here, so the first line covers a full minute.
+            lastStatsMs = nowMs
+            return
+        }
+        if (nowMs - lastStatsMs < STATS_INTERVAL_MS) return
+        lastStatsMs = nowMs
+        log(stats.statsLine())
+        stats.reset()
     }
 
     private fun sweepStalePeers(nowMs: Long) {
@@ -272,5 +308,8 @@ class WifiP2pPeerDirectory(
 
         /** How often the loop wakes; discovery re-issue is gated by [shouldRefreshDiscovery]. */
         private const val CHECK_SLICE_MS = 5_000L
+
+        /** How often one counters line is logged (each line covers only this window). */
+        private const val STATS_INTERVAL_MS = 60_000L
     }
 }
