@@ -76,6 +76,12 @@ class WifiP2pPeerDirectory(
                     "name=${device?.deviceName ?: "(no name)"}",
             )
             stats.onRawService()
+            // Not an AirMesh service? Drop it before it reaches the peer list.
+            if (!isAirMeshService(serviceType, instanceName)) {
+                stats.onIgnored()
+                log("dnssd: ignored: foreign service type='$serviceType' instance='$instanceName'")
+                return
+            }
             log("dnssd: service available '$instanceName' from ${device?.deviceAddress ?: "(no address)"}")
             // The token doubles as the instance name; the TXT callback refines it.
             upsertPeer(AirMeshAdCodec.decode(instanceName), device)
@@ -94,6 +100,12 @@ class WifiP2pPeerDirectory(
                     "src=${device?.deviceAddress ?: "(no address)"}",
             )
             stats.onRawTxt()
+            // This callback has no instance name, so the type must match.
+            if (!isAirMeshService(serviceType, instanceName = null)) {
+                stats.onIgnored()
+                log("dnssd: ignored: foreign service type='$serviceType' instance='null'")
+                return
+            }
             log("dnssd: TXT record $txtRecord from ${device?.deviceAddress ?: "(no address)"}")
             upsertPeer(AirMeshAdCodec.decode(txtRecord[TXT_AD_KEY]), device)
         }
