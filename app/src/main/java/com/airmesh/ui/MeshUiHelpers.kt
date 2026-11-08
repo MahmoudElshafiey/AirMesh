@@ -78,7 +78,8 @@ enum class LogCategory { MESSAGES, NETWORK, TCP, ERRORS }
 /**
  * Categories a log line belongs to, by keyword:
  * - MESSAGES: TX / RX / originated / delivered / replay lines (chat traffic)
- * - NETWORK:  the "P2P:" prefix used by every Wi-Fi Direct connector line
+ * - NETWORK:  Wi-Fi Direct lines: the "P2P:" prefix, plus the DNS-SD directory
+ *             ("dnssd:") and auto-mesh state machine ("auto:") lines
  * - TCP:      connect/listen attempts and outcomes
  * - ERRORS:   anything containing failed / error / Exception / dropped
  */
@@ -91,7 +92,9 @@ fun classifyLogLine(line: String): Set<LogCategory> {
         ) {
             add(LogCategory.MESSAGES)
         }
-        if (lower.contains("p2p")) add(LogCategory.NETWORK)
+        if (lower.contains("p2p") || lower.contains("dnssd:") || lower.contains("auto:")) {
+            add(LogCategory.NETWORK)
+        }
         if (lower.contains("tcp")) add(LogCategory.TCP)
         if (lower.contains("failed") || lower.contains("error") ||
             lower.contains("exception") || lower.contains("dropped")

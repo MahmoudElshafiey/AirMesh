@@ -155,19 +155,33 @@ fun autoMeshBannerText(
  * Wi-Fi Direct devices (wrong app, old version, or auto-mesh off there). Shown
  * only while Searching after [NO_AIRMESH_PEERS_AFTER_MS]; null otherwise so
  * [autoMeshBannerText] keeps applying. We never connect to such a device on our own.
+ *
+ * [strategy] and [rawCallbacks] add a second, smaller banner line explaining what
+ * the discovery layer is currently doing; null (the default) keeps the old text.
  */
 fun noAirMeshPeersBannerText(
     state: AutoMeshState,
     nowMs: Long,
     airMeshPeerCount: Int,
     classicDeviceCount: Int,
+    strategy: Int? = null,
+    rawCallbacks: Int? = null,
 ): String? {
     val s = state as? AutoMeshState.Searching ?: return null
     if (nowMs - s.sinceMs < NO_AIRMESH_PEERS_AFTER_MS) return null
     if (airMeshPeerCount != 0 || classicDeviceCount == 0) return null
     val noun = if (classicDeviceCount == 1) "device" else "devices"
-    return "Found $classicDeviceCount Wi-Fi Direct $noun but none advertises AirMesh. Open Advanced to connect manually."
+    val hint = "Found $classicDeviceCount Wi-Fi Direct $noun but none advertises AirMesh. Open Advanced to connect manually."
+    if (strategy == null || rawCallbacks == null) return hint
+    return "$hint\n${discoveryStatusLine(strategy, rawCallbacks)}"
 }
+
+/**
+ * Second banner line: which discovery strategy is active and how many raw DNS-SD
+ * callbacks have arrived. Pure text, so the exact wording is unit-tested.
+ */
+fun discoveryStatusLine(strategy: Int, rawCallbacks: Int): String =
+    "Discovery strategy $strategy, raw callbacks $rawCallbacks"
 
 /**
  * Event-driven state machine that decides, from the visible AirMesh peers and

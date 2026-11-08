@@ -119,6 +119,9 @@ fun MeshScreen(
     airMeshPeers: List<AirMeshPeer> = emptyList(),
     autoMeshEnabled: Boolean = true,
     onSetAutoMeshEnabled: (Boolean) -> Unit = {},
+    // Discovery diagnostics shown as the banner's small second line.
+    discoveryStrategy: Int = 1,
+    rawCallbackCount: Int = 0,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(MeshTab.CHAT.ordinal) }
     val tab = MeshTab.values()[selectedTab.coerceIn(0, MeshTab.values().size - 1)]
@@ -145,6 +148,7 @@ fun MeshScreen(
     // hint banner; otherwise the state banner applies.
     val autoBannerText = noAirMeshPeersBannerText(
         autoMeshState, nowMs, airMeshPeers.size, connectorState.peers.size,
+        strategy = discoveryStrategy, rawCallbacks = rawCallbackCount,
     ) ?: autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs)
 
     Scaffold(
@@ -260,7 +264,11 @@ internal fun AutoMeshHeader(bannerText: String?, enabled: Boolean, onSetEnabled:
     }
 }
 
-/** One-line auto-mesh status; the text itself is pure and JVM-tested. */
+/**
+ * Auto-mesh status banner. The text is pure and JVM-tested; when it carries a
+ * second newline-separated line (the discovery strategy detail), that line is
+ * rendered smaller so the hint stays the prominent part.
+ */
 @Composable
 fun AutoMeshBanner(text: String) {
     Row(
@@ -269,7 +277,17 @@ fun AutoMeshBanner(text: String) {
             .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        Text(text, style = MaterialTheme.typography.bodyMedium)
+        val lines = text.split('\n', limit = 2)
+        Column {
+            Text(lines[0], style = MaterialTheme.typography.bodyMedium)
+            if (lines.size > 1) {
+                Text(
+                    lines[1],
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 

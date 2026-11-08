@@ -116,6 +116,14 @@ class MeshService : Service() {
     /** AirMesh-tagged peers from the DNS-SD directory; the Network tab lists them first. */
     val airMeshPeers: StateFlow<List<AirMeshPeer>> get() = peerDirectory.peers
 
+    /** Active DNS-SD discovery strategy (1..4), shown as the banner's second line. */
+    private val _discoveryStrategy = MutableStateFlow(1)
+    val discoveryStrategy: StateFlow<Int> = _discoveryStrategy.asStateFlow()
+
+    /** Raw DNS-SD callbacks since the service started; same second banner line. */
+    private val _rawCallbackCount = MutableStateFlow(0)
+    val rawCallbackCount: StateFlow<Int> = _rawCallbackCount.asStateFlow()
+
     private lateinit var notificationManager: NotificationManager
     /** Throttles running-notification updates to at most one per 2 s. */
     private val runningThrottle = NotificationThrottle()
@@ -275,9 +283,13 @@ class MeshService : Service() {
                         peerDirectory.peers.value.size, connector.state.value.peers.size,
                     )
                 } else null
+                // Discovery diagnostics for the banner's small second line.
+                _discoveryStrategy.value = discoveryCoordinator.currentStrategy
+                _rawCallbackCount.value = discoveryCoordinator.rawCallbackCount
                 when {
                     hint != null && !noAirMeshHintShown -> {
-                        _eventLog.log("auto: $hint")
+                        // Log the hint only; the strategy line is a separate concern.
+                        _eventLog.log("auto: ${hint.lineSequence().first()}")
                         noAirMeshHintShown = true
                     }
                     hint == null -> noAirMeshHintShown = false

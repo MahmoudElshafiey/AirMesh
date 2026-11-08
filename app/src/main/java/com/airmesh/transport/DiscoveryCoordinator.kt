@@ -87,6 +87,10 @@ class DiscoveryCoordinator(
     /** Current strategy, for logs and the 60 s stats line. */
     val currentStrategy: Int get() = strategySelector.strategy
 
+    /** Raw DNS-SD callbacks seen since this coordinator was created (cumulative). */
+    var rawCallbackCount: Int = 0
+        private set
+
     /** Last time a full service cycle (clear → add → scan) was issued; null when none is active. */
     var lastCycleAtMs: Long? = null
         private set
@@ -164,6 +168,7 @@ class DiscoveryCoordinator(
 
     /** Feed a RAW DNS-SD callback (before any filtering) into the strategy selector. */
     fun notifyRawCallback(nowMs: Long = clock()) {
+        rawCallbackCount++
         strategySelector.rawCallback(nowMs)
     }
 

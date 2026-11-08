@@ -210,6 +210,8 @@ class MeshActivity : ComponentActivity() {
                         val autoIdleReason by service.autoIdleReason.collectAsState()
                         val airMeshPeers by service.airMeshPeers.collectAsState()
                         val autoMeshEnabled by service.autoMeshEnabled.collectAsState()
+                        val discoveryStrategy by service.discoveryStrategy.collectAsState()
+                        val rawCallbackCount by service.rawCallbackCount.collectAsState()
 
                         MeshScreen(
                             nodeId = service.nodeId,
@@ -261,6 +263,8 @@ class MeshActivity : ComponentActivity() {
                             airMeshPeers = airMeshPeers,
                             autoMeshEnabled = autoMeshEnabled,
                             onSetAutoMeshEnabled = service::setAutoMeshEnabled,
+                            discoveryStrategy = discoveryStrategy,
+                            rawCallbackCount = rawCallbackCount,
                         )
                     }
                 }
