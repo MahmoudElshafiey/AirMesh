@@ -29,6 +29,8 @@ import com.airmesh.transport.AutoMeshListener
 import com.airmesh.transport.AutoMeshRole
 import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
+import com.airmesh.transport.DiscoveryBackend
+import com.airmesh.transport.DiscoveryCoordinator
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
 import com.airmesh.transport.WifiDirectConnector
@@ -67,7 +69,10 @@ class MeshService : Service() {
     private lateinit var connector: WifiDirectConnector
 
     /** DNS-SD directory of nearby AirMesh phones; created in [onCreate]. */
-    private lateinit var peerDirectory: PeerDirectory
+    private lateinit var peerDirectory: WifiP2pPeerDirectory
+
+    /** Serializes every P2P scan so a classic pass never cancels the DNS-SD cycle. */
+    private lateinit var discoveryCoordinator: DiscoveryCoordinator
 
     /** The auto-mesh state machine; created in [onCreate], address upgraded when the MAC arrives. */
     private var autoController: AutoMeshController? = null
@@ -135,10 +140,19 @@ class MeshService : Service() {
         connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
 
         // Auto-mesh: a DNS-SD directory of nearby AirMesh phones plus the pure
-        // state machine that decides when to join or create groups.
+        // state machine that decides when to join or create groups. One coordinator
+        // owns every scan on the radio — discoverPeers cancels an ongoing DNS-SD
+        // scan (and vice versa), so they must never overlap.
+        discoveryCoordinator = DiscoveryCoordinator(backend = object : DiscoveryBackend {
+            override fun clearServiceRequests() = peerDirectory.clearServiceRequestsRaw()
+            override fun addServiceRequest() = peerDirectory.addServiceRequestRaw()
+            override fun discoverServices() = peerDirectory.startServiceScanRaw()
+            override fun discoverPeers() = connector.discover()
+        })
         peerDirectory = WifiP2pPeerDirectory(
             applicationContext,
             getSelfAddress = { connector.selfAddress.value },
+            coordinator = discoveryCoordinator,
             log = { line -> _eventLog.log(line) },
         )
         connector.autoMeshListener = object : AutoMeshListener {
@@ -219,7 +233,8 @@ class MeshService : Service() {
                 ) {
                     lastNudgeAtMs = nowMs
                     _eventLog.log("auto: own Wi-Fi Direct address still unknown — starting a discovery pass to make the system report it")
-                    connector.discover()
+                    // Through the coordinator so this classic scan cannot overlap the DNS-SD cycle.
+                    discoveryCoordinator.requestPeerScan()
                 }
                 autoEvent(AutoMeshEvent.Tick, "tick")
             }
@@ -332,7 +347,9 @@ class MeshService : Service() {
 
     fun discover() {
         pauseAutoForManualUse()
-        connector.discover()
+        // Through the coordinator: it clears any active DNS-SD scan first and holds
+        // the radio for a 30 s window before the service cycle resumes.
+        discoveryCoordinator.requestPeerScan()
     }
 
     fun createGroup() {

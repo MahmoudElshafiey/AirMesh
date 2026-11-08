@@ -22,11 +22,13 @@ import kotlinx.coroutines.launch
  * API (initialize/addLocalService/addServiceRequest/discoverServices — the
  * classic registerService/requestServices methods were removed in API 37). We
  * publish one ad per node: the token rides both as the TXT record entry
- * [TXT_AD_KEY] and as the instance name. Discovery is re-issued every ~60 s
- * because Android stops it after about two minutes, and peers that stop being
- * seen are swept after [PEER_STALE_MS] (this API has no removal callback). Only
- * devices advertising [AirMeshAdCodec.SERVICE_TYPE] with a decodable token
- * appear in [peers], so foreign Wi-Fi Direct peers never leak into the list.
+ * [TXT_AD_KEY] and as the instance name. All scan issuance (the ~60 s service
+ * refresh cycle, manual peer scans) goes through a [DiscoveryCoordinator], so a
+ * classic discoverPeers pass can never cancel an ongoing DNS-SD scan; peers that
+ * stop being seen are swept after [PEER_STALE_MS] (this API has no removal
+ * callback). Only devices advertising [AirMeshAdCodec.SERVICE_TYPE] with a
+ * decodable token appear in [peers], so foreign Wi-Fi Direct peers never leak
+ * into the list.
  *
  * All methods must be called on the main thread: the channel is bound to the
  * main looper, matching how WifiDirectConnector uses its own channel. [stop] is
@@ -35,6 +37,7 @@ import kotlinx.coroutines.launch
 class WifiP2pPeerDirectory(
     context: Context,
     private val getSelfAddress: () -> String? = { null },
+    private val coordinator: DiscoveryCoordinator,
     private val log: (String) -> Unit = {},
 ) : PeerDirectory {
 
@@ -53,8 +56,6 @@ class WifiP2pPeerDirectory(
     private val serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
 
     private var discovering = false
-    /** Last time we (re-)issued discoverServices; the loop re-issues every ~60 s. */
-    private var lastDiscoveryAtMs: Long? = null
     /** When each peer was last seen; entries older than [PEER_STALE_MS] are swept. */
     private val lastSeen = mutableMapOf<String, Long>()
     private var loopJob: Job? = null
@@ -132,35 +133,63 @@ class WifiP2pPeerDirectory(
     override fun setDiscovering(enabled: Boolean) {
         if (discovering == enabled) return
         discovering = enabled
-        val ch = channel ?: run {
-            log("dnssd: cannot discover — no P2P channel")
-            return
-        }
         if (!enabled) {
-            removeServiceRequestQuietly(ch)
-            lastDiscoveryAtMs = null
+            coordinator.stopService()
             return
         }
-        // The request persists until removed; discoverServices is what the loop
-        // re-issues to force a fresh scan before Android's ~2 min timeout.
-        addServiceRequestQuietly(ch)
+        // The loop's first tick issues the full cycle through the coordinator, so a
+        // classic peer scan and this service scan can never overlap on the radio.
         ensureLoop()
     }
 
-    /** One 5 s-slice loop: re-issue discovery when due and sweep stale peers. */
+    /** One 5 s-slice loop: let the coordinator drive scans and sweep stale peers. */
     private fun ensureLoop() {
         if (loopJob?.isActive == true) return
         loopJob = scope.launch {
             while (isActive) {
                 val nowMs = System.currentTimeMillis()
-                if (discovering && shouldRefreshDiscovery(lastDiscoveryAtMs, nowMs)) issueDiscovery()
+                // The coordinator owns all scan issuance: it ends stale manual scans,
+                // resumes the service cycle when wanted, and re-issues every ~60 s.
+                coordinator.tick(nowMs, discovering)
+                coordinator.refreshIfDue(nowMs)
                 sweepStalePeers(nowMs)
                 delay(CHECK_SLICE_MS)
             }
         }
     }
 
-    private fun issueDiscovery() {
+    // --- Raw DNS-SD operations ---------------------------------------------------
+    // Called only through the [DiscoveryCoordinator] so a classic peer scan and a
+    // service scan never overlap on the radio.
+
+    fun clearServiceRequestsRaw() {
+        val ch = channel ?: return
+        try {
+            manager?.clearServiceRequests(ch, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() = log("dnssd: clearServiceRequests ok")
+
+                override fun onFailure(reason: Int) = log("dnssd: clearServiceRequests failed reason=$reason")
+            })
+        } catch (error: Exception) {
+            log("dnssd: clearServiceRequests failed: ${error.message}")
+        }
+    }
+
+    fun addServiceRequestRaw() {
+        val ch = channel ?: return
+        log("dnssd: addServiceRequest(${AirMeshAdCodec.SERVICE_TYPE})")
+        try {
+            manager?.addServiceRequest(ch, serviceRequest, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() = log("dnssd: addServiceRequest ok")
+
+                override fun onFailure(reason: Int) = log("dnssd: addServiceRequest failed reason=$reason")
+            })
+        } catch (error: Exception) {
+            log("dnssd: adding service request failed: ${error.message}")
+        }
+    }
+
+    fun startServiceScanRaw() {
         val ch = channel ?: return
         try {
             // discoverServices is a toggle (like discoverPeers): re-issuing it
@@ -172,7 +201,6 @@ class WifiP2pPeerDirectory(
 
                 override fun onFailure(reason: Int) = log("dnssd: discoverServices failed reason=$reason")
             })
-            lastDiscoveryAtMs = System.currentTimeMillis()
         } catch (error: Exception) {
             log("dnssd: service discovery failed: ${error.message}")
         }
@@ -208,8 +236,8 @@ class WifiP2pPeerDirectory(
 
     override fun stop() {
         discovering = false
+        coordinator.stopService()
         channel?.let { ch ->
-            removeServiceRequestQuietly(ch)
             serviceInfo?.let { info ->
                 try { manager?.removeLocalService(ch, info, null) } catch (_: Exception) {}
             }
@@ -219,7 +247,6 @@ class WifiP2pPeerDirectory(
         channel = null
         advertised = null
         serviceInfo = null
-        lastDiscoveryAtMs = null
         lastSeen.clear()
         _peers.value = emptyList()
         loopJob?.cancel()
@@ -230,23 +257,6 @@ class WifiP2pPeerDirectory(
         val info = serviceInfo ?: return
         try { manager?.removeLocalService(ch, info, null) } catch (_: Exception) {}
         serviceInfo = null
-    }
-
-    private fun addServiceRequestQuietly(ch: WifiP2pManager.Channel) {
-        log("dnssd: addServiceRequest(${AirMeshAdCodec.SERVICE_TYPE})")
-        try {
-            manager?.addServiceRequest(ch, serviceRequest, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() = log("dnssd: addServiceRequest ok")
-
-                override fun onFailure(reason: Int) = log("dnssd: addServiceRequest failed reason=$reason")
-            })
-        } catch (error: Exception) {
-            log("dnssd: adding service request failed: ${error.message}")
-        }
-    }
-
-    private fun removeServiceRequestQuietly(ch: WifiP2pManager.Channel) {
-        try { manager?.removeServiceRequest(ch, serviceRequest, null) } catch (_: Exception) {}
     }
 
     companion object {
