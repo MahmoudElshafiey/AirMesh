@@ -69,7 +69,7 @@ class MeshService : Service() {
     /** DNS-SD directory of nearby AirMesh phones; created in [onCreate]. */
     private lateinit var peerDirectory: PeerDirectory
 
-    /** The auto-mesh state machine; created once our own MAC is known. */
+    /** The auto-mesh state machine; created in [onCreate], address upgraded when the MAC arrives. */
     private var autoController: AutoMeshController? = null
 
     /** This device's mesh id; set in [onCreate]. */
@@ -135,8 +135,7 @@ class MeshService : Service() {
         connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
 
         // Auto-mesh: a DNS-SD directory of nearby AirMesh phones plus the pure
-        // state machine that decides when to join or create groups. The controller
-        // is created lazily once our own MAC is known (selfAddress collector below).
+        // state machine that decides when to join or create groups.
         peerDirectory = WifiP2pPeerDirectory(
             applicationContext,
             getSelfAddress = { connector.selfAddress.value },
@@ -153,6 +152,18 @@ class MeshService : Service() {
         // Auto-mesh is on by default; the Network tab switch persists the choice.
         _autoMeshEnabled.value = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_AUTO_MESH_ENABLED, true)
+
+        // Create the controller right away with a placeholder address: some OEMs
+        // (e.g. Samsung) only deliver THIS_DEVICE_CHANGED once P2P state changes —
+        // and starting discovery is what triggers it, so waiting for the MAC would
+        // deadlock auto-mesh. Node ids decide the election; the address is only a
+        // tie-break, upgraded by setMyDeviceAddress when the real one arrives.
+        autoController = AutoMeshController(
+            myNodeId = node.localNodeId,
+            myDeviceAddress = "",
+            autoEnabled = _autoMeshEnabled.value,
+        )
+        _eventLog.log("auto: controller ready (node #${node.localNodeId}, own address pending)")
 
         // The system requires startForeground within 5 s of startForegroundService;
         // onCreate is well inside that window.
@@ -190,8 +201,26 @@ class MeshService : Service() {
         // --- Auto-mesh wiring ---------------------------------------------------
         // One tick per second drives backoff expiry, join timeouts and the takeover deadline.
         serviceScope.launch {
+            val startedAtMs = System.currentTimeMillis()
+            var lastNudgeAtMs = 0L
             while (isActive) {
                 delay(1_000L)
+                // Some OEMs only report THIS_DEVICE_CHANGED after a discovery pass; if our
+                // MAC is still unknown, nudge the system with one classic discovery. This
+                // calls the connector directly so it does NOT pause auto-mesh (the public
+                // discover() wrapper would).
+                val cs = connector.state.value
+                val permOk = autoMeshPermissionReason(
+                    cs.wifiDirectPermissionGranted, cs.localNetworkRequired, cs.localNetworkGranted,
+                ) == null
+                val nowMs = System.currentTimeMillis()
+                if (permOk && _autoMeshEnabled.value && connector.selfAddress.value == null &&
+                    nowMs - startedAtMs > 30_000L && nowMs - lastNudgeAtMs > 60_000L
+                ) {
+                    lastNudgeAtMs = nowMs
+                    _eventLog.log("auto: own Wi-Fi Direct address still unknown — starting a discovery pass to make the system report it")
+                    connector.discover()
+                }
                 autoEvent(AutoMeshEvent.Tick, "tick")
             }
         }
@@ -238,24 +267,20 @@ class MeshService : Service() {
             }
         }
 
-        // The controller needs our own MAC for the symmetric election; create it on
-        // the first real address and feed a snapshot of the current world so its
-        // first decision is based on fresh data.
+        // Once THIS_DEVICE_CHANGED reports our real MAC: upgrade the election tie-break
+        // and publish our ad (it must carry an address peers can actually connect to).
         serviceScope.launch {
+            var staleGroupReported = false
             connector.selfAddress.collect { address ->
                 if (address == null) return@collect
-                if (autoController == null) {
-                    autoController = AutoMeshController(
-                        myNodeId = node.localNodeId,
-                        myDeviceAddress = address,
-                        autoEnabled = _autoMeshEnabled.value,
-                    )
-                }
+                autoController?.setMyDeviceAddress(address)
+                _eventLog.log("auto: learned our Wi-Fi Direct address $address")
                 val cs = connector.state.value
-                val permReason = autoMeshPermissionReason(cs.wifiDirectPermissionGranted, cs.localNetworkRequired, cs.localNetworkGranted)
-                autoEvent(AutoMeshEvent.PermissionsChanged(permReason == null, permReason), "initial permission snapshot")
-                autoEvent(AutoMeshEvent.PeersChanged(peerDirectory.peers.value), "initial peer snapshot")
-                if (cs.groupFormed && cs.role != P2pRole.NONE) {
+                peerDirectory.startAdvertising(node.localNodeId, cs.groupFormed && cs.role == P2pRole.GROUP_OWNER)
+                // A group that already existed at startup (left over from a killed run)
+                // produced no role transition; tell the controller about it once.
+                if (!staleGroupReported && cs.groupFormed && cs.role != P2pRole.NONE) {
+                    staleGroupReported = true
                     autoEvent(AutoMeshEvent.GroupFormed(autoRoleOf(cs.role)), "group already formed as ${cs.role.name.lowercase()}")
                 }
             }

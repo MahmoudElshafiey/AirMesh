@@ -146,11 +146,19 @@ fun autoMeshBannerText(
  */
 class AutoMeshController(
     private val myNodeId: Int,
-    private val myDeviceAddress: String,
+    // Upgraded by setMyDeviceAddress once THIS_DEVICE_CHANGED reports the real MAC.
+    private var myDeviceAddress: String,
     private val clock: () -> Long = System::currentTimeMillis,
     private val random: Random = Random(),
     autoEnabled: Boolean = true,
 ) {
+
+    /**
+     * Upgrade our own address once it is known. The address only breaks ties in the
+     * symmetric election (node ids decide otherwise), so updating it at any point —
+     * even mid-search — is safe; peers' addresses are never affected.
+     */
+    fun setMyDeviceAddress(address: String) { myDeviceAddress = address }
 
     var state: AutoMeshState = AutoMeshState.Idle
         private set
