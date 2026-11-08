@@ -13,7 +13,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -60,13 +59,34 @@ class WifiP2pPeerDirectory(
     private var serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
 
     private var discovering = false
-    /** When each peer was last seen; entries older than [PEER_STALE_MS] are swept. */
-    private val lastSeen = mutableMapOf<String, Long>()
     private var loopJob: Job? = null
 
     /** Callback/accept/ignore counters, reported once per [STATS_INTERVAL_MS]. */
     private val stats = DnsSdStats()
     private var lastStatsMs = 0L
+
+    /**
+     * Pure accept/ignore logic. It shares [stats], so accepted/ignored land in the
+     * 60 s line, and its per-callback success lines are dropped here: the directory
+     * logs one accepted line per real peer change (see [publishPeers]) instead of
+     * one per advert.
+     */
+    private val ingest = PeerIngest(
+        myNodeId = myNodeId,
+        // Same constant the instance builder encodes into every advert we publish.
+        supportedVersion = AirMeshAdCodec.PROTOCOL_VERSION,
+        log = { line ->
+            if (!line.startsWith("dnssd: accepted AirMesh peer") &&
+                !line.startsWith("dnssd: TXT refreshed peer")
+            ) {
+                log(line)
+            }
+        },
+        stats = stats,
+    )
+
+    /** The list last published to [_peers]; compared so identical adverts stay silent. */
+    private var publishedPeers: List<AirMeshPeer> = emptyList()
 
     private val serviceListener = object : WifiP2pManager.DnsSdServiceResponseListener {
         override fun onDnsSdServiceAvailable(serviceType: String, instanceName: String, device: WifiP2pDevice) {
@@ -80,15 +100,14 @@ class WifiP2pPeerDirectory(
             // Every raw callback feeds the strategy selector: any hit proves the
             // current strategy works, even if the peer is later filtered out.
             coordinator.notifyRawCallback()
-            // Not an AirMesh service? Drop it before it reaches the peer list.
-            if (!isAirMeshService(serviceType, instanceName)) {
-                stats.onIgnored()
-                log("dnssd: ignored: foreign service type='$serviceType' instance='$instanceName'")
-                return
-            }
-            log("dnssd: service available '$instanceName' from ${device?.deviceAddress ?: "(no address)"}")
-            // The token doubles as the instance name; the TXT callback refines it.
-            upsertPeer(AirMeshAdCodec.decode(instanceName), device)
+            val nowMs = System.currentTimeMillis()
+            ingest.onServiceAvailable(
+                instanceName = instanceName,
+                serviceType = serviceType,
+                srcAddress = device.deviceAddress,
+                nowMs = nowMs,
+            )
+            publishPeers(nowMs)
         }
     }
 
@@ -105,14 +124,15 @@ class WifiP2pPeerDirectory(
             )
             stats.onRawTxt()
             coordinator.notifyRawCallback()
-            // This callback has no instance name, so the type must match.
-            if (!isAirMeshService(serviceType, instanceName = null)) {
-                stats.onIgnored()
-                log("dnssd: ignored: foreign service type='$serviceType' instance='null'")
-                return
-            }
-            log("dnssd: TXT record $txtRecord from ${device?.deviceAddress ?: "(no address)"}")
-            upsertPeer(AirMeshAdCodec.decode(txtRecord[TXT_AD_KEY]), device)
+            // The TXT path never rejects: an unparseable record is just a refresh miss.
+            val nowMs = System.currentTimeMillis()
+            ingest.onTxtRecordAvailable(
+                fullDomain = serviceType,
+                txtRecord = txtRecord,
+                srcAddress = device.deviceAddress,
+                nowMs = nowMs,
+            )
+            publishPeers(nowMs)
         }
     }
 
@@ -334,33 +354,29 @@ class WifiP2pPeerDirectory(
         }
     }
 
-    private fun upsertPeer(ad: AirMeshAd?, device: WifiP2pDevice?) {
-        if (ad == null) {
-            // A DNS-SD hit that is not a well-formed AirMesh token; ignore it.
-            stats.onIgnored()
-            log("dnssd: ignored: no AirMesh TXT")
-            return
+    /**
+     * Mirror the ingest table into [peers], applying peer expiry exactly as before
+     * (same [shouldExpirePeer] predicate on the last callback time). Emission and
+     * the accepted log happen only when the set of
+     * (address, nodeId, tieBreak, owner) really changes, so repeated identical
+     * adverts just refresh lastSeen inside [PeerIngest].
+     */
+    private fun publishPeers(nowMs: Long) {
+        val live = ingest.peers.values
+            .filterNot { shouldExpirePeer(it.lastSeenMs, nowMs) }
+            .map { AirMeshPeer(it.deviceAddress, it.nodeId, it.owner, it.tieBreak.toInt()) }
+            .sortedBy { it.nodeId }
+        if (live.toSet() == publishedPeers.toSet()) return
+        val previous = publishedPeers.associateBy { it.deviceAddress }
+        publishedPeers = live
+        _peers.value = live
+        // One line per new peer or owner change; disappearances only update the list.
+        for (peer in live) {
+            val old = previous[peer.deviceAddress]
+            if (old == null || old.nodeId != peer.nodeId || old.isGroupOwner != peer.isGroupOwner) {
+                log("dnssd: accepted AirMesh peer #${peer.nodeId} owner=${if (peer.isGroupOwner) 1 else 0} src=${peer.deviceAddress}")
+            }
         }
-        if (ad.nodeId == myNodeId) {
-            // Our own advertisement bouncing back; never a peer.
-            stats.onIgnored()
-            log("dnssd: ignored own ad (#${ad.nodeId})")
-            return
-        }
-        val address = device?.deviceAddress
-        if (address.isNullOrEmpty() || address == PEER_PLACEHOLDER_ADDRESS) {
-            // A peer we can see but never connect to must not block our own creation.
-            stats.onIgnored()
-            log("dnssd: ignored #${ad.nodeId} — no usable source device address")
-            return
-        }
-        lastSeen[address] = System.currentTimeMillis()
-        _peers.update { current ->
-            val peer = AirMeshPeer(address, ad.nodeId, ad.isGroupOwner, ad.tieBreakToken)
-            (current.filterNot { it.deviceAddress == address } + peer).sortedBy { it.nodeId }
-        }
-        stats.onAccepted()
-        log("dnssd: accepted AirMesh peer #${ad.nodeId} owner=${if (ad.isGroupOwner) 1 else 0} ($address)")
     }
 
     /** Print one counters line per [STATS_INTERVAL_MS], then start a new window. */
@@ -380,11 +396,9 @@ class WifiP2pPeerDirectory(
 
     private fun sweepStalePeers(nowMs: Long) {
         // The NSD-style API has no "service removed" callback, so a phone that
-        // left range simply stops being re-seen; drop it after [PEER_STALE_MS].
-        val stale = lastSeen.filterValues { shouldExpirePeer(it, nowMs) }.keys
-        if (stale.isEmpty()) return
-        lastSeen.keys.removeAll(stale)
-        _peers.update { current -> current.filterNot { it.deviceAddress in stale } }
+        // left range simply stops being re-seen; [publishPeers] drops it after
+        // [PEER_STALE_MS] using the same predicate as before.
+        publishPeers(nowMs)
     }
 
     override fun stop() {
@@ -400,7 +414,7 @@ class WifiP2pPeerDirectory(
         channel = null
         advertisedOwnerFlag = null
         serviceInfo = null
-        lastSeen.clear()
+        publishedPeers = emptyList()
         _peers.value = emptyList()
         loopJob?.cancel()
         loopJob = null
