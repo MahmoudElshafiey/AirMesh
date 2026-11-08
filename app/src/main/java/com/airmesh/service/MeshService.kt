@@ -146,12 +146,29 @@ class MeshService : Service() {
         // owns every scan on the radio — discoverPeers cancels an ongoing DNS-SD
         // scan (and vice versa), so they must never overlap.
         val tieBreakToken = TieBreakToken.current
-        discoveryCoordinator = DiscoveryCoordinator(backend = object : DiscoveryBackend {
-            override fun clearServiceRequests() = peerDirectory.clearServiceRequestsRaw()
-            override fun addServiceRequest() = peerDirectory.addServiceRequestRaw()
-            override fun discoverServices() = peerDirectory.startServiceScanRaw()
-            override fun discoverPeers() = connector.discover()
-        })
+        discoveryCoordinator = DiscoveryCoordinator(
+            backend = object : DiscoveryBackend {
+                override fun clearServiceRequests() = peerDirectory.clearServiceRequestsRaw()
+                override fun addServiceRequest() = peerDirectory.addServiceRequestRaw()
+                override fun discoverServices() = peerDirectory.startServiceScanRaw()
+                override fun discoverPeers() = connector.discover()
+
+                // Chained variants: the coordinator advances only when the framework
+                // reports the outcome of the previous call.
+                override fun clearServiceRequests(onDone: (Boolean, Int) -> Unit) =
+                    peerDirectory.clearServiceRequestsRaw(onDone)
+
+                override fun addServiceRequest(onDone: (Boolean, Int) -> Unit) =
+                    peerDirectory.addServiceRequestRaw(onDone)
+
+                override fun discoverServices(onDone: (Boolean, Int) -> Unit) =
+                    peerDirectory.startServiceScanRaw(onDone)
+            },
+            log = { line -> _eventLog.log(line) },
+            // Delays run on the main looper, the same thread as the P2P callbacks
+            // and the directory's own state, so the sequencer needs no locking.
+            schedule = { ms, block -> serviceScope.launch { delay(ms); block() } },
+        )
         // The ad carries node id + token, not a MAC: our own P2P address is a
         // placeholder on many devices and nothing about advertising needs it.
         peerDirectory = WifiP2pPeerDirectory(

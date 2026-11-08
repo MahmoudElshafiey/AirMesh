@@ -191,50 +191,75 @@ class WifiP2pPeerDirectory(
 
     // --- Raw DNS-SD operations ---------------------------------------------------
     // Called only through the [DiscoveryCoordinator] so a classic peer scan and a
-    // service scan never overlap on the radio.
+    // service scan never overlap on the radio. [onDone] reports (success, reason)
+    // so the coordinator can chain the cycle strictly instead of firing blind.
 
-    fun clearServiceRequestsRaw() {
-        val ch = channel ?: return
+    fun clearServiceRequestsRaw(onDone: (Boolean, Int) -> Unit = { _, _ -> }) {
+        val ch = channel ?: return onDone(false, NO_CHANNEL_REASON)
+        val mgr = manager ?: return onDone(false, NO_CHANNEL_REASON)
         try {
-            manager?.clearServiceRequests(ch, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() = log("dnssd: clearServiceRequests ok")
+            mgr.clearServiceRequests(ch, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    log("dnssd: clearServiceRequests ok")
+                    onDone(true, 0)
+                }
 
-                override fun onFailure(reason: Int) = log("dnssd: clearServiceRequests failed reason=$reason")
+                override fun onFailure(reason: Int) {
+                    log("dnssd: clearServiceRequests failed reason=$reason")
+                    onDone(false, reason)
+                }
             })
         } catch (error: Exception) {
             log("dnssd: clearServiceRequests failed: ${error.message}")
+            onDone(false, NO_CHANNEL_REASON)
         }
     }
 
-    fun addServiceRequestRaw() {
-        val ch = channel ?: return
+    fun addServiceRequestRaw(onDone: (Boolean, Int) -> Unit = { _, _ -> }) {
+        val ch = channel ?: return onDone(false, NO_CHANNEL_REASON)
+        val mgr = manager ?: return onDone(false, NO_CHANNEL_REASON)
         log("dnssd: addServiceRequest(${AirMeshAdCodec.SERVICE_TYPE})")
         try {
-            manager?.addServiceRequest(ch, serviceRequest, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() = log("dnssd: addServiceRequest ok")
+            mgr.addServiceRequest(ch, serviceRequest, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    log("dnssd: addServiceRequest ok")
+                    onDone(true, 0)
+                }
 
-                override fun onFailure(reason: Int) = log("dnssd: addServiceRequest failed reason=$reason")
+                override fun onFailure(reason: Int) {
+                    log("dnssd: addServiceRequest failed reason=$reason")
+                    onDone(false, reason)
+                }
             })
         } catch (error: Exception) {
             log("dnssd: adding service request failed: ${error.message}")
+            onDone(false, NO_CHANNEL_REASON)
         }
     }
 
-    fun startServiceScanRaw() {
-        val ch = channel ?: return
+    fun startServiceScanRaw(onDone: (Boolean, Int) -> Unit = { _, _ -> }) {
+        val ch = channel ?: return onDone(false, NO_CHANNEL_REASON)
+        val mgr = manager ?: return onDone(false, NO_CHANNEL_REASON)
         try {
             // discoverServices is a toggle (like discoverPeers): re-issuing it
             // restarts the scan, which is exactly what we want before Android's
             // ~2 min discovery timeout kills the previous one.
             log("dnssd: discoverServices() issued")
             stats.onScan()
-            manager?.discoverServices(ch, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() = log("dnssd: discoverServices ok (scan started)")
+            mgr.discoverServices(ch, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    log("dnssd: discoverServices ok (scan started)")
+                    onDone(true, 0)
+                }
 
-                override fun onFailure(reason: Int) = log("dnssd: discoverServices failed reason=$reason")
+                override fun onFailure(reason: Int) {
+                    log("dnssd: discoverServices failed reason=$reason")
+                    onDone(false, reason)
+                }
             })
         } catch (error: Exception) {
             log("dnssd: service discovery failed: ${error.message}")
+            onDone(false, NO_CHANNEL_REASON)
         }
     }
 
@@ -323,5 +348,8 @@ class WifiP2pPeerDirectory(
 
         /** How often one counters line is logged (each line covers only this window). */
         private const val STATS_INTERVAL_MS = 60_000L
+
+        /** Reason code reported when the framework call could not even be issued. */
+        private const val NO_CHANNEL_REASON = -1
     }
 }

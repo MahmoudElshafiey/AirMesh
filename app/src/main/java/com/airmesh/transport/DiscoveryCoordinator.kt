@@ -17,6 +17,26 @@ interface DiscoveryBackend {
 
     /** Classic Wi-Fi Direct peer scan (discoverPeers); cancels any ongoing DNS-SD scan. */
     fun discoverPeers()
+
+    /**
+     * Chained variants used by the refresh cycle: report (success, reason) when
+     * the framework call actually completes. The default bodies keep the old
+     * fire-and-forget behaviour for fake backends, reporting immediate success.
+     */
+    fun clearServiceRequests(onDone: (Boolean, Int) -> Unit) {
+        clearServiceRequests()
+        onDone(true, 0)
+    }
+
+    fun addServiceRequest(onDone: (Boolean, Int) -> Unit) {
+        addServiceRequest()
+        onDone(true, 0)
+    }
+
+    fun discoverServices(onDone: (Boolean, Int) -> Unit) {
+        discoverServices()
+        onDone(true, 0)
+    }
 }
 
 /**
@@ -29,7 +49,13 @@ interface DiscoveryBackend {
 class DiscoveryCoordinator(
     private val backend: DiscoveryBackend,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** Runs [block] after the given delay. Default executes immediately (JVM tests). */
+    private val schedule: (Long, () -> Unit) -> Unit = { _, block -> block() },
+    private val log: (String) -> Unit = {},
 ) {
+
+    /** Strict clear → add → (500 ms) → discover chaining, driven by callbacks. */
+    private val sequencer = DnsSdRefreshSequencer(clock)
 
     /** Last time a full service cycle (clear → add → scan) was issued; null when none is active. */
     var lastCycleAtMs: Long? = null
@@ -45,21 +71,68 @@ class DiscoveryCoordinator(
 
     val peerScanActive: Boolean get() = peerScanStartedAtMs != null
 
-    /** Issue one full service cycle in order: clear, add request, start the scan. */
-    fun issueServiceCycle() {
-        backend.clearServiceRequests()
-        backend.addServiceRequest()
-        backend.discoverServices()
+    /**
+     * Issue one full service cycle in strict order: clear, add request, then the
+     * scan 500 ms after the add succeeded. Returns false when a cycle is already
+     * running (its retries own the radio until it finishes or is reset).
+     */
+    fun issueServiceCycle(): Boolean {
+        val action = sequencer.requestRefresh()
+        if (action == DnsSdRefreshAction.Ignored) {
+            log("dnssd: refresh already in progress — request ignored")
+            return false
+        }
         lastCycleAtMs = clock()
         serviceDiscoveryActive = true
+        execute(action)
+        return true
+    }
+
+    /** Run a sequencer action, scheduling it when it carries a delay. */
+    private fun execute(action: DnsSdRefreshAction) {
+        when (action) {
+            is DnsSdRefreshAction.RunStep -> {
+                val step = action.step
+                if (action.delayMs <= 0L) {
+                    runStep(step)
+                } else {
+                    schedule(action.delayMs) {
+                        // A reset (stop, manual scan) may have abandoned the cycle meanwhile.
+                        if (sequencer.isRunningStep(step)) runStep(step) else
+                            log("dnssd: stale wait for ${step.name.lowercase()} dropped")
+                    }
+                }
+            }
+
+            DnsSdRefreshAction.CycleComplete -> log("dnssd: service cycle complete")
+            DnsSdRefreshAction.Ignored -> Unit
+        }
+    }
+
+    /** Issue one framework call; its completion callback advances the chain. */
+    private fun runStep(step: DnsSdRefreshStep) {
+        val onDone: (Boolean, Int) -> Unit = { success, reason -> onStepDone(step, success, reason) }
+        when (step) {
+            DnsSdRefreshStep.CLEAR_REQUESTS -> backend.clearServiceRequests(onDone)
+            DnsSdRefreshStep.ADD_REQUEST -> backend.addServiceRequest(onDone)
+            DnsSdRefreshStep.DISCOVER_SERVICES -> backend.discoverServices(onDone)
+        }
+    }
+
+    private fun onStepDone(step: DnsSdRefreshStep, success: Boolean, reason: Int) {
+        if (success) {
+            execute(sequencer.onStepSuccess(step))
+        } else {
+            log("dnssd: ${step.name.lowercase()} failed reason=$reason")
+            execute(sequencer.onStepFailure(step, reason))
+        }
     }
 
     /** Re-issue the cycle when [DISCOVERY_REFRESH_MS] has passed since the last one. */
     fun refreshIfDue(nowMs: Long): Boolean {
         val last = lastCycleAtMs ?: return false
         if (!serviceDiscoveryActive || !shouldRefreshDiscovery(last, nowMs)) return false
-        issueServiceCycle()
-        return true
+        return issueServiceCycle()
     }
 
     /**
@@ -69,6 +142,7 @@ class DiscoveryCoordinator(
      */
     fun requestPeerScan() {
         if (serviceDiscoveryActive) backend.clearServiceRequests()
+        sequencer.reset() // abandon any in-flight chained cycle and its retries
         serviceDiscoveryActive = false
         lastCycleAtMs = null // after the window, resume with a fresh full cycle
         peerScanStartedAtMs = clock()
@@ -89,6 +163,7 @@ class DiscoveryCoordinator(
 
     /** Stop the service scan entirely (auto-mesh paused, or the directory stopped). */
     fun stopService() {
+        sequencer.reset()
         backend.clearServiceRequests()
         serviceDiscoveryActive = false
         lastCycleAtMs = null
