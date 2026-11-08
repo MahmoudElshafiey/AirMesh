@@ -22,18 +22,34 @@ fun groupGoneConfirmed(
 class GroupPresenceTracker(private val graceMs: Long = DEFAULT_GRACE_MS) {
 
     private var falseSinceMs: Long? = null
+    private var intentionalRemovalPending: Boolean = false
+
+    /**
+     * Marks that WE initiated a group removal (stale group cleanup at startup,
+     * our own removeGroup). The next `groupFormed=false` report is confirmed
+     * immediately without waiting out the 2 s transient-blip grace period.
+     */
+    fun markIntentionalRemoval() {
+        intentionalRemovalPending = true
+        falseSinceMs = null
+    }
 
     /**
      * Feeds one groupFormed report observed at [nowMs].
      *
      * Returns true when the transport should be closed now (the "gone" episode
-     * has outlasted the grace period). A formed-group report always returns
-     * false and cancels any pending episode.
+     * has outlasted the grace period, or the removal was marked intentional).
+     * A formed-group report always returns false and cancels any pending episode.
      */
     fun onReport(groupFormed: Boolean, nowMs: Long): Boolean {
         if (groupFormed) {
             falseSinceMs = null
             return false
+        }
+        if (intentionalRemovalPending) {
+            intentionalRemovalPending = false
+            falseSinceMs = null
+            return true
         }
         val firstFalse = falseSinceMs ?: nowMs.also { falseSinceMs = it }
         return groupGoneConfirmed(firstFalse, nowMs, graceMs)
@@ -51,6 +67,7 @@ class GroupPresenceTracker(private val graceMs: Long = DEFAULT_GRACE_MS) {
     /** Clears any pending episode (e.g. when the transport is closed anyway). */
     fun reset() {
         falseSinceMs = null
+        intentionalRemovalPending = false
     }
 
     companion object {

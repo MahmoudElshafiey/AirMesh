@@ -59,6 +59,13 @@ sealed interface AutoMeshEvent {
     /** The group we were in is gone, or a join target vanished. */
     data object GroupGone : AutoMeshEvent
 
+    /**
+     * A group removal that WE initiated (stale group cleanup at startup, or our
+     * own removeGroup): skips the group-gone backoff and enters Searching within
+     * at most 500 ms.
+     */
+    data object IntentionalGroupGone : AutoMeshEvent
+
     /** An automatic connect/create attempt failed; [reason] distinguishes BUSY. */
     data class ConnectFailed(val reason: AutoFailureReason) : AutoMeshEvent
 
@@ -197,6 +204,8 @@ class AutoMeshController(
     private val clock: () -> Long = System::currentTimeMillis,
     private val random: Random = Random(),
     autoEnabled: Boolean = true,
+    /** Optional delay (<= 500 ms) before an intentional removal enters Searching; 0 ms by default. */
+    private val intentionalRemovalDelayMs: Long = 0L,
 ) {
 
     var state: AutoMeshState = AutoMeshState.Idle
@@ -217,6 +226,13 @@ class AutoMeshController(
     private var takeoverDeadlineMs: Long? = null
     /** Latest peer list, so a Tick can re-decide even if no PeersChanged arrived yet. */
     private var lastPeers: List<AirMeshPeer> = emptyList()
+    /** Set when we initiated a group removal so a subsequent GroupGone skips backoff. */
+    private var intentionalRemovalPending = false
+
+    /** Marks the next [AutoMeshEvent.GroupGone] as intentional (skips group-gone backoff). */
+    fun markIntentionalGroupRemoval() {
+        intentionalRemovalPending = true
+    }
 
     fun onEvent(event: AutoMeshEvent): List<AutoMeshAction> {
         val now = clock()
@@ -229,7 +245,16 @@ class AutoMeshController(
             // Group reality is tracked even while paused: a manual connect that
             // succeeds must still land us in Owner/Client.
             is AutoMeshEvent.GroupFormed -> onGroupFormed(event.role)
-            is AutoMeshEvent.GroupGone -> onGroupGone(now)
+            is AutoMeshEvent.GroupGone -> if (intentionalRemovalPending) {
+                intentionalRemovalPending = false
+                onIntentionalGroupGone(now)
+            } else {
+                onGroupGone(now)
+            }
+            is AutoMeshEvent.IntentionalGroupGone -> {
+                intentionalRemovalPending = false
+                onIntentionalGroupGone(now)
+            }
             is AutoMeshEvent.ConnectFailed -> if (autoEnabled) onConnectFailed(event.reason, now) else emptyList()
             AutoMeshEvent.Tick -> if (autoEnabled) onTick(now) else emptyList()
         }
@@ -366,6 +391,27 @@ class AutoMeshController(
             }
             else -> emptyList() // Idle / Searching / Backoff: already out of a group
         }
+    }
+
+    /**
+     * Our own group removal (stale group at startup, or our own removeGroup):
+     * skip the 1–3 s group-gone backoff and enter Searching within at most 500 ms.
+     */
+    private fun onIntentionalGroupGone(now: Long): List<AutoMeshAction> {
+        if (!autoEnabled || idleReason != null) {
+            if (state is AutoMeshState.Owner || state is AutoMeshState.Client) {
+                enterIdle()
+            }
+            return emptyList()
+        }
+        val delayMs = intentionalRemovalDelayMs.coerceIn(0L, 500L)
+        if (delayMs > 0L) {
+            state = AutoMeshState.Backoff(now + delayMs, "intentional group removal")
+            return listOf(AutoMeshAction.StopDiscovery)
+        }
+        val wasSearching = state is AutoMeshState.Searching
+        enterSearching(now)
+        return if (wasSearching) emptyList() else listOf(AutoMeshAction.StartDiscovery)
     }
 
     private fun onConnectFailed(reason: AutoFailureReason, now: Long): List<AutoMeshAction> {

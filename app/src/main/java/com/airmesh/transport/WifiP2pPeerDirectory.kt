@@ -192,8 +192,9 @@ class WifiP2pPeerDirectory(
             coordinator.stopService()
             return
         }
-        // The loop's first tick issues the full cycle through the coordinator, so a
-        // classic peer scan and this service scan can never overlap on the radio.
+        // Entering Searching: arm the +0.5 s, +6 s, +14 s startup scan burst so
+        // the first service scan starts within 500 ms instead of at the 5 s slice.
+        coordinator.onEnterSearching()
         ensureLoop()
     }
 

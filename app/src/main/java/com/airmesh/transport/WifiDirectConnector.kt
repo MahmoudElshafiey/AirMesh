@@ -46,6 +46,9 @@ enum class P2pRole {
  */
 interface AutoMeshListener {
     fun onConnectFailed(reason: AutoFailureReason)
+
+    /** Called when WE initiate a group removal (stale group at startup, or our own removeGroup). */
+    fun onIntentionalGroupRemoved() = Unit
 }
 
 /** UI-facing snapshot of the Wi-Fi Direct side. */
@@ -137,7 +140,7 @@ class WifiDirectConnector(
     private var groupGoneJob: Job? = null
 
     /** True until the first connection-info report after [start] has been handled. */
-    private var staleGroupCheckPending = false
+    private var staleGroupCheckPending = true
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -400,6 +403,7 @@ class WifiDirectConnector(
                     // A stale group blocks new formation; remove it, wait for the
                     // removal to finish, then try once more.
                     log("createGroup failed with BUSY — removing the stale group, then retrying once")
+                    presenceTracker.markIntentionalRemoval()
                     manager.removeGroup(currentChannel, object : WifiP2pManager.ActionListener {
                         override fun onSuccess() = doCreateGroup(allowBusyRetry = false)
 
@@ -447,6 +451,22 @@ class WifiDirectConnector(
      */
     @SuppressLint("MissingPermission")
     private fun removeGroupForCleanup(reason: String) {
+        presenceTracker.markIntentionalRemoval()
+        groupGoneJob?.cancel()
+        groupGoneJob = null
+        _state.update {
+            it.copy(
+                role = P2pRole.NONE,
+                groupFormed = false,
+                groupOwnerAddress = null,
+                connecting = false,
+            )
+        }
+        closeTransport(reason)
+        if (started && reason != "user pressed Disconnect") {
+            autoMeshListener?.onIntentionalGroupRemoved()
+        }
+
         val manager = p2p ?: return log("removeGroup skipped ($reason): Wi-Fi Direct unsupported")
         val currentChannel = channel ?: return log("removeGroup skipped ($reason): no channel")
         if (!hasP2pPermission()) {

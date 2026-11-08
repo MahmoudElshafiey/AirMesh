@@ -74,6 +74,8 @@ class DiscoveryCoordinator(
     /** Picks the scan variant and remembers the one that worked. */
     private val strategySelector: DiscoveryStrategySelector =
         DiscoveryStrategySelector(NoDiscoveryStrategyStore),
+    /** Offsets from entering Searching for the initial scan burst (+0.5 s, +6 s, +14 s). */
+    private val burstOffsetsMs: List<Long> = DEFAULT_BURST_OFFSETS_MS,
     // Clock stays last: existing callers use `DiscoveryCoordinator(backend) { now }`.
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -83,6 +85,10 @@ class DiscoveryCoordinator(
 
     /** Strategy the running cycle was built for (1 filtered, 2..4 fallbacks). */
     private var activeStrategy: Int = DiscoveryStrategySelector.MIN_STRATEGY
+
+    /** When the current Searching state started for the startup scan burst; null when not in a burst. */
+    private var burstOriginMs: Long? = null
+    private var burstIndex: Int = 0
 
     /** Current strategy, for logs and the 60 s stats line. */
     val currentStrategy: Int get() = strategySelector.strategy
@@ -106,12 +112,42 @@ class DiscoveryCoordinator(
     val peerScanActive: Boolean get() = peerScanStartedAtMs != null
 
     /**
+     * Arms the startup scan burst (+0.5 s, +6 s, +14 s) when entering Searching,
+     * after which the normal 60 s cadence takes over.
+     */
+    fun onEnterSearching(nowMs: Long = clock()) {
+        if (burstOffsetsMs.isEmpty()) {
+            burstOriginMs = null
+            burstIndex = 0
+            return
+        }
+        burstOriginMs = nowMs
+        burstIndex = 0
+        for (offsetMs in burstOffsetsMs) {
+            schedule(offsetMs) {
+                if (burstOriginMs == nowMs) {
+                    tick(clock(), serviceWanted = true)
+                }
+            }
+        }
+    }
+
+    /**
      * Issue one full service cycle in strict order: clear, add request, then the
      * scan 500 ms after the add succeeded. Returns false when a cycle is already
      * running (its retries own the radio until it finishes or is reset).
      */
-    fun issueServiceCycle(): Boolean {
-        val strategy = strategySelector.strategy
+    fun issueServiceCycle(): Boolean =
+        issueServiceCycleWithStrategy(strategySelector.strategy, clock())
+
+    /**
+     * Issue a burst scan cycle using only strategy 1 or 2 (no discoverPeers and
+     * no service re-registration in the burst).
+     */
+    fun issueBurstServiceCycle(nowMs: Long = clock()): Boolean =
+        issueServiceCycleWithStrategy(burstStrategy(strategySelector.strategy), nowMs)
+
+    private fun issueServiceCycleWithStrategy(strategy: Int, nowMs: Long): Boolean {
         val action = sequencer.requestRefresh(strategy)
         if (action == DnsSdRefreshAction.Ignored) {
             log("dnssd: refresh already in progress — request ignored")
@@ -119,7 +155,7 @@ class DiscoveryCoordinator(
         }
         activeStrategy = strategy
         log("dnssd: strategy=$strategy")
-        lastCycleAtMs = clock()
+        lastCycleAtMs = nowMs
         serviceDiscoveryActive = true
         execute(action)
         return true
@@ -181,11 +217,14 @@ class DiscoveryCoordinator(
         }
     }
 
-    /** Re-issue the cycle when [DISCOVERY_REFRESH_MS] has passed since the last one. */
+    /** Re-issue the cycle when a burst offset or [DISCOVERY_REFRESH_MS] is due. */
     fun refreshIfDue(nowMs: Long): Boolean {
+        if (burstOriginMs != null) {
+            return if (!peerScanActive) advanceBurstIfDue(nowMs) else false
+        }
         val last = lastCycleAtMs ?: return false
         if (!serviceDiscoveryActive || !shouldRefreshDiscovery(last, nowMs)) return false
-        return issueServiceCycle()
+        return issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
     }
 
     /**
@@ -198,22 +237,53 @@ class DiscoveryCoordinator(
         sequencer.reset() // abandon any in-flight chained cycle and its retries
         serviceDiscoveryActive = false
         lastCycleAtMs = null // after the window, resume with a fresh full cycle
+        burstOriginMs = null
+        burstIndex = 0
         peerScanStartedAtMs = clock()
         backend.discoverPeers()
     }
 
     /**
      * Called every loop slice: end an expired manual scan and, if auto-mesh still
-     * wants service discovery, resume the cycle (immediately when none is active).
+     * wants service discovery, drive the startup burst or resume the cycle.
      */
     fun tick(nowMs: Long, serviceWanted: Boolean) {
         val started = peerScanStartedAtMs
         if (started != null && nowMs - started >= PEER_SCAN_WINDOW_MS) {
             peerScanStartedAtMs = null
         }
-        if (serviceWanted && !peerScanActive && !serviceDiscoveryActive) issueServiceCycle()
-        // A strategy whose scan stayed silent for 25 s rotates to the next fallback.
-        if (serviceWanted && !peerScanActive) rotateIfSilent(nowMs)
+        if (!serviceWanted) {
+            burstOriginMs = null
+            burstIndex = 0
+            return
+        }
+        if (!peerScanActive) {
+            if (burstOriginMs != null) {
+                advanceBurstIfDue(nowMs)
+            } else if (!serviceDiscoveryActive) {
+                issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
+            } else {
+                refreshIfDue(nowMs)
+            }
+            // A strategy whose scan stayed silent for the window rotates to the next fallback.
+            rotateIfSilent(nowMs)
+        }
+    }
+
+    private fun advanceBurstIfDue(nowMs: Long): Boolean {
+        val origin = burstOriginMs ?: return false
+        if (burstIndex >= burstOffsetsMs.size) {
+            burstOriginMs = null
+            return false
+        }
+        if (nowMs - origin < burstOffsetsMs[burstIndex]) return false
+        while (burstIndex < burstOffsetsMs.size && nowMs - origin >= burstOffsetsMs[burstIndex]) {
+            burstIndex++
+        }
+        if (burstIndex >= burstOffsetsMs.size) {
+            burstOriginMs = null
+        }
+        return issueBurstServiceCycle(nowMs)
     }
 
     /** Rotate the discovery strategy when the current scan window passed with no raw callback. */
@@ -224,8 +294,10 @@ class DiscoveryCoordinator(
         // Abandon whatever the old strategy was doing and start the new plan now.
         sequencer.reset()
         lastCycleAtMs = null
+        burstOriginMs = null
+        burstIndex = 0
         serviceDiscoveryActive = true // let the fresh cycle below own the radio
-        issueServiceCycle()
+        issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
     }
 
     /** Stop the service scan entirely (auto-mesh paused, or the directory stopped). */
@@ -234,11 +306,19 @@ class DiscoveryCoordinator(
         backend.clearServiceRequests()
         serviceDiscoveryActive = false
         lastCycleAtMs = null
+        burstOriginMs = null
+        burstIndex = 0
         peerScanStartedAtMs = null
     }
 
     companion object {
         /** How long a manual peer scan holds the radio before the service cycle resumes. */
         const val PEER_SCAN_WINDOW_MS = 30_000L
+
+        /** Startup scan burst offsets after entering Searching: +0.5 s, +6 s, +14 s. */
+        val DEFAULT_BURST_OFFSETS_MS: List<Long> = listOf(500L, 6_000L, 14_000L)
+
+        /** Burst scans use only strategy 1 or 2 (no discoverPeers and no service re-registration). */
+        fun burstStrategy(strategy: Int): Int = if (strategy == 1) 1 else 2
     }
 }

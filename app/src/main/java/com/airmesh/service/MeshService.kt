@@ -209,6 +209,9 @@ class MeshService : Service() {
         connector.autoMeshListener = object : AutoMeshListener {
             override fun onConnectFailed(reason: AutoFailureReason) =
                 autoEvent(AutoMeshEvent.ConnectFailed(reason), "connect failed (${reason.name.lowercase()})")
+
+            override fun onIntentionalGroupRemoved() =
+                autoEvent(AutoMeshEvent.IntentionalGroupGone, "intentional group removal")
         }
 
         // Per-message notifications are on by default; the Network tab toggle persists the choice.
@@ -487,7 +490,10 @@ class MeshService : Service() {
             is AutoMeshAction.StopDiscovery -> peerDirectory.setDiscovering(false)
             is AutoMeshAction.CreateGroup -> connector.createGroup()
             is AutoMeshAction.ConnectTo -> connector.connectByAddress(action.deviceAddress)
-            is AutoMeshAction.RemoveGroup -> connector.removeGroup("auto-mesh: clearing a stale group before retry")
+            is AutoMeshAction.RemoveGroup -> {
+                autoController?.markIntentionalGroupRemoval()
+                connector.removeGroup("auto-mesh: clearing a stale group before retry")
+            }
         }
     }
 
