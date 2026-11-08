@@ -48,10 +48,14 @@ sealed interface DiscoveryStrategyEvent {
  */
 class DiscoveryStrategySelector(
     private val store: DiscoveryStrategyStore,
+    defaultStrategy: Int = MIN_STRATEGY,
 ) {
 
-    /** Current strategy, 1..4. Restored from storage but never trusted blindly. */
-    var strategy: Int = sanitize(store.load())
+    /**
+     * Current strategy, 1..4. Restored from storage, or starts at [defaultStrategy]
+     * when nothing was saved yet; neither value is trusted blindly.
+     */
+    var strategy: Int = sanitize(store.load() ?: sanitize(defaultStrategy))
         private set
 
     /** True once a raw callback has proved the current strategy works. */

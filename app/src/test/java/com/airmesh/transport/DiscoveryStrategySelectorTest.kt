@@ -167,4 +167,45 @@ class DiscoveryStrategySelectorTest {
         assertFalse(selector.isWindowExpired(99_000L))
         assertTrue(selector.sawCallbackSinceScanStart())
     }
+
+    @Test
+    fun `default 2 starts at 2 when nothing is stored`() {
+        val selector = DiscoveryStrategySelector(store, defaultStrategy = 2)
+        assertEquals(2, selector.strategy)
+    }
+
+    @Test
+    fun `invalid default falls back to 1`() {
+        assertEquals(1, DiscoveryStrategySelector(store, defaultStrategy = 0).strategy)
+        assertEquals(1, DiscoveryStrategySelector(store, defaultStrategy = 5).strategy)
+        assertEquals(1, DiscoveryStrategySelector(store, defaultStrategy = -2).strategy)
+    }
+
+    @Test
+    fun `persisted value wins over default`() {
+        store.value = 4
+        val selector = DiscoveryStrategySelector(store, defaultStrategy = 2)
+        assertEquals(4, selector.strategy)
+    }
+
+    @Test
+    fun `after 25 s of silence from default 2 it rotates to 3`() {
+        val selector = DiscoveryStrategySelector(store, defaultStrategy = 2)
+        selector.scanStarted(nowMs = 0L)
+
+        assertEquals(DiscoveryStrategyEvent.Rotate(from = 2, to = 3), selector.tick(25_000L))
+        assertEquals(3, selector.strategy)
+    }
+
+    @Test
+    fun `first callback on default 2 persists the strategy`() {
+        val selector = DiscoveryStrategySelector(store, defaultStrategy = 2)
+        selector.scanStarted(nowMs = 0L)
+        selector.rawCallback(nowMs = 500L)
+
+        assertEquals(2, selector.strategy)
+        assertTrue(selector.rotationStopped)
+        assertEquals(2, store.value)
+        assertEquals(1, store.saves)
+    }
 }

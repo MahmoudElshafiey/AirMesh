@@ -200,7 +200,10 @@ class MeshService : Service() {
             // Delays run on the main looper, the same thread as the P2P callbacks
             // and the directory's own state, so the sequencer needs no locking.
             schedule = { ms, block -> serviceScope.launch { delay(ms); block() } },
-            strategySelector = DiscoveryStrategySelector(strategyStore),
+            // Strategy 1 (filtered DNS-SD request) stayed silent for the full 25 s
+            // window across tested phones while strategy 2 (unfiltered) answered within
+            // 1 s, so fresh installs start at 2 to avoid wasting the first window.
+            strategySelector = DiscoveryStrategySelector(strategyStore, defaultStrategy = 2),
         )
         // The ad carries node id + token, not a MAC: our own P2P address is a
         // placeholder on many devices and nothing about advertising needs it.
