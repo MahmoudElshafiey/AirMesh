@@ -10,6 +10,7 @@ import android.content.Intent
 import android.net.wifi.p2p.WifiP2pDevice
 import android.os.Binder
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.airmesh.R
 import com.airmesh.node.AirMeshNode
@@ -36,6 +37,7 @@ import com.airmesh.transport.DiscoveryStrategyStore
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
 import com.airmesh.transport.TieBreakToken
+import com.airmesh.transport.TimelineRecorder
 import com.airmesh.transport.WifiDirectConnector
 import com.airmesh.transport.WifiP2pPeerDirectory
 import com.airmesh.transport.noAirMeshPeersBannerText
@@ -80,6 +82,9 @@ class MeshService : Service() {
 
     /** The auto-mesh state machine; created in [onCreate], address upgraded when the MAC arrives. */
     private var autoController: AutoMeshController? = null
+
+    /** Monotonic startup-to-neighbor-up timeline recorder. */
+    private val timelineRecorder = TimelineRecorder(SystemClock::elapsedRealtime)
 
     /** This device's mesh id; set in [onCreate]. */
     val nodeId: Int get() = node.localNodeId
@@ -140,6 +145,7 @@ class MeshService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        timelineRecorder.onStart()
         notificationManager = getSystemService(NotificationManager::class.java)
         createChannels()
 
@@ -166,7 +172,10 @@ class MeshService : Service() {
             backend = object : DiscoveryBackend {
                 override fun clearServiceRequests() = peerDirectory.clearServiceRequestsRaw()
                 override fun addServiceRequest() = peerDirectory.addServiceRequestRaw()
-                override fun discoverServices() = peerDirectory.startServiceScanRaw()
+                override fun discoverServices() {
+                    timelineRecorder.onFirstScan()
+                    peerDirectory.startServiceScanRaw()
+                }
                 override fun discoverPeers() = connector.discover()
 
                 // Chained variants: the coordinator advances only when the framework
@@ -177,8 +186,10 @@ class MeshService : Service() {
                 override fun addServiceRequest(onDone: (Boolean, Int) -> Unit) =
                     peerDirectory.addServiceRequestRaw(filtered = true, onDone = onDone)
 
-                override fun discoverServices(onDone: (Boolean, Int) -> Unit) =
+                override fun discoverServices(onDone: (Boolean, Int) -> Unit) {
+                    timelineRecorder.onFirstScan()
                     peerDirectory.startServiceScanRaw(onDone)
+                }
 
                 override fun discoverPeers(onDone: (Boolean, Int) -> Unit) =
                     connector.discover(onDone)
@@ -237,6 +248,9 @@ class MeshService : Service() {
 
         serviceScope.launch {
             node.neighbors.collect { neighbors ->
+                if (neighbors.isNotEmpty()) {
+                    timelineRecorder.onNeighborUp()?.let { line -> _eventLog.log(line) }
+                }
                 if (runningThrottle.shouldPost(System.currentTimeMillis())) {
                     notificationManager.notify(RUNNING_NOTIFICATION_ID, buildRunningNotification(neighbors.size))
                 }
@@ -436,9 +450,15 @@ class MeshService : Service() {
                 .apply()
         }
         val controller = autoController
+        val previousState = controller?.state
         val actions = controller?.setAutoEnabled(enabled) ?: emptyList()
         if (controller != null) syncAutoUi(controller)
         _eventLog.log("auto: ${if (enabled) "resumed" else "paused"} => ${actions.joinToString(", ") { describeAction(it) }}")
+        if (previousState != null && controller != null) {
+            timelineRecorder.onAutoStateChanged(previousState, controller.state)?.let { line ->
+                _eventLog.log(line)
+            }
+        }
         actions.forEach(::executeAutoAction)
     }
 
@@ -463,6 +483,10 @@ class MeshService : Service() {
      */
     private fun autoEvent(event: AutoMeshEvent, describe: String) {
         val controller = autoController ?: return
+        val previousState = controller.state
+        if (event is AutoMeshEvent.PeersChanged && event.peers.isNotEmpty()) {
+            timelineRecorder.onFirstPeer()
+        }
         if (event !is AutoMeshEvent.Tick) {
             _eventLog.log("auto: event $describe peers=${describePeers(peerDirectory.peers.value)}")
         }
@@ -473,6 +497,9 @@ class MeshService : Service() {
                 "auto: ${describeState(controller)} <- $describe => " +
                     "${actions.joinToString(", ") { describeAction(it) }}",
             )
+        }
+        timelineRecorder.onAutoStateChanged(previousState, controller.state)?.let { line ->
+            _eventLog.log(line)
         }
         actions.forEach(::executeAutoAction)
     }
