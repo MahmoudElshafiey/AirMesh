@@ -44,52 +44,66 @@ class TimelineRecorder(
         neighborUpMs = null
     }
 
-    /** Record the first entry into [AutoMeshState.Searching]. */
-    fun onSearching(nowMs: Long = clock()) {
+    /** Record the first entry into [AutoMeshState.Searching] (ignored when [stale] is true). */
+    fun onSearching(nowMs: Long = clock(), stale: Boolean = false) {
+        if (stale) return
         if (searchingMs == null) searchingMs = nowMs
     }
 
-    /** Record the first DNS-SD service scan issued in this session. */
-    fun onFirstScan(nowMs: Long = clock()) {
+    /** Record the first DNS-SD service scan issued in this session (ignored when [stale] is true). */
+    fun onFirstScan(nowMs: Long = clock(), stale: Boolean = false) {
+        if (stale) return
         if (firstScanMs == null) firstScanMs = nowMs
     }
 
-    /** Record the first non-empty AirMesh peer sighting in this session. */
-    fun onFirstPeer(nowMs: Long = clock()) {
+    /** Record the first non-empty AirMesh peer sighting in this session (ignored when [stale] is true). */
+    fun onFirstPeer(nowMs: Long = clock(), stale: Boolean = false) {
+        if (stale) return
         if (firstPeerMs == null) firstPeerMs = nowMs
     }
 
-    /** Record the first election decision (Creating or Joining) in this session. */
-    fun onDecision(nowMs: Long = clock()) {
-        if (decisionMs == null) decisionMs = nowMs
+    /** Record the first election decision (Creating or Joining) in this session (ignored when [stale] is true). */
+    fun onDecision(nowMs: Long = clock(), stale: Boolean = false) {
+        if (stale) return
+        if (decisionMs == null) {
+            decisionMs = nowMs
+            // Any groupFormed recorded before the first decision came from a stale group; clear it.
+            val formed = groupFormedMs
+            if (formed != null && formed < nowMs) {
+                groupFormedMs = null
+            }
+        }
     }
 
-    /** Record the first Wi-Fi Direct group formation in this session. */
-    fun onGroupFormed(nowMs: Long = clock()) {
+    /** Record the first Wi-Fi Direct group formation in this session (ignored when [stale] is true). */
+    fun onGroupFormed(nowMs: Long = clock(), stale: Boolean = false) {
+        if (stale) return
         if (groupFormedMs == null) groupFormedMs = nowMs
     }
 
     /**
      * Record the first neighbor coming up in this session and return the timeline
-     * log line. Subsequent calls in the same session return null so the neighbor-up
-     * timeline line is logged only once per session.
+     * log line. Subsequent calls in the same session (or calls marked [stale])
+     * return null so the neighbor-up timeline line is logged only once per session.
      */
-    fun onNeighborUp(nowMs: Long = clock()): String? {
-        if (neighborUpMs != null) return null
+    fun onNeighborUp(nowMs: Long = clock(), stale: Boolean = false): String? {
+        if (stale || neighborUpMs != null) return null
         neighborUpMs = nowMs
         return formatLine(nowMs)
     }
 
     /**
      * Observe a controller transition from [previous] to [current]; updates the
-     * matching milestone and returns the formatted timeline line when the state
-     * changed, or null when the state stayed the same.
+     * matching milestone (unless [stale] is true) and returns the formatted timeline
+     * line when the state changed, or null when [stale] is true or the state stayed the same.
      */
     fun onAutoStateChanged(
         previous: AutoMeshState,
         current: AutoMeshState,
         nowMs: Long = clock(),
+        stale: Boolean = false,
     ): String? {
+        if (stale) return null
         when (current) {
             is AutoMeshState.Searching -> onSearching(nowMs)
             is AutoMeshState.Creating, is AutoMeshState.Joining -> onDecision(nowMs)
@@ -99,7 +113,7 @@ class TimelineRecorder(
         return if (previous != current) formatLine(nowMs) else null
     }
 
-    /** Format the current timeline snapshot, reporting missing phases as `n/a`. */
+    /** Format the current timeline snapshot, reporting missing or negative phases as `n/a`. */
     fun formatLine(nowMs: Long = clock()): String {
         val startToSearching = delta(startMs, searchingMs)
         val searchingToFirstScan = delta(searchingMs, firstScanMs)
@@ -108,7 +122,7 @@ class TimelineRecorder(
         val decisionToGroupFormed = delta(decisionMs, groupFormedMs)
         val groupFormedToNeighborUp = delta(groupFormedMs, neighborUpMs)
         val endMs = neighborUpMs ?: nowMs
-        val total = "${endMs - startMs}ms"
+        val total = if (endMs >= startMs) "${endMs - startMs}ms" else "n/a"
         return "auto: timeline " +
             "start->searching=$startToSearching " +
             "searching->firstScan=$searchingToFirstScan " +
@@ -120,5 +134,5 @@ class TimelineRecorder(
     }
 
     private fun delta(fromMs: Long?, toMs: Long?): String =
-        if (fromMs != null && toMs != null) "${toMs - fromMs}ms" else "n/a"
+        if (fromMs != null && toMs != null && toMs >= fromMs) "${toMs - fromMs}ms" else "n/a"
 }

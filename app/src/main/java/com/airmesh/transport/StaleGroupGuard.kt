@@ -89,7 +89,7 @@ class StaleGroupGuard(
         if (processCreatedGroup) return false
         if (state is StaleGroupGuardState.Removing) return true
         transitionTo(StaleGroupGuardState.Removing(sinceMs = nowMs))
-        log("auto: stale group cleanup started")
+        log(START_LOG_LINE)
         return true
     }
 
@@ -149,7 +149,7 @@ class StaleGroupGuard(
     private fun completeRemoval(elapsedMs: Long) {
         lastCleanupDurationMs = elapsedMs
         transitionTo(StaleGroupGuardState.Confirmed)
-        log("auto: stale group cleanup done after ${elapsedMs}ms")
+        log(doneLogLine(elapsedMs))
         transitionTo(StaleGroupGuardState.Inactive)
     }
 
@@ -164,6 +164,12 @@ class StaleGroupGuard(
 
         /** Hard timeout from `removeGroup` call after which the guard logs a warning and continues. */
         const val HARD_TIMEOUT_MS = 4_000L
+
+        /** Logged when the guard enters `Removing`. */
+        const val START_LOG_LINE = "auto: stale group cleanup started"
+
+        /** Logged when the guard leaves `Removing`. */
+        fun doneLogLine(elapsedMs: Long): String = "auto: stale group cleanup done after ${elapsedMs}ms"
     }
 }
 

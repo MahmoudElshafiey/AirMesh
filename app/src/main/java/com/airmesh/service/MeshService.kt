@@ -36,6 +36,7 @@ import com.airmesh.transport.DiscoveryStrategySelector
 import com.airmesh.transport.DiscoveryStrategyStore
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
+import com.airmesh.transport.StaleGroupGuardState
 import com.airmesh.transport.TieBreakToken
 import com.airmesh.transport.TimelineRecorder
 import com.airmesh.transport.WifiDirectConnector
@@ -455,7 +456,7 @@ class MeshService : Service() {
         val actions = controller?.setAutoEnabled(enabled) ?: emptyList()
         if (controller != null) syncAutoUi(controller)
         _eventLog.log("auto: ${if (enabled) "resumed" else "paused"} => ${actions.joinToString(", ") { describeAction(it) }}")
-        if (previousState != null && controller != null) {
+        if (previousState != null) {
             timelineRecorder.onAutoStateChanged(previousState, controller.state)?.let { line ->
                 _eventLog.log(line)
             }
@@ -499,7 +500,13 @@ class MeshService : Service() {
                     "${actions.joinToString(", ") { describeAction(it) }}",
             )
         }
-        timelineRecorder.onAutoStateChanged(previousState, controller.state)?.let { line ->
+        val isStaleGroupEvent = event is AutoMeshEvent.GroupFormed &&
+            connector.staleGroupGuard.state is StaleGroupGuardState.Removing
+        timelineRecorder.onAutoStateChanged(
+            previous = previousState,
+            current = controller.state,
+            stale = isStaleGroupEvent,
+        )?.let { line ->
             _eventLog.log(line)
         }
         actions.forEach(::executeAutoAction)
