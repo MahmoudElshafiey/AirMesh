@@ -296,6 +296,7 @@ class MeshService : Service() {
                 // Discovery diagnostics for the banner's small second line.
                 _discoveryStrategy.value = discoveryCoordinator.currentStrategy
                 _rawCallbackCount.value = discoveryCoordinator.rawCallbackCount
+                connector.staleGroupGuard.tick()
                 when {
                     hint != null && !noAirMeshHintShown -> {
                         // Log the hint only; the strategy line is a separate concern.

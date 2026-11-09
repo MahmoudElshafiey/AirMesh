@@ -89,6 +89,11 @@ class WifiDirectConnector(
     context: Context,
     private val transport: TcpMeshTransport,
     private val eventLog: EventLog,
+    private val clock: () -> Long = System::currentTimeMillis,
+    val staleGroupGuard: StaleGroupGuard = StaleGroupGuard(
+        clock = clock,
+        log = { line -> eventLog.log(line) },
+    ),
 ) {
 
     companion object {
@@ -346,6 +351,7 @@ class WifiDirectConnector(
 
         val config = WifiP2pConfig().apply { deviceAddress = device.deviceAddress }
         log("connect() requested to ${device.deviceName} (${device.deviceAddress})")
+        staleGroupGuard.onProcessGroupCreated()
         _state.update { it.copy(connecting = true) }
         manager.connect(currentChannel, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() = log("connect: onSuccess (waiting for group formation)")
@@ -392,6 +398,7 @@ class WifiDirectConnector(
         }
 
         log(if (allowBusyRetry) "createGroup() called" else "createGroup() retry after BUSY")
+        staleGroupGuard.onProcessGroupCreated()
         manager.createGroup(currentChannel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 log("createGroup: onSuccess")
@@ -481,6 +488,58 @@ class WifiDirectConnector(
         })
     }
 
+    /**
+     * Removes a stale group detected at startup and feeds its completion callbacks
+     * and 1.5 s / 4 s timers into [staleGroupGuard].
+     */
+    @SuppressLint("MissingPermission")
+    private fun removeStaleStartupGroup(nowMs: Long) {
+        val reason = "stale group at startup"
+        presenceTracker.markIntentionalRemoval()
+        groupGoneJob?.cancel()
+        groupGoneJob = null
+        _state.update {
+            it.copy(
+                role = P2pRole.NONE,
+                groupFormed = false,
+                groupOwnerAddress = null,
+                connecting = false,
+            )
+        }
+        closeTransport(reason)
+        if (started) {
+            autoMeshListener?.onIntentionalGroupRemoved()
+        }
+        scope.launch {
+            delay(StaleGroupGuard.HARD_TIMEOUT_MS)
+            staleGroupGuard.tick(clock())
+        }
+
+        val manager = p2p ?: return log("removeGroup skipped ($reason): Wi-Fi Direct unsupported")
+        val currentChannel = channel ?: return log("removeGroup skipped ($reason): no channel")
+        if (!hasP2pPermission()) {
+            log("removeGroup skipped ($reason): permission not granted")
+            return
+        }
+
+        log("removeGroup() called: $reason")
+        manager.removeGroup(currentChannel, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                log("removeGroup: onSuccess ($reason)")
+                staleGroupGuard.onRemoveGroupSuccess(clock())
+                scope.launch {
+                    delay(StaleGroupGuard.REMOVE_SUCCESS_SETTLE_MS)
+                    staleGroupGuard.tick(clock())
+                }
+            }
+
+            override fun onFailure(r: Int) {
+                log("removeGroup: onFailure ${errorName(r)} ($reason)")
+                staleGroupGuard.onRemoveGroupFailure(r, clock())
+            }
+        })
+    }
+
     // --- Wi-Fi Direct callbacks -------------------------------------------
 
     @SuppressLint("MissingPermission")
@@ -560,17 +619,36 @@ class WifiDirectConnector(
 
         // First report after start(): a group that survived from an earlier
         // session is stale — remove it before anything else, unless a live TCP
-        // link already uses it (possible when the activity restarts in place).
+        // link already uses it (possible when the activity restarts in place)
+        // or this process created the group itself.
+        val nowMs = clock()
         if (staleGroupCheckPending) {
             staleGroupCheckPending = false
-            if (info.groupFormed && transport.neighbors.value.isEmpty()) {
+            if (info.groupFormed && transport.neighbors.value.isEmpty() && !staleGroupGuard.processCreatedGroup) {
                 log("group already formed at startup with no live link — removing the stale group")
-                removeGroupForCleanup("stale group at startup")
+                staleGroupGuard.onStaleGroupRemovalStarted(nowMs)
+                removeStaleStartupGroup(nowMs)
                 return
             }
         }
 
-        val nowMs = System.currentTimeMillis()
+        when (staleGroupGuard.onConnectionInfo(info.groupFormed, nowMs)) {
+            StaleGroupDecision.IgnoreStaleGroupFormed -> return
+            is StaleGroupDecision.ConfirmStaleGroupRemoved -> {
+                presenceTracker.reset()
+                groupGoneJob?.cancel()
+                groupGoneJob = null
+                _state.update {
+                    it.copy(role = P2pRole.NONE, groupFormed = false, groupOwnerAddress = null, connecting = false)
+                }
+                closeTransport("stale group at startup confirmed gone")
+                if (started) {
+                    autoMeshListener?.onIntentionalGroupRemoved()
+                }
+                return
+            }
+            StaleGroupDecision.ProcessNormally -> Unit
+        }
 
         if (!info.groupFormed) {
             // Only debounce when there is a live link worth protecting; a false

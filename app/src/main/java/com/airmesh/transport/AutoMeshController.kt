@@ -410,7 +410,9 @@ class AutoMeshController(
             return listOf(AutoMeshAction.StopDiscovery)
         }
         val wasSearching = state is AutoMeshState.Searching
-        enterSearching(now)
+        if (!wasSearching) {
+            enterSearching(now)
+        }
         return if (wasSearching) emptyList() else listOf(AutoMeshAction.StartDiscovery)
     }
 
