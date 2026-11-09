@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification small icon derived from monochrome silhouette (white on transparent, 24dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <!-- Mesh edges -->
+    <path
+        android:pathData="M372,268 L700,288 L802,524 L660,774 L370,822 L208,536 Z M576,418 L640,586 L434,676 L362,466 Z M576,418 L434,676 M362,466 L640,586 M372,268 L362,466 M372,268 L576,418 M700,288 L576,418 M802,524 L640,586 M660,774 L640,586 M660,774 L434,676 M370,822 L434,676 M208,536 L434,676 M208,536 L362,466"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="28" />
+    <!-- Radio wave arcs around the top-right broadcast node -->
+    <path
+        android:pathData="M613,233 A103,103 0 0,1 665,191 M564,216 A154,154 0 0,1 652,142 M810,257 A114,114 0 0,1 799,345 M855,232 A165,165 0 0,1 840,375"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="26" />
+    <!-- Outer and inner mesh nodes -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M324,268 a48,48 0 1,0 96,0 a48,48 0 1,0 -96,0 M634,288 a66,66 0 1,0 132,0 a66,66 0 1,0 -132,0 M754,524 a48,48 0 1,0 96,0 a48,48 0 1,0 -96,0 M612,774 a48,48 0 1,0 96,0 a48,48 0 1,0 -96,0 M322,822 a48,48 0 1,0 96,0 a48,48 0 1,0 -96,0 M160,536 a48,48 0 1,0 96,0 a48,48 0 1,0 -96,0 M532,418 a44,44 0 1,0 88,0 a44,44 0 1,0 -88,0 M596,586 a44,44 0 1,0 88,0 a44,44 0 1,0 -88,0 M390,676 a44,44 0 1,0 88,0 a44,44 0 1,0 -88,0 M318,466 a44,44 0 1,0 88,0 a44,44 0 1,0 -88,0" />
+</vector>
