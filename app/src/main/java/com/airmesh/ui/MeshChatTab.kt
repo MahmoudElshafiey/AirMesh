@@ -105,6 +105,9 @@ fun MeshChatTab(
     // consumes it via [onScrollConsumed] once the jump is done.
     scrollToKey: MessageKey? = null,
     onScrollConsumed: () -> Unit = {},
+    // Live clock from MeshScreen (ticks every second) so a queued message flips
+    // to "not sent" once the store-and-forward max age passes.
+    nowMs: Long = System.currentTimeMillis(),
 ) {
     val listState = rememberLazyListState()
     // Follow the newest item by default. Scrolling up pauses it so old items
@@ -197,7 +200,7 @@ fun MeshChatTab(
                 // Index keys: items have no id field and the list is append-only.
                 items(count = rows.size, key = { it }) { index ->
                     when (val row = rows[index]) {
-                        is ChatRow.TextMessage -> MessageBubble(row.message)
+                        is ChatRow.TextMessage -> MessageBubble(row.message, nowMs)
                         is ChatRow.LocationItem -> LocationCard(
                             location = row.location,
                             isMine = row.location.senderId == nodeId,
@@ -225,7 +228,7 @@ fun MeshChatTab(
 }
 
 @Composable
-private fun MessageBubble(message: MeshMessage) {
+private fun MessageBubble(message: MeshMessage, nowMs: Long) {
     val colors = MaterialTheme.colorScheme
     val mine = message.outgoing
     Row(
@@ -260,6 +263,15 @@ private fun MessageBubble(message: MeshMessage) {
                 // Relay count only makes sense for received messages: ours leave at full TTL.
                 if (!mine) {
                     Text(relayCountText(message.ttl), style = MaterialTheme.typography.labelSmall, color = metaColor)
+                } else {
+                    // Ours show how far they got instead: sent / queued / expired.
+                    val ageMs = nowMs - message.timestamp
+                    val expired = deliveryStatus(message.handedTo.size, ageMs) == DeliveryStatus.EXPIRED
+                    Text(
+                        deliveryStatusText(message.handedTo.size, ageMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (expired) colors.error else metaColor,
+                    )
                 }
             }
         }

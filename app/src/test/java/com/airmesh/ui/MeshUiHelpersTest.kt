@@ -50,6 +50,41 @@ class MeshUiHelpersTest {
         assertEquals("direct", relayCountText(ttl = 5, initialTtl = 4)) // clamped again
     }
 
+    // --- Outgoing delivery status ---------------------------------------------
+
+    @Test
+    fun deliveryStatusIsSentOnceAnyNeighborGotTheFrame() {
+        assertEquals(DeliveryStatus.SENT, deliveryStatus(handedToCount = 1, ageMs = 0))
+        // A frame that reached someone stays "sent" even after the queue age.
+        assertEquals(DeliveryStatus.SENT, deliveryStatus(handedToCount = 3, ageMs = 60_000, maxQueueAgeMs = 1_000))
+    }
+
+    @Test
+    fun deliveryStatusIsQueuedUntilTheStoreMaxAgeThenExpired() {
+        assertEquals(DeliveryStatus.QUEUED, deliveryStatus(handedToCount = 0, ageMs = 0, maxQueueAgeMs = 1_000))
+        // Exactly at the bound the store still keeps it (it deletes strictly older).
+        assertEquals(DeliveryStatus.QUEUED, deliveryStatus(handedToCount = 0, ageMs = 1_000, maxQueueAgeMs = 1_000))
+        assertEquals(DeliveryStatus.EXPIRED, deliveryStatus(handedToCount = 0, ageMs = 1_001, maxQueueAgeMs = 1_000))
+    }
+
+    @Test
+    fun deliveryStatusDefaultsToTheStoreAndForwardMaxAge() {
+        val maxAge = com.airmesh.routing.StoreAndForward.DEFAULT_MAX_AGE_MS
+        assertEquals(DeliveryStatus.QUEUED, deliveryStatus(handedToCount = 0, ageMs = maxAge))
+        assertEquals(DeliveryStatus.EXPIRED, deliveryStatus(handedToCount = 0, ageMs = maxAge + 1))
+    }
+
+    @Test
+    fun deliveryStatusTextCoversEveryState() {
+        assertEquals("Sent to 1 neighbor", deliveryStatusText(handedToCount = 1, ageMs = 0))
+        assertEquals("Sent to 2 neighbors", deliveryStatusText(handedToCount = 2, ageMs = 0))
+        assertEquals("Queued · waiting for a neighbor", deliveryStatusText(handedToCount = 0, ageMs = 0))
+        assertEquals(
+            "Not sent · no neighbor in time",
+            deliveryStatusText(handedToCount = 0, ageMs = 2_000, maxQueueAgeMs = 1_000),
+        )
+    }
+
     // --- Role / Wi-Fi Direct labels -------------------------------------------
 
     @Test

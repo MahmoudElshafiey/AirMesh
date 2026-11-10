@@ -2,6 +2,7 @@ package com.airmesh.ui
 
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.routing.Router
+import com.airmesh.routing.StoreAndForward
 import com.airmesh.transport.P2pRole
 import java.time.Instant
 import java.time.ZoneId
@@ -39,6 +40,42 @@ fun formatLogTime(timeMs: Long, zone: ZoneId = ZoneId.systemDefault()): String =
 fun relayCountText(ttl: Int, initialTtl: Int = Router.DEFAULT_TTL): String {
     val relays = (initialTtl - ttl).coerceAtLeast(0)
     return if (relays == 0) "direct" else "$relays ${if (relays == 1) "relay" else "relays"}"
+}
+
+// --- Outgoing delivery status ---------------------------------------------------
+
+/**
+ * Hop-level state of one of my outgoing messages, shown under its bubble.
+ * - SENT:    written to at least one neighbor socket (flood or replay).
+ * - QUEUED:  no neighbor yet; store-and-forward holds the frame and replays it
+ *            when a neighbor appears.
+ * - EXPIRED: still no neighbor after the store's max age, so the frame was
+ *            pruned from the queue and will never leave this phone.
+ * There is no end-to-end ACK in the protocol, so "sent" never means "read".
+ */
+enum class DeliveryStatus { QUEUED, SENT, EXPIRED }
+
+/** Derives the status from the neighbor count and the message age. */
+fun deliveryStatus(
+    handedToCount: Int,
+    ageMs: Long,
+    maxQueueAgeMs: Long = StoreAndForward.DEFAULT_MAX_AGE_MS,
+): DeliveryStatus = when {
+    handedToCount > 0 -> DeliveryStatus.SENT
+    // Same bound StoreAndForward uses to delete old frames.
+    ageMs > maxQueueAgeMs -> DeliveryStatus.EXPIRED
+    else -> DeliveryStatus.QUEUED
+}
+
+/** Caption under an outgoing bubble, e.g. "Sent to 2 neighbors" or "Queued". */
+fun deliveryStatusText(
+    handedToCount: Int,
+    ageMs: Long,
+    maxQueueAgeMs: Long = StoreAndForward.DEFAULT_MAX_AGE_MS,
+): String = when (deliveryStatus(handedToCount, ageMs, maxQueueAgeMs)) {
+    DeliveryStatus.SENT -> "Sent to $handedToCount ${if (handedToCount == 1) "neighbor" else "neighbors"}"
+    DeliveryStatus.QUEUED -> "Queued · waiting for a neighbor"
+    DeliveryStatus.EXPIRED -> "Not sent · no neighbor in time"
 }
 
 // --- Payload limit ------------------------------------------------------------

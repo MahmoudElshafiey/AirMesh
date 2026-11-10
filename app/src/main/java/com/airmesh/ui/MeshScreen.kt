@@ -203,6 +203,7 @@ fun MeshScreen(
                             onShareTestLocation = onShareTestLocation,
                             scrollToKey = navRequest?.target?.messageKey,
                             onScrollConsumed = onNavConsumed,
+                            nowMs = nowMs,
                         )
                     MeshTab.NETWORK ->
                         MeshNetworkTab(

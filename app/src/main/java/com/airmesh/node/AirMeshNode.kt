@@ -37,6 +37,12 @@ import kotlinx.coroutines.withContext
  * @property ttl hops remaining in the received frame (or the initial TTL for
  *   an outgoing frame). This is the only hop information the frame carries.
  * @property outgoing true for messages this node originated.
+ * @property seq frame sequence number of an outgoing message (null for
+ *   received ones); links later replay sends back to this chat row.
+ * @property handedTo neighbor ids this node's own frame was successfully
+ *   written to (first flood or a store-and-forward replay). This is hop-level
+ *   feedback only: the protocol has no end-to-end ACK, so it says "left this
+ *   phone", not "read by everyone". Always empty for received messages.
  */
 data class MeshMessage(
     val senderId: Int,
@@ -44,6 +50,8 @@ data class MeshMessage(
     val timestamp: Long,
     val ttl: Int,
     val outgoing: Boolean,
+    val seq: Int? = null,
+    val handedTo: Set<Int> = emptySet(),
 )
 
 /**
@@ -141,6 +149,22 @@ class AirMeshNode(
     /** Last corrupt-frame count reported, so deltas are logged once. */
     private var lastCorruptFrames = 0
 
+    /**
+     * Neighbors each of my own MSG frames was handed to, keyed by seq.
+     *
+     * Router.originate sends the first flood *before* sendText can append the
+     * chat row, so successful sends are recorded here first and copied into the
+     * row when it is created; later replay sends update the row in place.
+     * Bounded like the message list (oldest seq evicted first). Guarded by
+     * [outgoingLock] together with the matching [_messages] update, so a send
+     * racing with the append can never be lost.
+     */
+    private val outgoingHandoffs = object : LinkedHashMap<Int, Set<Int>>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Set<Int>>?) =
+            size > MAX_MESSAGES
+    }
+    private val outgoingLock = Any()
+
     init {
         storeAndForward = storeFactory { neighborId, frame ->
             sendFrame(neighborId, frame)
@@ -219,15 +243,21 @@ class AirMeshNode(
         } else {
             try {
                 val frame = router.originate(FrameType.MSG, payload)
-                appendMessage(
-                    MeshMessage(
-                        senderId = localNodeId,
-                        text = text,
-                        timestamp = clock(),
-                        ttl = frame.ttl,
-                        outgoing = true,
-                    ),
-                )
+                // Same lock as recordHandoff: the row starts with every neighbor
+                // the first flood reached, and no concurrent replay is missed.
+                synchronized(outgoingLock) {
+                    appendMessage(
+                        MeshMessage(
+                            senderId = localNodeId,
+                            text = text,
+                            timestamp = clock(),
+                            ttl = frame.ttl,
+                            outgoing = true,
+                            seq = frame.seq,
+                            handedTo = outgoingHandoffs[frame.seq].orEmpty(),
+                        ),
+                    )
+                }
                 eventLog.log("originated MSG seq=${frame.seq} ttl=${frame.ttl} (${payload.size} bytes)")
                 true
             } catch (error: Exception) {
@@ -406,6 +436,11 @@ class AirMeshNode(
                     "TX ${frame.type} node=${frame.nodeId} seq=${frame.seq} " +
                         "ttl=${frame.ttl} -> $neighborId",
                 )
+                // Only my own text frames feed the chat delivery status;
+                // forwarded frames of other nodes are not shown as mine.
+                if (frame.nodeId == localNodeId && frame.type == FrameType.MSG) {
+                    recordHandoff(frame.seq, neighborId)
+                }
             } else {
                 eventLog.log(
                     "TX ${frame.type} seq=${frame.seq} -> $neighborId failed: no live socket",
@@ -435,6 +470,26 @@ class AirMeshNode(
                     "corrupt frames: ${current - lastCorruptFrames} dropped (total $current)",
                 )
                 lastCorruptFrames = current
+            }
+        }
+    }
+
+    /**
+     * Records that my MSG frame [seq] reached [neighborId] and updates the
+     * matching outgoing chat row (newest first, since seq wraps at 16 bits).
+     * If the row does not exist yet, sendText picks the set up when it appends.
+     */
+    private fun recordHandoff(seq: Int, neighborId: Int) {
+        synchronized(outgoingLock) {
+            val handedTo = outgoingHandoffs[seq].orEmpty() + neighborId
+            outgoingHandoffs[seq] = handedTo
+            _messages.update { current ->
+                val index = current.indexOfLast { it.outgoing && it.seq == seq }
+                if (index < 0) {
+                    current
+                } else {
+                    current.toMutableList().also { it[index] = it[index].copy(handedTo = handedTo) }
+                }
             }
         }
     }

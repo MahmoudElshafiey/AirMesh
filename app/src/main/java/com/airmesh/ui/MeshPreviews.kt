@@ -31,7 +31,7 @@ import com.airmesh.transport.P2pRole
 
 private val previewMessages = listOf(
     MeshMessage(2, "Cellular is down here — does the mesh work?", 1_700_000_000_000L, Router.DEFAULT_TTL - 1, outgoing = false),
-    MeshMessage(1, "Yes. I am two relays from base camp.", 1_700_000_060_000L, Router.DEFAULT_TTL, outgoing = true),
+    MeshMessage(1, "Yes. I am two relays from base camp.", 1_700_000_060_000L, Router.DEFAULT_TTL, outgoing = true, handedTo = setOf(2, 3)),
     MeshMessage(3, "Copy that. Sending the supply list next.", 1_700_000_120_000L, Router.DEFAULT_TTL - 2, outgoing = false),
 )
 
