@@ -1,10 +1,17 @@
 package com.airmesh.node
 
+import com.airmesh.profile.InMemoryProfileStorage
+import com.airmesh.profile.NameSanitizer
+import com.airmesh.profile.ProfileDirectory
+import com.airmesh.profile.ProfileInfo
+import com.airmesh.profile.ProfileStorage
 import com.airmesh.protocol.Frame
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.FrameType
 import com.airmesh.protocol.LocationDecodeException
 import com.airmesh.protocol.LocationPayload
+import com.airmesh.protocol.ProfileDecodeException
+import com.airmesh.protocol.ProfilePayload
 import com.airmesh.routing.DedupCache
 import com.airmesh.routing.ReplayTrigger
 import com.airmesh.routing.Router
@@ -76,6 +83,15 @@ data class MeshLocation(
 )
 
 /**
+ * This node's own display profile. [name] is null until [AirMeshNode.setMyProfile]
+ * succeeds; while it is null the node never announces a PROFILE frame.
+ */
+data class MyProfile(
+    val name: String?,
+    val colorIndex: Int,
+)
+
+/**
  * The protocol engine behind the UI, with no Android or Compose imports.
  *
  * It owns the transport, dedup cache, store-and-forward facade, and router. The
@@ -104,6 +120,8 @@ class AirMeshNode(
     private val clock: () -> Long = System::currentTimeMillis,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val replayIntervalMs: Long = DEFAULT_REPLAY_INTERVAL_MS,
+    private val profileStorage: ProfileStorage = InMemoryProfileStorage(),
+    private val profileAnnounceIntervalMs: Long = DEFAULT_PROFILE_ANNOUNCE_INTERVAL_MS,
 ) {
 
     companion object {
@@ -115,6 +133,15 @@ class AirMeshNode(
 
         /** How often queued frames are retried for currently connected neighbors. */
         const val DEFAULT_REPLAY_INTERVAL_MS = 5_000L
+
+        /** How often our PROFILE is re-announced while at least one neighbor lives. */
+        const val DEFAULT_PROFILE_ANNOUNCE_INTERVAL_MS = 120_000L
+
+        /** Storage key for this node's own display name (sanitized). */
+        const val PROFILE_NAME_KEY = "profile_name"
+
+        /** Storage key for this node's avatar color index, as a decimal string. */
+        const val PROFILE_COLOR_KEY = "profile_color"
 
         private const val CORRUPT_POLL_MS = 500L
     }
@@ -133,6 +160,23 @@ class AirMeshNode(
     /** Delivered (and locally sent) locations, separate from [messages]. */
     private val _locations = MutableStateFlow<List<MeshLocation>>(emptyList())
     val locations: StateFlow<List<MeshLocation>> = _locations.asStateFlow()
+
+    /** This node's own display profile; loaded from storage at construction. */
+    private val _myProfile = MutableStateFlow(
+        MyProfile(
+            name = profileStorage.getString(PROFILE_NAME_KEY),
+            colorIndex = profileStorage.getString(PROFILE_COLOR_KEY)?.toIntOrNull() ?: 0,
+        ),
+    )
+    val myProfile: StateFlow<MyProfile> = _myProfile.asStateFlow()
+
+    /** Known display names of other nodes, keyed by node id. */
+    private val profileDirectory = ProfileDirectory(localNodeId, clock, profileStorage)
+    private val _profiles = MutableStateFlow<Map<Int, ProfileInfo>>(profileDirectory.snapshot())
+    val profiles: StateFlow<Map<Int, ProfileInfo>> = _profiles.asStateFlow()
+
+    /** Time (injected [clock]) at which we last originated a PROFILE frame. */
+    @Volatile private var lastProfileAnnounceAt = 0L
 
     /** Node ids with a live handshaken transport socket. */
     val neighbors: StateFlow<Set<Int>> = transport.neighbors
@@ -202,6 +246,7 @@ class AirMeshNode(
             }
             nodeScope.launch { logCorruptFrameDeltas() }
             nodeScope.launch { periodicReplay() }
+            nodeScope.launch { periodicProfileAnnounce() }
             eventLog.log("node $localNodeId started")
         }
     }
@@ -272,6 +317,71 @@ class AirMeshNode(
     }
 
     /**
+     * Sets this node's display name and avatar color, persists them under
+     * [PROFILE_NAME_KEY]/[PROFILE_COLOR_KEY], and floods a PROFILE frame so the
+     * mesh learns who we are. The name is sanitized first; an empty-after-
+     * sanitize name or an out-of-range color is logged and rejected without
+     * changing state. Runs on the background dispatcher like [sendText].
+     */
+    suspend fun setMyProfile(name: String, colorIndex: Int): Boolean = withContext(dispatcher) {
+        if (colorIndex !in 0..ProfilePayload.MAX_COLOR_INDEX) {
+            eventLog.log("profile rejected: color index $colorIndex out of range")
+            return@withContext false
+        }
+        val sanitized = NameSanitizer.sanitize(name)
+        if (sanitized == null) {
+            eventLog.log("profile rejected: name is empty after sanitizing")
+            return@withContext false
+        }
+
+        profileStorage.putString(PROFILE_NAME_KEY, sanitized)
+        profileStorage.putString(PROFILE_COLOR_KEY, colorIndex.toString())
+        _myProfile.value = MyProfile(sanitized, colorIndex)
+        eventLog.log("profile set: name=$sanitized color=$colorIndex")
+        announceProfile()
+        true
+    }
+
+    /**
+     * Floods our current profile as one PROFILE frame. No-op while no name is
+     * set; with no neighbors the frame simply lands in store-and-forward and is
+     * replayed when a link appears, so nothing is lost by announcing early.
+     */
+    private suspend fun announceProfile() {
+        val profile = _myProfile.value
+        if (profile.name == null) return
+
+        try {
+            val payload = ProfilePayload(profile.name, profile.colorIndex).encode()
+            val frame = router.originate(FrameType.PROFILE, payload)
+            lastProfileAnnounceAt = clock()
+            eventLog.log("originated PROFILE seq=${frame.seq} ttl=${frame.ttl}")
+        } catch (error: Exception) {
+            eventLog.log("profile announce failed: ${error.javaClass.simpleName}: ${error.message}")
+        }
+    }
+
+    /**
+     * Re-announces our PROFILE at most once per [profileAnnounceIntervalMs]
+     * (measured with the injected [clock]) while at least one neighbor is live.
+     * Nodes that joined after the original flood — or whose directory evicted
+     * us — learn our name this way. Polls on the existing replay cadence so no
+     * new interval knob is needed.
+     */
+    private suspend fun periodicProfileAnnounce() {
+        while (currentCoroutineContext().isActive) {
+            delay(replayIntervalMs)
+            val now = clock()
+            if (_myProfile.value.name != null &&
+                transport.neighbors.value.isNotEmpty() &&
+                now - lastProfileAnnounceAt >= profileAnnounceIntervalMs
+            ) {
+                announceProfile()
+            }
+        }
+    }
+
+    /**
      * Floods a position as one LOCATION frame through the same router as text:
      * identical flooding, dedup and store-and-forward — only the payload type
      * differs. Runs on the background dispatcher like [sendText].
@@ -316,6 +426,7 @@ class AirMeshNode(
         when (frame.type) {
             FrameType.MSG -> deliverText(frame)
             FrameType.LOCATION -> deliverLocation(frame)
+            FrameType.PROFILE -> deliverProfile(frame)
             // ACK/HELLO frames are protocol traffic, not user content.
             else -> Unit
         }
@@ -363,6 +474,40 @@ class AirMeshNode(
     }
 
     /**
+     * Delivers a PROFILE frame to the directory. The payload is decoded and the
+     * name re-sanitized (a hostile node could send bidi or control characters
+     * that pass the size checks); malformed payloads are logged and dropped so
+     * one bad frame never crashes the node. Updates inside the directory's 10s
+     * window are ignored, which also absorbs duplicate announcements.
+     */
+    private fun deliverProfile(frame: Frame) {
+        ProfilePayload.decode(frame.payload).fold(
+            onSuccess = { payload ->
+                val name = NameSanitizer.sanitize(payload.name)
+                if (name == null) {
+                    eventLog.log("PROFILE from ${frame.nodeId} dropped: empty name")
+                    return@fold
+                }
+                val accepted = profileDirectory.acceptFromNetwork(
+                    frame.nodeId,
+                    name,
+                    payload.avatarColorIndex,
+                )
+                _profiles.value = profileDirectory.snapshot()
+                if (accepted) {
+                    eventLog.log("delivered PROFILE node=${frame.nodeId} seq=${frame.seq}")
+                } else {
+                    eventLog.log("PROFILE from ${frame.nodeId} ignored: update too soon")
+                }
+            },
+            onFailure = { error ->
+                val reason = (error as? ProfileDecodeException)?.failure?.name ?: error.message.orEmpty()
+                eventLog.log("PROFILE from ${frame.nodeId} dropped: $reason")
+            },
+        )
+    }
+
+    /**
      * Replays stored frames for newly appeared neighbors only. This mirrors
      * SimNetwork.applyLinks and prevents a removal from triggering a replay.
      */
@@ -377,6 +522,10 @@ class AirMeshNode(
         for (neighborId in added.sorted()) {
             eventLog.log("neighbor up: $neighborId")
             replayFor(neighborId, ReplayTrigger.APPEARED)
+            // Let the newcomer know who we are right away; a no-op while no
+            // name is set. The directory's 10s window absorbs any overlap with
+            // a store-and-forward replay of an earlier PROFILE frame.
+            announceProfile()
         }
     }
 

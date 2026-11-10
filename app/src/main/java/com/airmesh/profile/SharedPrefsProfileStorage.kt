@@ -1,23 +1,28 @@
 package com.airmesh.profile
 
+import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * [ProfileStorage] backed by SharedPreferences: the whole directory is one JSON
- * document under a single key. This is the only Android-dependent piece of the
- * profile feature; [ProfileDirectory] itself stays pure Kotlin.
+ * [ProfileStorage] backed by SharedPreferences, mirroring
+ * [com.airmesh.node.SharedPreferencesNodeIdStore]. This is the only
+ * Android-dependent piece of the profile feature; [ProfileDirectory] and the
+ * node's own-profile persistence stay pure Kotlin behind the interface.
  */
-class SharedPrefsProfileStorage(private val prefs: SharedPreferences) : ProfileStorage {
+class SharedPrefsProfileStorage(context: Context) : ProfileStorage {
 
-    override fun load(): String? = prefs.getString(KEY, null)
+    private val prefs: SharedPreferences =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    override fun save(text: String) {
-        // commit() rather than apply(): writes are rare and small, and the
-        // next process start must see them.
-        prefs.edit().putString(KEY, text).commit()
+    override fun getString(key: String): String? = prefs.getString(key, null)
+
+    override fun putString(key: String, value: String) {
+        // commit() rather than apply(): profile writes are rare and small, and
+        // the next process start must see them.
+        prefs.edit().putString(key, value).commit()
     }
 
-    private companion object {
-        const val KEY = "profile_directory"
+    companion object {
+        const val PREFS_NAME = "airmesh_profile"
     }
 }

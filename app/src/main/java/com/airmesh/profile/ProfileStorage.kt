@@ -1,24 +1,26 @@
 package com.airmesh.profile
 
 /**
- * Persistence for [ProfileDirectory]. The directory keeps its whole state as a
- * single JSON document; an implementation decides where that text lives. Pure
- * Kotlin so the JVM tests can use an in-memory fake.
+ * String-key persistence for profile data. [ProfileDirectory] stores its whole
+ * state as one JSON document under a single key; the node's own name and color
+ * live under two more keys. Pure Kotlin so the JVM tests can use an in-memory
+ * fake, while production uses SharedPreferences behind the same interface.
  */
 interface ProfileStorage {
-    /** Returns the stored document, or null when nothing has been saved yet. */
-    fun load(): String?
+    /** Returns the value stored under [key], or null when absent. */
+    fun getString(key: String): String?
 
-    /** Replaces the stored document with [text]. */
-    fun save(text: String)
+    /** Stores [value] under [key], replacing any previous value. */
+    fun putString(key: String, value: String)
 }
 
 /** In-memory [ProfileStorage]; used by tests and for non-persistent use. */
 class InMemoryProfileStorage : ProfileStorage {
-    @Volatile private var text: String? = null
+    private val lock = Any()
+    private val values = HashMap<String, String>()
 
-    override fun load(): String? = text
-    override fun save(newText: String) {
-        text = newText
+    override fun getString(key: String): String? = synchronized(lock) { values[key] }
+    override fun putString(key: String, value: String) {
+        synchronized(lock) { values[key] = value }
     }
 }

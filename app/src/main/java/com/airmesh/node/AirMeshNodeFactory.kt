@@ -1,6 +1,7 @@
 package com.airmesh.node
 
 import android.content.Context
+import com.airmesh.profile.SharedPrefsProfileStorage
 import com.airmesh.storage.createRoomBackedStore
 import com.airmesh.transport.TcpMeshTransport
 import kotlinx.coroutines.CoroutineDispatcher
@@ -33,5 +34,7 @@ fun createAirMeshNode(
         eventLog = eventLog,
         storeFactory = { send -> createRoomBackedStore(context, send, log = eventLog::log) },
         dispatcher = dispatcher,
+        // Persist the node's own name/color and the profile directory across restarts.
+        profileStorage = SharedPrefsProfileStorage(context),
     )
 }

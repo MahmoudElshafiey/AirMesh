@@ -175,7 +175,7 @@ class ProfileDirectoryTest {
         )
         for (text in garbage) {
             val store = InMemoryProfileStorage()
-            store.save(text)
+            store.putString(ProfileDirectory.STORAGE_KEY, text)
             val dir = directory(store = store)
             assertTrue("expected empty directory for $text", dir.snapshot().isEmpty())
         }

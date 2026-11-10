@@ -26,6 +26,9 @@ class ProfileDirectory(
 
         /** A node may push a new name at most once per this interval (ms). */
         const val MIN_UPDATE_INTERVAL_MS = 10_000L
+
+        /** Storage key under which the directory's JSON document is kept. */
+        const val STORAGE_KEY = "profile_directory"
     }
 
     private val lock = Any()
@@ -33,7 +36,7 @@ class ProfileDirectory(
 
     init {
         // Absent or corrupted stored data simply starts the directory empty.
-        storage?.load()?.let { text ->
+        storage?.getString(STORAGE_KEY)?.let { text ->
             ProfileDirectoryJson.decode(text)?.let { loaded ->
                 synchronized(lock) { entries.putAll(loaded) }
             }
@@ -79,7 +82,7 @@ class ProfileDirectory(
     }
 
     private fun persistLocked() {
-        storage?.save(ProfileDirectoryJson.encode(entries))
+        storage?.putString(STORAGE_KEY, ProfileDirectoryJson.encode(entries))
     }
 }
 
