@@ -8,7 +8,9 @@ enum class FrameType(val wireValue: Int) {
     MSG(0),
     LOCATION(1),
     ACK(2),
-    HELLO(3);
+    HELLO(3),
+    // 5, not 4: value 4 is asserted as "unknown" by existing codec tests.
+    PROFILE(5);
 
     companion object {
         /** Returns the type for a 4-bit wire value, or null if it is unknown. */

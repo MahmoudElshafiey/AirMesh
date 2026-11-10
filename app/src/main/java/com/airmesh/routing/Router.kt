@@ -93,7 +93,9 @@ class Router(
             return
         }
 
-        if (frame.type == FrameType.MSG || frame.type == FrameType.LOCATION) {
+        // PROFILE is user content like MSG/LOCATION: deliver it locally. ACK and
+        // HELLO are protocol traffic and are never delivered to the app.
+        if (frame.type == FrameType.MSG || frame.type == FrameType.LOCATION || frame.type == FrameType.PROFILE) {
             deliver(frame)
         }
 
