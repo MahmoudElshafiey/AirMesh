@@ -264,6 +264,8 @@ class AutoMeshControllerTest {
             assertTrue(a.state is AutoMeshState.Searching)
             assertTrue(c.state is AutoMeshState.Searching)
 
+            now += 12_000 // past the post-loss creation grace (TASK M1 part 4)
+
             // B is gone: A sees only C, C sees only A. C (id 5) is the new max → creates once.
             creates += feed(a, listOf(peer(5, "CC:00:00:00:00:03"))).count { it is AutoMeshAction.CreateGroup }
             val cActions = feed(c, listOf(peer(2, "AA:00:00:00:00:01")))

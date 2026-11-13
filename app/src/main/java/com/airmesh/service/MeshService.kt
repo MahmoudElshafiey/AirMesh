@@ -281,6 +281,11 @@ class MeshService : Service() {
                 if (neighbors.size > liveNeighborCount) {
                     ownerScanPolicy.noteClientJoined(System.currentTimeMillis())
                 }
+                // The controller's merge decision needs our live client count
+                // (TASK M1 part 4); emitted only on change to keep the log quiet.
+                if (neighbors.size != liveNeighborCount) {
+                    autoEvent(AutoMeshEvent.MyClientsChanged(neighbors.size), "my clients=${neighbors.size}")
+                }
                 liveNeighborCount = neighbors.size
                 // Owners re-advertise their live group size in the instance name;
                 // updateClientCount is a no-op unless we are an owner with a live ad.
@@ -542,6 +547,8 @@ class MeshService : Service() {
             _eventLog.log("auto: event $describe peers=${describePeers(peerDirectory.peers.value)}")
         }
         val actions = controller.onEvent(event)
+        // The controller queues at most one "merge ..." line per outcome change (TASK M1 part 4).
+        controller.takeMergeLogLine()?.let { _eventLog.log("auto: $it") }
         syncAutoUi(controller)
         if (actions.isNotEmpty() || event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.PeersChanged) {
             _eventLog.log(
@@ -599,8 +606,8 @@ class MeshService : Service() {
             ownerScanPolicy.shouldScan(
                 clients = liveNeighborCount,
                 mergeEnabled = _mergeGroupsEnabled.value,
-                // Becomes true while a merge is in progress (TASK M1 part 4).
-                mergeInProgress = false,
+                // No scans while a merge is in flight (TASK M1 part 4).
+                mergeInProgress = autoController?.state is AutoMeshState.Yielding,
                 nowMs = nowMs,
             )
         }
@@ -612,6 +619,7 @@ class MeshService : Service() {
         is AutoMeshState.Searching -> "Searching"
         is AutoMeshState.Creating -> "Creating"
         is AutoMeshState.Joining -> "Joining(#${s.targetNodeId} ${s.targetAddress})"
+        is AutoMeshState.Yielding -> "Yielding(#${s.targetNodeId} ${s.targetAddress}, ${s.targetPhones} phones)"
         is AutoMeshState.Owner -> "Owner"
         is AutoMeshState.Client -> "Client"
         is AutoMeshState.Backoff -> "Backoff(${s.reason})"

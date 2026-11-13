@@ -32,6 +32,19 @@ sealed interface AutoMeshState {
     /** In a group as a client. */
     data object Client : AutoMeshState
 
+    /**
+     * Yielding my group to a stronger owner (TASK M1 part 4): our own removal was
+     * issued and we are joining [targetAddress]. We never act as an owner again in
+     * this cycle — the join either lands us in [Client] or fails into [Backoff].
+     */
+    data class Yielding(
+        val targetAddress: String,
+        val targetNodeId: Int,
+        /** Client count the target advertised when we decided to yield. */
+        val targetPhones: Int,
+        val sinceMs: Long,
+    ) : AutoMeshState
+
     /** Quiet period after a failure or a lost group; search again at [untilMs]. */
     data class Backoff(val untilMs: Long, val reason: String) : AutoMeshState
 }
@@ -66,6 +79,9 @@ sealed interface AutoMeshEvent {
      */
     data object IntentionalGroupGone : AutoMeshEvent
 
+    /** Our live client count changed (TASK M1 part 4); feeds the merge decision. */
+    data class MyClientsChanged(val clients: Int) : AutoMeshEvent
+
     /** An automatic connect/create attempt failed; [reason] distinguishes BUSY. */
     data class ConnectFailed(val reason: AutoFailureReason) : AutoMeshEvent
 
@@ -95,6 +111,14 @@ const val AUTO_FAILURE_CAP_MS = 30_000L
 
 /** Searching this long with classic devices visible but no AirMesh ad shows a hint banner. */
 const val NO_AIRMESH_PEERS_AFTER_MS = 45_000L
+
+/**
+ * After an UNEXPECTED group loss, the following Searching never creates for this
+ * long — it only joins visible owners (TASK M1 part 4). This keeps former clients
+ * from fragmenting the mesh into new groups while the old owner is still around.
+ * Fresh startups are unaffected: they never lost a group.
+ */
+const val POST_LOSS_CREATION_GRACE_MS = 10_000L
 
 /**
  * One random 32-bit token per process. Node ids are unique per install, but if two
@@ -150,6 +174,7 @@ fun autoMeshBannerText(
     } else {
         "Connecting to #${s.targetNodeId}…"
     }
+    is AutoMeshState.Yielding -> "Merging with a nearby network (#${s.targetNodeId}, ${s.targetPhones} phones)…"
     is AutoMeshState.Owner, is AutoMeshState.Client -> "Connected · $neighborCount neighbors"
     is AutoMeshState.Backoff -> {
         val secondsLeft = ((s.untilMs - nowMs) / 1000 + 1).coerceAtLeast(1)
@@ -235,6 +260,30 @@ class AutoMeshController(
     /** Set when we initiated a group removal so a subsequent GroupGone skips backoff. */
     private var intentionalRemovalPending = false
 
+    // --- owner merge (TASK M1 part 4) ------------------------------------------
+
+    /** Owns the yield preconditions; shares our seeded Random for reproducibility. */
+    private val mergeDecider = MergeDecider(myNodeId, tieBreakToken, random)
+    /** Our live client count (phones in our group), reported by the service. */
+    private var myClients = 0
+    /** When [myClients] last changed; null = never (stable since birth). */
+    private var myClientsChangedAtMs: Long? = null
+    /** Last merge outcome we queued for logging, so a steady state is not re-logged. */
+    private var lastLoggedMergeOutcome: String? = null
+    /** One-shot "merge ..." line the service prints via [takeMergeLogLine]. */
+    private var pendingMergeLogLine: String? = null
+    /** Set by an unexpected group loss; consumed by the next [enterSearching]. */
+    private var lostGroupUnexpectedly = false
+    /** While now < this, [decide] joins visible owners but never creates. */
+    private var creationGraceUntilMs = 0L
+
+    /** The service calls this after each event to drain a queued merge log line. */
+    fun takeMergeLogLine(): String? {
+        val line = pendingMergeLogLine
+        pendingMergeLogLine = null
+        return line
+    }
+
     /** Marks the next [AutoMeshEvent.GroupGone] as intentional (skips group-gone backoff). */
     fun markIntentionalGroupRemoval() {
         intentionalRemovalPending = true
@@ -246,20 +295,29 @@ class AutoMeshController(
             is AutoMeshEvent.PermissionsChanged -> onPermissionsChanged(event, now)
             is AutoMeshEvent.PeersChanged -> {
                 lastPeers = event.peers // kept even while paused so resume starts fresh
-                if (!autoEnabled) emptyList() else decide(event.peers, now)
+                if (!autoEnabled) emptyList() else decide(event.peers, now) + runMergeDecision(now)
             }
             // Group reality is tracked even while paused: a manual connect that
             // succeeds must still land us in Owner/Client.
-            is AutoMeshEvent.GroupFormed -> onGroupFormed(event.role)
+            is AutoMeshEvent.GroupFormed -> onGroupFormed(event.role, now)
+            is AutoMeshEvent.MyClientsChanged -> {
+                if (event.clients != myClients) {
+                    myClients = event.clients
+                    myClientsChangedAtMs = now
+                }
+                emptyList()
+            }
             is AutoMeshEvent.GroupGone -> if (intentionalRemovalPending) {
                 intentionalRemovalPending = false
-                onIntentionalGroupGone(now)
+                // Our own merge removal: the join toward the target keeps running.
+                if (state is AutoMeshState.Yielding) emptyList() else onIntentionalGroupGone(now)
             } else {
                 onGroupGone(now)
             }
             is AutoMeshEvent.IntentionalGroupGone -> {
                 intentionalRemovalPending = false
-                onIntentionalGroupGone(now)
+                // Our own merge removal: the join toward the target keeps running.
+                if (state is AutoMeshState.Yielding) emptyList() else onIntentionalGroupGone(now)
             }
             is AutoMeshEvent.ConnectFailed -> if (autoEnabled) onConnectFailed(event.reason, now) else emptyList()
             AutoMeshEvent.Tick -> if (autoEnabled) onTick(now) else emptyList()
@@ -273,7 +331,10 @@ class AutoMeshController(
         val now = clock()
         if (!enabled) {
             return when (state) {
-                is AutoMeshState.Searching, is AutoMeshState.Creating, is AutoMeshState.Joining -> {
+                // A merge join in flight is abandoned like any other join; a later
+                // GroupFormed still lands us in Client ("accepted even while paused").
+                is AutoMeshState.Searching, is AutoMeshState.Creating,
+                is AutoMeshState.Joining, is AutoMeshState.Yielding -> {
                     enterIdle()
                     listOf(AutoMeshAction.StopDiscovery)
                 }
@@ -350,15 +411,22 @@ class AutoMeshController(
         }
         // Rule (c): peers visible but no owner. The highest node id among
         // {me ∪ peers} creates immediately; everyone else waits for the takeover
-        // deadline in case the elected creator never shows up.
-        if (iAmAutoMeshCreator(myNodeId, tieBreakToken, peers)) {
+        // deadline in case the elected creator never shows up. During the post-loss
+        // grace (TASK M1 part 4) BOTH create paths are suppressed: we only join
+        // visible owners, so former clients do not fragment the mesh.
+        val creationGrace = now < creationGraceUntilMs
+        if (!creationGrace && iAmAutoMeshCreator(myNodeId, tieBreakToken, peers)) {
             state = AutoMeshState.Creating
             return listOf(AutoMeshAction.CreateGroup)
         }
         val deadline = takeoverDeadlineMs
         if (deadline == null) {
-            takeoverDeadlineMs = now + AUTO_TAKEOVER_BASE_MS + random.nextInt(AUTO_JITTER_MAX_MS.toInt() + 1)
-        } else if (now >= deadline) {
+            if (!creationGrace) {
+                // Armed only outside the grace window; by the time it fires the
+                // 10 s grace has long expired, so "existing election applies" after.
+                takeoverDeadlineMs = now + AUTO_TAKEOVER_BASE_MS + random.nextInt(AUTO_JITTER_MAX_MS.toInt() + 1)
+            }
+        } else if (now >= deadline && !creationGrace) {
             state = AutoMeshState.Creating
             return listOf(AutoMeshAction.CreateGroup) // takeover: no owner appeared in time
         }
@@ -375,20 +443,33 @@ class AutoMeshController(
             is AutoMeshState.Joining -> if (now - s.sinceMs > AUTO_JOIN_TIMEOUT_MS) {
                 failAttempt("join timed out after ${AUTO_JOIN_TIMEOUT_MS / 1000}s", now)
             } else emptyList()
+            // A merge join that has not formed a group in time is cancelled the same way.
+            is AutoMeshState.Yielding -> if (now - s.sinceMs > AUTO_JOIN_TIMEOUT_MS) {
+                failAttempt("merge join timed out after ${AUTO_JOIN_TIMEOUT_MS / 1000}s", now)
+            } else emptyList()
             // Re-decide with the latest peers: covers peers seen before we started
             // searching and the takeover deadline.
             is AutoMeshState.Searching -> decide(lastPeers, now)
-            else -> emptyList() // Idle / Creating / Owner / Client
+            // An owner re-runs the merge decision each tick (TASK M1 part 4).
+            is AutoMeshState.Owner -> runMergeDecision(now)
+            else -> emptyList() // Idle / Creating / Client
         }
     }
 
-    private fun onGroupFormed(role: AutoMeshRole): List<AutoMeshAction> {
+    private fun onGroupFormed(role: AutoMeshRole, now: Long): List<AutoMeshAction> {
         consecutiveFailures = 0
         busyRetryUsed = false
         takeoverDeadlineMs = null
         // Peer updates are ignored while in a group (rule a), so the stored list
         // would go stale; drop it so a later re-search starts from fresh data.
         lastPeers = emptyList()
+        // A freshly formed group has no clients yet; the service reports growth via
+        // MyClientsChanged (TASK M1 part 4). The merge log context resets too, and a
+        // stale "lost unexpectedly" flag must not arm grace for a later removal.
+        myClients = 0
+        myClientsChangedAtMs = now
+        lastLoggedMergeOutcome = null
+        lostGroupUnexpectedly = false
         state = if (role == AutoMeshRole.OWNER) AutoMeshState.Owner else AutoMeshState.Client
         // Rule (a): in a group we do nothing; stop discovering to save battery —
         // other phones find us through our advertisement, not our discovery. The
@@ -404,10 +485,19 @@ class AutoMeshController(
     private fun onGroupGone(now: Long): List<AutoMeshAction> {
         return when (state) {
             is AutoMeshState.Owner, is AutoMeshState.Client -> {
-                // Rule (f): wait 1–3 s with jitter, then search again.
+                // Rule (f): wait 1–3 s with jitter, then search again. An unexpected
+                // loss also arms the post-loss creation grace (TASK M1 part 4).
+                lostGroupUnexpectedly = true
                 val until = now + AUTO_GROUP_GONE_WAIT_BASE_MS + random.nextInt(AUTO_GROUP_GONE_WAIT_JITTER_MS.toInt() + 1)
                 state = AutoMeshState.Backoff(until, "group gone")
                 listOf(AutoMeshAction.StopDiscovery)
+            }
+            // A plain GroupGone while yielding means the group vanished on its own
+            // (our own removal arrives as IntentionalGroupGone): note it for the
+            // post-loss grace, but keep the join toward the target running.
+            is AutoMeshState.Yielding -> {
+                lostGroupUnexpectedly = true
+                emptyList()
             }
             // Join target vanished (or our own BUSY cleanup ran): re-search without
             // backoff — discovery was still running and peers will tell us the rest.
@@ -450,6 +540,9 @@ class AutoMeshController(
                 listOf(AutoMeshAction.RemoveGroup, AutoMeshAction.ConnectTo(s.targetAddress))
             } else failAttempt("connect failed (${reason.name.lowercase()})", now)
             is AutoMeshState.Creating -> failAttempt("create group failed (${reason.name.lowercase()})", now)
+            // A merge join fails straight to backoff — no BUSY retry mid-merge: the
+            // 120 s yield cooldown keeps us from bouncing between the two groups.
+            is AutoMeshState.Yielding -> failAttempt("merge connect failed (${reason.name.lowercase()})", now)
             // Idle / Searching / Backoff / Owner / Client: stale or manual failure; ignore.
             else -> emptyList()
         }
@@ -464,6 +557,51 @@ class AutoMeshController(
     private fun enterSearching(now: Long) {
         state = AutoMeshState.Searching(now)
         takeoverDeadlineMs = null
+        if (lostGroupUnexpectedly) {
+            // Post-loss grace (TASK M1 part 4): for a short while after an
+            // unexpected loss we only join visible owners and never create.
+            creationGraceUntilMs = now + POST_LOSS_CREATION_GRACE_MS
+            lostGroupUnexpectedly = false
+        }
+    }
+
+    /**
+     * Re-runs the merge decision (TASK M1 part 4). Only an unpaused owner with
+     * merge enabled acts; every outcome change is queued for a single "auto: merge"
+     * log line. On [MergeDecision.Yield] we remove our own group and join the
+     * target — the service marks that removal intentional when it executes it.
+     */
+    private fun runMergeDecision(now: Long): List<AutoMeshAction> {
+        if (state !is AutoMeshState.Owner || !autoEnabled || !mergeEnabled) return emptyList()
+        val other = strongestForeignOwner(lastPeers, myNodeId)?.let {
+            MergeOwnerSighting(it.deviceAddress, it.nodeId, it.tieBreakToken, it.clients, it.lastSeenMs)
+        }
+        val decision = mergeDecider.decide(now, myClients, myClientsChangedAtMs, other)
+        queueMergeLogLine(decision, other, now)
+        return if (decision is MergeDecision.Yield) {
+            state = AutoMeshState.Yielding(
+                targetAddress = decision.targetAddress,
+                targetNodeId = decision.targetNodeId,
+                targetPhones = other?.clients ?: 0,
+                sinceMs = now,
+            )
+            listOf(AutoMeshAction.RemoveGroup, AutoMeshAction.ConnectTo(decision.targetAddress))
+        } else emptyList()
+    }
+
+    /** Queue "merge ..." with all inputs, but only when the outcome changes. */
+    private fun queueMergeLogLine(decision: MergeDecision, other: MergeOwnerSighting?, now: Long) {
+        val outcome = when (decision) {
+            is MergeDecision.Stay -> "stay"
+            is MergeDecision.Wait -> "wait (${decision.reason})"
+            is MergeDecision.Yield -> "yield to #${decision.targetNodeId} at ${decision.targetAddress}"
+        }
+        if (outcome == lastLoggedMergeOutcome) return
+        lastLoggedMergeOutcome = outcome
+        val otherDesc = other?.let { "#${it.nodeId} clients=${it.clients} seen ${now - it.lastSeenMs}ms ago" }
+            ?: "none visible"
+        val changedAt = myClientsChangedAtMs?.let { "changed ${now - it}ms ago" } ?: "never changed"
+        pendingMergeLogLine = "merge me=#$myNodeId clients=$myClients ($changedAt) other=$otherDesc -> $outcome"
     }
 
     private fun enterIdle() {
