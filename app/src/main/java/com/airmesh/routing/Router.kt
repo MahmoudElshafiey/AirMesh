@@ -38,6 +38,8 @@ import com.airmesh.protocol.FrameType
  *   Injectable so the deterministic simulator can supply virtual time.
  * @property log receives one line per dropped duplicate frame; no-op by
  *   default so pure-Kotlin callers (simulator) stay quiet.
+ * @property policy optional per-frame veto hooks (TASK D1 part 2); the
+ *   [FramePolicy.Default] keeps the historical forward-and-store behavior.
  */
 class Router(
     private val localNodeId: Int,
@@ -49,6 +51,8 @@ class Router(
     private val packetStore: PacketStore? = null,
     private val clock: () -> Long = System::currentTimeMillis,
     private val log: (String) -> Unit = {},
+    // Last on purpose: every existing Router(...) call compiles unchanged.
+    private val policy: FramePolicy = FramePolicy.Default,
 ) {
 
     companion object {
@@ -79,8 +83,10 @@ class Router(
      *
      * Order matters:
      * 1. Drop duplicates before doing any work (a flood can arrive many times).
-     * 2. Deliver MSG/LOCATION to the local app; ACK/HELLO are protocol traffic.
-     * 3. If TTL allows another hop, forward a copy with `ttl - 1` to every
+     * 2. Deliver user content (MSG/LOCATION/PROFILE/DIRECT/DIRECT_ACK) to the
+     *    local app; ACK and HELLO are protocol traffic.
+     * 3. A [FramePolicy] veto stops here: no forwarding, no queueing.
+     * 4. If TTL allows another hop, forward a copy with `ttl - 1` to every
      *    neighbor except the one it came from. `ttl <= 1` stops here.
      *
      * The delivered frame keeps its original TTL; only the forwarded copy is
@@ -94,10 +100,19 @@ class Router(
         }
 
         // PROFILE is user content like MSG/LOCATION: deliver it locally. ACK and
-        // HELLO are protocol traffic and are never delivered to the app.
-        if (frame.type == FrameType.MSG || frame.type == FrameType.LOCATION || frame.type == FrameType.PROFILE) {
+        // HELLO are protocol traffic and are never delivered to the app. DIRECT
+        // and DIRECT_ACK also deliver here; the node decides whether they are
+        // addressed to it (TASK D1 part 2).
+        if (frame.type == FrameType.MSG || frame.type == FrameType.LOCATION ||
+            frame.type == FrameType.PROFILE || frame.type == FrameType.DIRECT ||
+            frame.type == FrameType.DIRECT_ACK
+        ) {
             deliver(frame)
         }
+
+        // Policy veto: this frame stays local only — not forwarded and not
+        // queued (TASK D1 part 2).
+        if (!policy.shouldForward(frame)) return
 
         // TTL counts remaining hops. At 1 (or an invalid 0) this node is the
         // last hop, so the frame is consumed locally.
@@ -118,7 +133,8 @@ class Router(
 
         // A hop-1 copy cannot be forwarded by anyone, so it is not worth
         // storing. The source already has the frame and is marked delivered.
-        if (forwarded.ttl > 1 && (targets.isEmpty() || failed)) {
+        // A policy veto drops the store instead (TASK D1 part 2).
+        if (forwarded.ttl > 1 && (targets.isEmpty() || failed) && policy.shouldStore(frame)) {
             packetStore?.save(forwarded, deliveredTo + fromNeighbor, clock())
         }
     }
@@ -148,6 +164,10 @@ class Router(
         // Our own frames must not be delivered again when they loop back.
         dedup.seen(localNodeId, seq)
 
+        // Policy veto: a frame the policy refuses to forward is neither
+        // flooded nor queued (TASK D1 part 2). The caller still gets it back.
+        if (!policy.shouldForward(frame)) return frame
+
         var failed = false
         val deliveredTo = mutableSetOf<Int>()
         val targets = neighbors()
@@ -159,7 +179,7 @@ class Router(
             }
         }
 
-        if (frame.ttl > 1 && (targets.isEmpty() || failed)) {
+        if (frame.ttl > 1 && (targets.isEmpty() || failed) && policy.shouldStore(frame)) {
             packetStore?.save(frame, deliveredTo, clock())
         }
         return frame
