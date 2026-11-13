@@ -13,6 +13,8 @@ data class AirMeshAdvert(
     val version: Int,
     val tieBreak: Long,
     val owner: Boolean,
+    /** Live client count a group owner advertises (0..99); 0 for clients / unknown. */
+    val clients: Int = 0,
 )
 
 // ---- suffix table (ordered longest-first so the first match wins) --------
@@ -25,10 +27,10 @@ private val KNOWN_SUFFIXES = listOf(
 )
 
 // ---- core regex on the bare token (case-insensitive) ---------------------
-// airmesh-n<nodeId>-v<version>-t<1..8 hex>-o<0|1>
+// airmesh-n<nodeId>-v<version>-t<1..8 hex>-o<0|1>(-c<count>)?
 
 private val INSTANCE_RE = Regex(
-    """airmesh-n(\d{1,5})-v(\d+)-t([0-9a-f]{1,8})-o([01])""",
+    """airmesh-n(\d{1,5})-v(\d+)-t([0-9a-f]{1,8})-o([01])(?:-c(\d+))?""",
     RegexOption.IGNORE_CASE,
 )
 
@@ -50,6 +52,9 @@ private const val SERVICE_PREFIX = "_airmesh._tcp."
  * airmesh-n52647-v2-t7e1b99fe-o0._airmesh._tcp.local.
  * _airmesh._tcp.airmesh-n52647-v2-t7e1b99fe-o0.local.
  * ```
+ * An owner may append `-c<count>` (0..99) before the DNS suffix, e.g.
+ * `airmesh-n52647-v2-t7e1b99fe-o1-c3.local.`; a missing or out-of-range count
+ * parses as 0 / clamps to 99 respectively.
  *
  * Returns `null` for null, empty, missing parts, nodeId outside 1..65535,
  * owner flag other than 0 or 1, or extra garbage anywhere in the token.
@@ -86,19 +91,54 @@ fun parseAirMeshInstance(raw: String?): AirMeshAdvert? {
 
     val ownerFlag = m.groupValues[4] == "1"
 
-    return AirMeshAdvert(nodeId, version, tieBreak, ownerFlag)
+    // Optional -c<count> suffix: absent means 0 (old format / a client). A count
+    // above the 2-digit field is clamped to 99 rather than rejected, so a newer
+    // device advertising a big group still parses on this one.
+    val rawClients = m.groupValues[5]
+    val clients = if (rawClients.isEmpty()) {
+        0
+    } else {
+        val v = rawClients.toLongOrNull()
+        if (v == null) 99 else v.coerceIn(0, 99).toInt()
+    }
+
+    return AirMeshAdvert(nodeId, version, tieBreak, ownerFlag, clients)
 }
 
 /**
  * Builds the canonical bare instance name from an [AirMeshAdvert].
  * The tie-break hex is zero-padded to 8 digits to match the format
- * real devices produce.
+ * real devices produce. A non-zero client count appends `-c<count>` (clamped
+ * to two digits); a count of 0 emits no suffix, so old-format names stay
+ * byte-identical for clients and empty groups.
  *
- * Invariant: `parseAirMeshInstance(buildAirMeshInstance(x)) == x`.
+ * Invariant: `parseAirMeshInstance(buildAirMeshInstance(x)) == x` for counts
+ * in 0..99; counts above 99 round-trip as 99 (the field is two digits wide).
  */
 fun buildAirMeshInstance(advert: AirMeshAdvert): String {
     require(advert.nodeId in 1..0xFFFF) { "nodeId out of range" }
     require(advert.tieBreak in 0..0xFFFFFFFFL) { "tieBreak out of range" }
     val hex = advert.tieBreak.toString(16).padStart(8, '0')
-    return "airmesh-n${advert.nodeId}-v${advert.version}-t$hex-o${if (advert.owner) 1 else 0}"
+    val base = "airmesh-n${advert.nodeId}-v${advert.version}-t$hex-o${if (advert.owner) 1 else 0}"
+    return if (advert.clients > 0) "$base-c${advert.clients.coerceIn(0, 99)}" else base
 }
+
+// ---- re-registration gate --------------------------------------------------
+
+/** Minimum spacing between two client-count re-registrations of the local service. */
+const val ADVERT_REREGISTER_MIN_INTERVAL_MS = 10_000L
+
+/**
+ * Pure gate for re-registering the owner's DNS-SD service after its live client
+ * count changed: only a real change (newCount != lastCount) counts, and at most
+ * one re-registration per [minIntervalMs]. `lastAtMs == 0` means "never
+ * registered with a count yet", so the first real change always passes.
+ */
+fun shouldReRegisterAdvert(
+    lastCount: Int,
+    lastAtMs: Long,
+    newCount: Int,
+    nowMs: Long,
+    minIntervalMs: Long = ADVERT_REREGISTER_MIN_INTERVAL_MS,
+): Boolean =
+    newCount != lastCount && (lastAtMs == 0L || nowMs - lastAtMs >= minIntervalMs)

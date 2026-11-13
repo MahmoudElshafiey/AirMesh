@@ -55,6 +55,10 @@ class WifiP2pPeerDirectory(
     private var advertisedOwnerFlag: Boolean? = null
     /** The service info we registered, so removeLocalService can match it. */
     private var serviceInfo: WifiP2pDnsSdServiceInfo? = null
+    /** Client count in the instance name currently registered (0 for a fresh ad). */
+    private var advertisedClients = 0
+    /** When the last client-count re-registration happened; 0 = never. */
+    private var lastClientReRegisterAtMs = 0L
     /** The request registered most recently; strategy 2 swaps in an unfiltered one. */
     private var serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
 
@@ -160,9 +164,24 @@ class WifiP2pPeerDirectory(
         if (advertisedOwnerFlag == isGroupOwner && serviceInfo != null) return // already advertising this role
         removeLocalServiceQuietly(ch)
 
+        // A fresh registration always advertises 0 clients; updateClientCount
+        // re-registers with the live count afterwards, so an owner's group size
+        // shows up in its instance name without touching the role switch.
+        advertisedClients = 0
+        lastClientReRegisterAtMs = 0L
+        registerLocalService(isGroupOwner, 0)
+        ensureLoop()
+    }
+
+    /** (Re)register our DNS-SD service for [isGroupOwner] advertising [clients]. */
+    private fun registerLocalService(isGroupOwner: Boolean, clients: Int) {
+        val ch = channel ?: return log("dnssd: cannot advertise — no P2P channel")
         // No own MAC needed: the ad carries node id + token, and peers are addressed
-        // by the source device of the DNS-SD callback.
-        val token = AirMeshAdCodec.encode(myNodeId, tieBreakToken, isGroupOwner)
+        // by the source device of the DNS-SD callback. The instance name doubles as
+        // the TXT record value; clients=0 emits the old suffix-less format.
+        val token = buildAirMeshInstance(
+            AirMeshAdvert(myNodeId, AirMeshAdCodec.PROTOCOL_VERSION, tieBreakToken.toUInt().toLong(), isGroupOwner, clients),
+        )
         log("dnssd: addLocalService instance='$token' txt={${TXT_AD_KEY}=$token}")
         val info = WifiP2pDnsSdServiceInfo.newInstance(
             AirMeshAdCodec.SERVICE_TYPE,
@@ -173,7 +192,7 @@ class WifiP2pPeerDirectory(
         serviceInfo = info
         manager?.addLocalService(ch, info, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                log("dnssd: addLocalService ok (owner=$isGroupOwner)")
+                log("dnssd: addLocalService ok (owner=$isGroupOwner clients=$clients)")
             }
 
             override fun onFailure(reason: Int) {
@@ -182,7 +201,21 @@ class WifiP2pPeerDirectory(
                 log("dnssd: addLocalService failed reason=$reason")
             }
         })
-        ensureLoop()
+    }
+
+    /**
+     * Re-advertise our instance name with the new live client count. Only an owner
+     * with a live registration acts (clients never carry a count), and at most one
+     * re-registration per [ADVERT_REREGISTER_MIN_INTERVAL_MS] for real changes only.
+     */
+    override fun updateClientCount(clients: Int) {
+        if (advertisedOwnerFlag != true || serviceInfo == null) return
+        val nowMs = System.currentTimeMillis()
+        if (!shouldReRegisterAdvert(advertisedClients, lastClientReRegisterAtMs, clients, nowMs)) return
+        advertisedClients = clients.coerceIn(0, 99)
+        lastClientReRegisterAtMs = nowMs
+        channel?.let { ch -> removeLocalServiceQuietly(ch) } ?: log("dnssd: cannot re-register — no P2P channel")
+        registerLocalService(true, advertisedClients)
     }
 
     override fun setDiscovering(enabled: Boolean) {
@@ -359,15 +392,16 @@ class WifiP2pPeerDirectory(
      * Mirror the ingest table into [peers], applying peer expiry exactly as before
      * (same [shouldExpirePeer] predicate on the last callback time). Emission and
      * the accepted log happen only when the set of
-     * (address, nodeId, tieBreak, owner) really changes, so repeated identical
-     * adverts just refresh lastSeen inside [PeerIngest].
+     * (address, nodeId, tieBreak, owner, clients) really changes — lastSeenMs is
+     * excluded from that comparison so repeated identical adverts just refresh
+     * lastSeen inside [PeerIngest] without re-publishing.
      */
     private fun publishPeers(nowMs: Long) {
         val live = ingest.peers.values
             .filterNot { shouldExpirePeer(it.lastSeenMs, nowMs) }
-            .map { AirMeshPeer(it.deviceAddress, it.nodeId, it.owner, it.tieBreak.toInt()) }
+            .map { AirMeshPeer(it.deviceAddress, it.nodeId, it.owner, it.tieBreak.toInt(), it.clients, it.lastSeenMs) }
             .sortedBy { it.nodeId }
-        if (live.toSet() == publishedPeers.toSet()) return
+        if (live.map(::peerChangeKey).toSet() == publishedPeers.map(::peerChangeKey).toSet()) return
         val previous = publishedPeers.associateBy { it.deviceAddress }
         publishedPeers = live
         _peers.value = live
@@ -415,6 +449,8 @@ class WifiP2pPeerDirectory(
         channel = null
         advertisedOwnerFlag = null
         serviceInfo = null
+        advertisedClients = 0
+        lastClientReRegisterAtMs = 0L
         publishedPeers = emptyList()
         _peers.value = emptyList()
         loopJob?.cancel()
@@ -426,6 +462,10 @@ class WifiP2pPeerDirectory(
         try { manager?.removeLocalService(ch, info, null) } catch (_: Exception) {}
         serviceInfo = null
     }
+
+    /** Identity for change detection; lastSeenMs is deliberately excluded. */
+    private fun peerChangeKey(p: AirMeshPeer): Any =
+        p.deviceAddress to p.nodeId to p.isGroupOwner to p.tieBreakToken to p.clients
 
     companion object {
         /** The single TXT record key carrying the full ad token. */

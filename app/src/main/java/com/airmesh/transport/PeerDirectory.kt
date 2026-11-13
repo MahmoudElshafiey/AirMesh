@@ -9,6 +9,10 @@ data class AirMeshPeer(
     val isGroupOwner: Boolean,
     /** The peer's random 32-bit election token; breaks node-id ties symmetrically. */
     val tieBreakToken: Int,
+    /** Client count the peer advertises (0 for clients / old format). */
+    val clients: Int = 0,
+    /** When this peer was last seen in a DNS-SD callback (millis). */
+    val lastSeenMs: Long = 0L,
 )
 
 /**
@@ -26,6 +30,12 @@ interface PeerDirectory {
 
     /** Start/stop the periodic service request (Android stops discovery after ~2 min). */
     fun setDiscovering(enabled: Boolean)
+
+    /**
+     * Update the client count we advertise in our own instance name. Only an
+     * owner with a live group acts on it; no-op for clients and fakes.
+     */
+    fun updateClientCount(clients: Int) {}
 
     /** Terminal: unregister our ad, stop discovering, clear peers and release the P2P channel. */
     fun stop()

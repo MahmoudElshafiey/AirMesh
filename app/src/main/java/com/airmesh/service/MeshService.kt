@@ -258,6 +258,9 @@ class MeshService : Service() {
                 if (neighbors.isNotEmpty()) {
                     timelineRecorder.onNeighborUp()?.let { line -> _eventLog.log(line) }
                 }
+                // Owners re-advertise their live group size in the instance name;
+                // updateClientCount is a no-op unless we are an owner with a live ad.
+                peerDirectory.updateClientCount(neighbors.size)
                 if (runningThrottle.shouldPost(System.currentTimeMillis())) {
                     notificationManager.notify(RUNNING_NOTIFICATION_ID, buildRunningNotification(neighbors.size))
                 }

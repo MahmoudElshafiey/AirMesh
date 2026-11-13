@@ -36,6 +36,8 @@ class PeerIngest(
         val tieBreak: Long,
         val owner: Boolean,
         val lastSeenMs: Long,
+        /** Client count the peer advertises (0 for clients / old format). */
+        val clients: Int = 0,
     )
 
     /** Currently tracked peers, keyed by device address. */
@@ -144,6 +146,7 @@ class PeerIngest(
             tieBreak = ad.tieBreak,
             owner = ad.owner,
             lastSeenMs = nowMs,
+            clients = ad.clients,
         )
         if (acceptedAddresses.add(address)) {
             stats.onAccepted()

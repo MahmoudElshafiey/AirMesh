@@ -299,4 +299,54 @@ class PeerIngestTest {
         )
         assertTrue(pi.peers.isEmpty())
     }
+
+    // ---- client count carried through ---------------------------------------
+
+    @Test
+    fun `owner advert with c3 carries clients into the peer`() {
+        val pi = ingest()
+        pi.onServiceAvailable(
+            instanceName = "airmesh-n13230-v2-t3a559a93-o1-c3.local.",
+            serviceType = "_airmesh._tcp",
+            srcAddress = "aa:bb:cc:dd:ee:01",
+            nowMs = 1000L,
+        )
+        val peer = pi.peers["aa:bb:cc:dd:ee:01"]!!
+        assertTrue(peer.owner)
+        assertEquals(3, peer.clients)
+    }
+
+    @Test
+    fun `old format advert carries zero clients`() {
+        val pi = ingest()
+        pi.onServiceAvailable(
+            instanceName = "airmesh-n52647-v2-t7e1b99fe-o0.local.",
+            serviceType = "_airmesh._tcp",
+            srcAddress = "a6:a4:90:f2:cd:da",
+            nowMs = 1000L,
+        )
+        assertEquals(0, pi.peers["a6:a4:90:f2:cd:da"]!!.clients)
+    }
+
+    @Test
+    fun `later advert with a new count updates the peer`() {
+        val pi = ingest()
+        pi.onServiceAvailable(
+            instanceName = "airmesh-n13230-v2-t3a559a93-o1-c3.local.",
+            serviceType = "_airmesh._tcp",
+            srcAddress = "aa:bb:cc:dd:ee:01",
+            nowMs = 1000L,
+        )
+        assertEquals(3, pi.peers["aa:bb:cc:dd:ee:01"]!!.clients)
+
+        // The owner re-advertised with one more client.
+        pi.onServiceAvailable(
+            instanceName = "airmesh-n13230-v2-t3a559a93-o1-c4.local.",
+            serviceType = "_airmesh._tcp",
+            srcAddress = "aa:bb:cc:dd:ee:01",
+            nowMs = 60_000L,
+        )
+        assertEquals(4, pi.peers["aa:bb:cc:dd:ee:01"]!!.clients)
+        assertEquals(60_000L, pi.peers["aa:bb:cc:dd:ee:01"]!!.lastSeenMs)
+    }
 }

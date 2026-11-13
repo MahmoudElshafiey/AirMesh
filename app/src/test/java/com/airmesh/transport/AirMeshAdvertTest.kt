@@ -226,4 +226,120 @@ class AirMeshAdvertTest {
         val ad = parseAirMeshInstance("airmesh-n1-v2-t1234567-o0")!!
         assertEquals(0x1234567L, ad.tieBreak)
     }
+
+    // ---- client count suffix (-c<count>) ------------------------------------
+
+    @Test
+    fun `parse owner with c3 and local dot`() {
+        val ad = parseAirMeshInstance("airmesh-n13230-v2-t3a559a93-o1-c3.local.")!!
+        assertTrue(ad.owner)
+        assertEquals(13230, ad.nodeId)
+        assertEquals(3, ad.clients)
+    }
+
+    @Test
+    fun `parse old format without suffix has zero clients`() {
+        val ad = parseAirMeshInstance("airmesh-n52647-v2-t7e1b99fe-o0.local.")!!
+        assertEquals(0, ad.clients)
+        val owner = parseAirMeshInstance("airmesh-n52647-v2-t7e1b99fe-o1")!!
+        assertEquals(0, owner.clients)
+    }
+
+    @Test
+    fun `parse c0 is zero clients`() {
+        val ad = parseAirMeshInstance("airmesh-n7-v2-t00000001-o1-c0.local.")!!
+        assertTrue(ad.owner)
+        assertEquals(0, ad.clients)
+    }
+
+    @Test
+    fun `parse c99 is ninety-nine clients`() {
+        val ad = parseAirMeshInstance("airmesh-n7-v2-t00000001-o1-c99")!!
+        assertEquals(99, ad.clients)
+    }
+
+    @Test
+    fun `parse c100 clamps to 99`() {
+        val ad = parseAirMeshInstance("airmesh-n7-v2-t00000001-o1-c100.local.")!!
+        assertEquals(99, ad.clients)
+    }
+
+    @Test
+    fun `parse huge count clamps to 99`() {
+        val ad = parseAirMeshInstance("airmesh-n7-v2-t00000001-o1-c99999999999999999999")!!
+        assertEquals(99, ad.clients)
+    }
+
+    @Test
+    fun `parse client count garbage rejected`() {
+        assertNull(parseAirMeshInstance("airmesh-n7-v2-t00000001-o1-c"))          // no digits
+        assertNull(parseAirMeshInstance("airmesh-n7-v2-t00000001-o1-cx"))         // non-digit
+        assertNull(parseAirMeshInstance("airmesh-n7-v2-t00000001-o1-c3-extra"))   // trailing garbage
+        assertNull(parseAirMeshInstance("airmesh-n7-v2-t00000001-c3-o1"))         // count before owner flag
+    }
+
+    @Test
+    fun `build emits no suffix for zero clients`() {
+        val ad = AirMeshAdvert(42, 2, 0x1234L, true, 0)
+        assertEquals("airmesh-n42-v2-t00001234-o1", buildAirMeshInstance(ad))
+    }
+
+    @Test
+    fun `build emits c suffix for positive clients`() {
+        val ad = AirMeshAdvert(13230, 2, 0x3a559a93L, true, 3)
+        assertEquals("airmesh-n13230-v2-t3a559a93-o1-c3", buildAirMeshInstance(ad))
+    }
+
+    @Test
+    fun `build clamps count above 99 to two digits`() {
+        val ad = AirMeshAdvert(42, 2, 0x1234L, true, 150)
+        assertEquals("airmesh-n42-v2-t00001234-o1-c99", buildAirMeshInstance(ad))
+    }
+
+    @Test
+    fun `round-trip with client counts`() {
+        val cases = listOf(
+            AirMeshAdvert(1, 2, 0L, true, 0),
+            AirMeshAdvert(65535, 2, 0xffffffffL, true, 99),
+            AirMeshAdvert(52647, 2, 0x7e1b99feL, false, 0),
+            AirMeshAdvert(100, 3, 0xaL, true, 1),
+        )
+        for (ad in cases) {
+            assertEquals(ad, parseAirMeshInstance(buildAirMeshInstance(ad)))
+        }
+    }
+
+    @Test
+    fun `round-trip of count above 99 clamps to 99`() {
+        val ad = AirMeshAdvert(42, 2, 0x1234L, true, 150)
+        assertEquals(AirMeshAdvert(42, 2, 0x1234L, true, 99), parseAirMeshInstance(buildAirMeshInstance(ad)))
+    }
+
+    // ---- re-registration gate -------------------------------------------------
+
+    @Test
+    fun `re-register passes on first real change`() {
+        assertTrue(shouldReRegisterAdvert(lastCount = 0, lastAtMs = 0L, newCount = 3, nowMs = 1_000L))
+    }
+
+    @Test
+    fun `re-register blocked when count unchanged`() {
+        assertFalse(shouldReRegisterAdvert(lastCount = 3, lastAtMs = 1_000L, newCount = 3, nowMs = 60_000L))
+    }
+
+    @Test
+    fun `re-register blocked inside the ten second interval`() {
+        assertFalse(shouldReRegisterAdvert(lastCount = 3, lastAtMs = 1_000L, newCount = 4, nowMs = 10_999L))
+    }
+
+    @Test
+    fun `re-register passes once the ten second interval elapsed`() {
+        assertTrue(shouldReRegisterAdvert(lastCount = 3, lastAtMs = 1_000L, newCount = 4, nowMs = 11_000L))
+    }
+
+    @Test
+    fun `re-register honors a custom interval`() {
+        assertFalse(shouldReRegisterAdvert(lastCount = 3, lastAtMs = 1_000L, newCount = 4, nowMs = 5_999L, minIntervalMs = 6_000L))
+        assertTrue(shouldReRegisterAdvert(lastCount = 3, lastAtMs = 1_000L, newCount = 4, nowMs = 7_000L, minIntervalMs = 6_000L))
+    }
 }
