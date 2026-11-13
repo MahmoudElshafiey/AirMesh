@@ -10,7 +10,10 @@ enum class FrameType(val wireValue: Int) {
     ACK(2),
     HELLO(3),
     // 5, not 4: value 4 is asserted as "unknown" by existing codec tests.
-    PROFILE(5);
+    PROFILE(5),
+    // Direct (one-to-one) messages and their delivery receipts (TASK D1).
+    DIRECT(6),
+    DIRECT_ACK(7);
 
     companion object {
         /** Returns the type for a 4-bit wire value, or null if it is unknown. */
