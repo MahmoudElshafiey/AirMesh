@@ -5,6 +5,8 @@ import com.airmesh.profile.NameSanitizer
 import com.airmesh.profile.ProfileDirectory
 import com.airmesh.profile.ProfileInfo
 import com.airmesh.profile.ProfileStorage
+import com.airmesh.protocol.DirectAckPayload
+import com.airmesh.protocol.DirectPayload
 import com.airmesh.protocol.Frame
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.FrameType
@@ -13,6 +15,7 @@ import com.airmesh.protocol.LocationPayload
 import com.airmesh.protocol.ProfileDecodeException
 import com.airmesh.protocol.ProfilePayload
 import com.airmesh.routing.DedupCache
+import com.airmesh.routing.FramePolicy
 import com.airmesh.routing.ReplayTrigger
 import com.airmesh.routing.Router
 import com.airmesh.routing.StoreAndForward
@@ -91,6 +94,32 @@ data class MyProfile(
     val colorIndex: Int,
 )
 
+/** Result of [AirMeshNode.sendDirect] (TASK D1 part 3). */
+data class DirectSendResult(
+    /** Seq of the originated DIRECT frame; later receipts carry it back. */
+    val seq: Int,
+    /** True when at least one neighbor accepted the write now; false = queued for replay. */
+    val handed: Boolean,
+)
+
+/** One direct (one-to-one) message received by this node (TASK D1 part 3). */
+data class DirectMessage(
+    val fromNodeId: Int,
+    val text: String,
+    /** Frame seq of the DIRECT that carried it; links to [DeliveryReceipt.ackedSeq]. */
+    val seq: Int,
+    val receivedAt: Long,
+)
+
+/** One delivery receipt for a direct message this node sent (TASK D1 part 3). */
+data class DeliveryReceipt(
+    /** Node that acknowledged — the DM's recipient. */
+    val fromNodeId: Int,
+    /** Seq of the DIRECT frame being acknowledged. */
+    val ackedSeq: Int,
+    val receivedAt: Long,
+)
+
 /**
  * The protocol engine behind the UI, with no Android or Compose imports.
  *
@@ -144,6 +173,9 @@ class AirMeshNode(
         const val PROFILE_COLOR_KEY = "profile_color"
 
         private const val CORRUPT_POLL_MS = 500L
+
+        /** How many (origin, seq) pairs we remember for exactly-one-ack dedup. */
+        private const val MAX_ACKED_DIRECTS = 256
     }
 
     init {
@@ -160,6 +192,14 @@ class AirMeshNode(
     /** Delivered (and locally sent) locations, separate from [messages]. */
     private val _locations = MutableStateFlow<List<MeshLocation>>(emptyList())
     val locations: StateFlow<List<MeshLocation>> = _locations.asStateFlow()
+
+    /** Direct messages addressed to this node; frames for others are relayed only. */
+    private val _directMessages = MutableStateFlow<List<DirectMessage>>(emptyList())
+    val directMessages: StateFlow<List<DirectMessage>> = _directMessages.asStateFlow()
+
+    /** Delivery receipts for our own direct messages, newest last. */
+    private val _deliveryReceipts = MutableStateFlow<List<DeliveryReceipt>>(emptyList())
+    val deliveryReceipts: StateFlow<List<DeliveryReceipt>> = _deliveryReceipts.asStateFlow()
 
     /** This node's own display profile; loaded from storage at construction. */
     private val _myProfile = MutableStateFlow(
@@ -209,6 +249,47 @@ class AirMeshNode(
     }
     private val outgoingLock = Any()
 
+    /**
+     * (origin, seq) pairs of DIRECT frames we already acknowledged; a duplicate
+     * delivery must not produce a second receipt. Bounded LRU like the message
+     * lists. Touched only by the incoming collector thread that calls
+     * [deliverDirect], so no lock is needed (same confinement as
+     * [previousNeighbors]).
+     */
+    private val ackedDirects = object : LinkedHashMap<Pair<Int, Int>, Unit>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Int, Int>, Unit>?) =
+            size > MAX_ACKED_DIRECTS
+    }
+
+    /**
+     * Seq of my own DIRECT frames that at least one neighbor accepted on the
+     * first flood; read by [sendDirect] to report `handed`. Written from any
+     * dispatcher thread via [sendFrame], so guarded by [outgoingLock].
+     */
+    private val directHandoffs = object : LinkedHashMap<Int, Unit>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Unit>?) =
+            size > MAX_MESSAGES
+    }
+
+    /**
+     * Node policy for DIRECT traffic (TASK D1 part 3): a frame addressed to me
+     * stops here — not forwarded and not queued. Frames for other nodes keep the
+     * historical flood-and-store behavior so they can reach their recipient even
+     * when it is offline; a malformed payload decodes to null and therefore
+     * relays as "not mine", which is the safe default.
+     */
+    private val directFramePolicy = object : FramePolicy {
+        override fun shouldForward(frame: Frame): Boolean = !isDirectTrafficForMe(frame)
+        override fun shouldStore(frame: Frame): Boolean = !isDirectTrafficForMe(frame)
+    }
+
+    /** True when [frame] is DIRECT/DIRECT_ACK traffic addressed to this node. */
+    private fun isDirectTrafficForMe(frame: Frame): Boolean = when (frame.type) {
+        FrameType.DIRECT -> DirectPayload.decode(frame.payload).getOrNull()?.destNodeId == localNodeId
+        FrameType.DIRECT_ACK -> DirectAckPayload.decode(frame.payload).getOrNull()?.ackedNodeId == localNodeId
+        else -> false
+    }
+
     init {
         storeAndForward = storeFactory { neighborId, frame ->
             sendFrame(neighborId, frame)
@@ -224,6 +305,7 @@ class AirMeshNode(
             packetStore = storeAndForward,
             clock = clock,
             log = eventLog::log,
+            policy = directFramePolicy,
         )
     }
 
@@ -278,13 +360,22 @@ class AirMeshNode(
      * @return false when the UTF-8 payload exceeds [FrameCodec.MAX_PAYLOAD],
      *   so the UI can show a validation error instead of crashing.
      */
-    suspend fun sendText(text: String): Boolean = withContext(dispatcher) {
+    suspend fun sendText(text: String): Boolean = sendTextCore(text) != null
+
+    /**
+     * Like [sendText] but returns the seq of the originated frame so callers can
+     * correlate it with later delivery status. Returns -1 when nothing was sent.
+     */
+    suspend fun sendTextWithSeq(text: String): Int = sendTextCore(text) ?: -1
+
+    /** Shared body of [sendText]/[sendTextWithSeq]; null means rejected or failed. */
+    private suspend fun sendTextCore(text: String): Int? = withContext(dispatcher) {
         val payload = text.toByteArray(Charsets.UTF_8)
         if (payload.size > FrameCodec.MAX_PAYLOAD) {
             eventLog.log(
                 "send rejected: ${payload.size} UTF-8 bytes exceed ${FrameCodec.MAX_PAYLOAD}",
             )
-            false
+            null
         } else {
             try {
                 val frame = router.originate(FrameType.MSG, payload)
@@ -304,10 +395,10 @@ class AirMeshNode(
                     )
                 }
                 eventLog.log("originated MSG seq=${frame.seq} ttl=${frame.ttl} (${payload.size} bytes)")
-                true
+                frame.seq
             } catch (error: Exception) {
                 eventLog.log("send failed: ${error.javaClass.simpleName}: ${error.message}")
-                false
+                null
             }
         }
     }
@@ -387,27 +478,85 @@ class AirMeshNode(
      * differs. Runs on the background dispatcher like [sendText].
      */
     suspend fun sendLocation(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Boolean =
-        withContext(dispatcher) {
-            try {
-                val payload = LocationPayload(latitudeE6, longitudeE6, accuracyMeters).encode()
-                val frame = router.originate(FrameType.LOCATION, payload)
-                appendLocation(
-                    MeshLocation(
-                        senderId = localNodeId,
-                        latitudeE6 = latitudeE6,
-                        longitudeE6 = longitudeE6,
-                        accuracyMeters = accuracyMeters,
-                        timestamp = clock(),
-                        ttl = frame.ttl,
-                    ),
-                )
-                eventLog.log("originated LOCATION seq=${frame.seq} ttl=${frame.ttl} (${payload.size} bytes)")
-                true
-            } catch (error: Exception) {
-                eventLog.log("send failed: ${error.javaClass.simpleName}: ${error.message}")
-                false
-            }
+        sendLocationCore(latitudeE6, longitudeE6, accuracyMeters) != null
+
+    /** Like [sendLocation] but returns the seq of the originated frame; -1 when nothing was sent. */
+    suspend fun sendLocationWithSeq(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Int =
+        sendLocationCore(latitudeE6, longitudeE6, accuracyMeters) ?: -1
+
+    /** Shared body of [sendLocation]/[sendLocationWithSeq]; null means failed. */
+    private suspend fun sendLocationCore(
+        latitudeE6: Int,
+        longitudeE6: Int,
+        accuracyMeters: Int,
+    ): Int? = withContext(dispatcher) {
+        try {
+            val payload = LocationPayload(latitudeE6, longitudeE6, accuracyMeters).encode()
+            val frame = router.originate(FrameType.LOCATION, payload)
+            appendLocation(
+                MeshLocation(
+                    senderId = localNodeId,
+                    latitudeE6 = latitudeE6,
+                    longitudeE6 = longitudeE6,
+                    accuracyMeters = accuracyMeters,
+                    timestamp = clock(),
+                    ttl = frame.ttl,
+                ),
+            )
+            eventLog.log("originated LOCATION seq=${frame.seq} ttl=${frame.ttl} (${payload.size} bytes)")
+            frame.seq
+        } catch (error: Exception) {
+            eventLog.log("send failed: ${error.javaClass.simpleName}: ${error.message}")
+            null
         }
+    }
+
+    /**
+     * Sends a direct (one-to-one) message to [destNodeId] as one DIRECT frame.
+     * The frame floods like any other, but every node that is not the recipient
+     * relays it without showing or storing it; only the recipient surfaces it in
+     * [directMessages] and answers with exactly one DIRECT_ACK (TASK D1 part 3).
+     *
+     * @return null when the send was rejected (self-send, out-of-range id, empty
+     *   or oversized text) or failed. Otherwise the seq of the originated frame
+     *   and whether at least one neighbor accepted the write now; `handed == false`
+     *   means the frame is queued for store-and-forward replay until a path to
+     *   [destNodeId] appears.
+     */
+    suspend fun sendDirect(destNodeId: Int, text: String): DirectSendResult? = withContext(dispatcher) {
+        if (destNodeId == localNodeId) {
+            eventLog.log("direct send rejected: self-send")
+            return@withContext null
+        }
+        if (destNodeId !in 1..0xFFFF) {
+            eventLog.log("direct send rejected: destination $destNodeId out of range")
+            return@withContext null
+        }
+        val textBytes = text.toByteArray(Charsets.UTF_8)
+        if (textBytes.isEmpty()) {
+            eventLog.log("direct send rejected: empty text")
+            return@withContext null
+        }
+        if (textBytes.size > DirectPayload.MAX_TEXT_BYTES) {
+            eventLog.log(
+                "direct send rejected: ${textBytes.size} UTF-8 bytes exceed ${DirectPayload.MAX_TEXT_BYTES}",
+            )
+            return@withContext null
+        }
+
+        try {
+            val payload = DirectPayload(destNodeId, text).encode()
+            val frame = router.originate(FrameType.DIRECT, payload)
+            // The first flood ran inside originate; successful writes were
+            // recorded in directHandoffs by sendFrame before we got here.
+            val handed = synchronized(outgoingLock) { directHandoffs.containsKey(frame.seq) }
+            eventLog.log("direct: sent to #$destNodeId seq=${frame.seq} ${if (handed) "handed" else "queued"}")
+            DirectSendResult(seq = frame.seq, handed = handed)
+        } catch (error: Exception) {
+            eventLog.log("direct send failed: ${error.javaClass.simpleName}: ${error.message}")
+            null
+        }
+    }
 
     private suspend fun onIncoming(packet: ReceivedPacket) {
         val frame = FrameCodec.decode(packet.bytes).getOrNull()
@@ -427,6 +576,8 @@ class AirMeshNode(
             FrameType.MSG -> deliverText(frame)
             FrameType.LOCATION -> deliverLocation(frame)
             FrameType.PROFILE -> deliverProfile(frame)
+            FrameType.DIRECT -> deliverDirect(frame)
+            FrameType.DIRECT_ACK -> deliverDirectAck(frame)
             // ACK/HELLO frames are protocol traffic, not user content.
             else -> Unit
         }
@@ -505,6 +656,54 @@ class AirMeshNode(
                 eventLog.log("PROFILE from ${frame.nodeId} dropped: $reason")
             },
         )
+    }
+
+    /**
+     * Delivers a DIRECT frame addressed to this node and answers it with exactly
+     * one DIRECT_ACK per (origin, seq) pair. Frames for other nodes are relayed
+     * by the router but never surfaced here; malformed payloads are logged and
+     * dropped so one bad frame cannot crash the node (TASK D1 part 3).
+     */
+    private fun deliverDirect(frame: Frame) {
+        val payload = DirectPayload.decode(frame.payload).getOrNull() ?: run {
+            eventLog.log("DIRECT from ${frame.nodeId} dropped: malformed payload")
+            return
+        }
+        if (payload.destNodeId != localNodeId) return // for someone else: relayed, never shown
+
+        appendDirectMessage(DirectMessage(frame.nodeId, payload.text, frame.seq, clock()))
+        eventLog.log("direct: received from #${frame.nodeId}")
+
+        val key = frame.nodeId to frame.seq
+        if (ackedDirects.containsKey(key)) return // exactly one ack per (origin, seq)
+        ackedDirects[key] = Unit
+        scope?.launch { sendAckFor(frame) }
+    }
+
+    /** Originates the DIRECT_ACK receipt for [frame]; failures are logged only. */
+    private suspend fun sendAckFor(frame: Frame) {
+        try {
+            val payload = DirectAckPayload(ackedNodeId = frame.nodeId, ackedSeq = frame.seq).encode()
+            router.originate(FrameType.DIRECT_ACK, payload)
+            eventLog.log("direct: ack sent")
+        } catch (error: Exception) {
+            eventLog.log("direct: ack failed: ${error.javaClass.simpleName}: ${error.message}")
+        }
+    }
+
+    /**
+     * Delivers a DIRECT_ACK receipt for one of our own direct messages. Receipts
+     * addressed to other nodes are relayed only; malformed payloads are dropped.
+     */
+    private fun deliverDirectAck(frame: Frame) {
+        val payload = DirectAckPayload.decode(frame.payload).getOrNull() ?: run {
+            eventLog.log("DIRECT_ACK from ${frame.nodeId} dropped: malformed payload")
+            return
+        }
+        if (payload.ackedNodeId != localNodeId) return // receipt for someone else's DM: relay only
+
+        appendReceipt(DeliveryReceipt(frame.nodeId, payload.ackedSeq, clock()))
+        eventLog.log("direct: ack received")
     }
 
     /**
@@ -590,6 +789,11 @@ class AirMeshNode(
                 if (frame.nodeId == localNodeId && frame.type == FrameType.MSG) {
                     recordHandoff(frame.seq, neighborId)
                 }
+                // My own DIRECT frames feed sendDirect's "handed" flag; the
+                // recipient decides later whether to surface it.
+                if (frame.nodeId == localNodeId && frame.type == FrameType.DIRECT) {
+                    synchronized(outgoingLock) { directHandoffs[frame.seq] = Unit }
+                }
             } else {
                 eventLog.log(
                     "TX ${frame.type} seq=${frame.seq} -> $neighborId failed: no live socket",
@@ -652,6 +856,18 @@ class AirMeshNode(
     private fun appendLocation(location: MeshLocation) {
         _locations.update { current ->
             (current + location).takeLast(MAX_MESSAGES)
+        }
+    }
+
+    private fun appendDirectMessage(message: DirectMessage) {
+        _directMessages.update { current ->
+            (current + message).takeLast(MAX_MESSAGES)
+        }
+    }
+
+    private fun appendReceipt(receipt: DeliveryReceipt) {
+        _deliveryReceipts.update { current ->
+            (current + receipt).takeLast(MAX_MESSAGES)
         }
     }
 }
