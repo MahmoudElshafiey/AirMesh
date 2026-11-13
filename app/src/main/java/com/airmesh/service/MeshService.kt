@@ -629,7 +629,7 @@ class MeshService : Service() {
         }
         if (!shouldPostMessageNotification(AppForeground.anyActivityVisible, _messageNotificationsEnabled.value)) return
 
-        val content = messageNotificationContent(kind, senderId, text)
+        val content = messageNotificationContent(kind, senderId, text, node.profiles.value[senderId]?.name)
         // Tapping opens the chat scrolled to this item. The dedup key doubles as
         // the navigation extra: parseMessageKey inverts exactly this format.
         val openChat = PendingIntent.getActivity(

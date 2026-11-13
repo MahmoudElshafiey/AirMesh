@@ -74,9 +74,22 @@ fun shouldPostMessageNotification(activityVisible: Boolean, notificationsEnabled
 /**
  * Builds the title/body for one received-content notification. Text messages show
  * a short excerpt; locations are described without coordinates (brevity + privacy).
+ * [senderName] is the display name the mesh learned for the sender; while it is
+ * missing, the title falls back to the node id alone.
  */
-fun messageNotificationContent(kind: IncomingKind, senderId: Int, text: String): MessageNotificationContent {
-    val title = "AirMesh · Node #$senderId"
+fun messageNotificationContent(
+    kind: IncomingKind,
+    senderId: Int,
+    text: String,
+    senderName: String? = null,
+): MessageNotificationContent {
+    val name = senderName?.trim()?.takeIf { it.isNotEmpty() }
+    val title = if (name == null) {
+        "AirMesh · Node #$senderId"
+    } else {
+        // Name first, id in brackets: names are not verified, so the id stays visible.
+        "AirMesh · $name (#$senderId)"
+    }
     return when (kind) {
         IncomingKind.TEXT -> MessageNotificationContent(title, shortenForNotification(text))
         IncomingKind.LOCATION -> MessageNotificationContent(title, "shared their location")
