@@ -30,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -41,6 +42,8 @@ import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
+import com.airmesh.node.MyProfile
+import com.airmesh.profile.ProfileInfo
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
@@ -122,9 +125,22 @@ fun MeshScreen(
     // Discovery diagnostics shown as the banner's small second line.
     discoveryStrategy: Int = 1,
     rawCallbackCount: Int = 0,
+    // Display identity: my own profile, the names the mesh learned, and the save
+    // action. promptOnboarding is true only on the first run, until the dialog
+    // has been answered (saved or skipped) once.
+    myProfile: MyProfile = MyProfile(name = null, colorIndex = 0),
+    profiles: Map<Int, ProfileInfo> = emptyMap(),
+    onSaveProfile: (name: String, colorIndex: Int) -> Unit = { _, _ -> },
+    promptOnboarding: Boolean = false,
+    onOnboardingAnswered: () -> Unit = {},
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(MeshTab.CHAT.ordinal) }
     val tab = MeshTab.values()[selectedTab.coerceIn(0, MeshTab.values().size - 1)]
+
+    // The profile sheet opens from the top-bar avatar; onboarding shows once and
+    // is only reachable again through that avatar after it has been answered.
+    var showProfile by rememberSaveable { mutableStateOf(false) }
+    var showOnboarding by rememberSaveable { mutableStateOf(promptOnboarding) }
 
     // A notification tap switches to its target tab. Keyless targets (and keys for
     // non-chat tabs, which we never post) are consumed here; the chat tab consumes
@@ -155,7 +171,16 @@ fun MeshScreen(
         topBar = {
             TopAppBar(
                 title = { Text("AirMesh") },
-                actions = { StatusChip(role = connectorState.role, neighborCount = neighbors.size) },
+                actions = {
+                    StatusChip(role = connectorState.role, neighborCount = neighbors.size)
+                    Box(modifier = Modifier.padding(end = 4.dp)) {
+                        ProfileAvatarButton(
+                            name = myProfile.name ?: "User #$nodeId",
+                            colorIndex = myProfile.colorIndex,
+                            onClick = { showProfile = true },
+                        )
+                    }
+                },
             )
         },
         bottomBar = {
@@ -230,6 +255,34 @@ fun MeshScreen(
                 }
             }
         }
+    }
+
+    if (showProfile) {
+        ProfileSheet(
+            nodeId = nodeId,
+            initialName = myProfile.name ?: "",
+            initialColorIndex = myProfile.colorIndex,
+            onSave = { name, colorIndex ->
+                onSaveProfile(name, colorIndex)
+                showProfile = false
+            },
+            onDismiss = { showProfile = false },
+        )
+    }
+
+    if (showOnboarding) {
+        OnboardingDialog(
+            nodeId = nodeId,
+            onSave = { name, colorIndex ->
+                onSaveProfile(name, colorIndex)
+                showOnboarding = false
+                onOnboardingAnswered()
+            },
+            onSkip = {
+                showOnboarding = false
+                onOnboardingAnswered()
+            },
+        )
     }
 }
 

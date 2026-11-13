@@ -18,9 +18,11 @@ import com.airmesh.node.EventLog
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
+import com.airmesh.node.MyProfile
 import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
+import com.airmesh.profile.ProfileInfo
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoFailureReason
 import com.airmesh.transport.AutoMeshAction
@@ -104,6 +106,10 @@ class MeshService : Service() {
     val neighbors: StateFlow<Set<Int>> get() = node.neighbors
     val messages: StateFlow<List<MeshMessage>> get() = node.messages
     val locations: StateFlow<List<MeshLocation>> get() = node.locations
+    /** This node's own display profile (name + avatar color). */
+    val myProfile: StateFlow<MyProfile> get() = node.myProfile
+    /** Display names learned from the mesh, keyed by node id. */
+    val profiles: StateFlow<Map<Int, ProfileInfo>> get() = node.profiles
     val events: StateFlow<List<LogEntry>> get() = _eventLog.entries
     val connectorState: StateFlow<ConnectorState> get() = connector.state
 
@@ -391,6 +397,10 @@ class MeshService : Service() {
 
     suspend fun sendLocation(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Boolean =
         node.sendLocation(latitudeE6, longitudeE6, accuracyMeters)
+
+    /** Saves and announces this node's display name and avatar color. */
+    suspend fun setMyProfile(name: String, colorIndex: Int): Boolean =
+        node.setMyProfile(name, colorIndex)
 
     // Every manual Wi-Fi Direct action pauses auto-mesh first, so the two do not
     // fight over the radio (rule: manual control wins until auto is re-enabled).

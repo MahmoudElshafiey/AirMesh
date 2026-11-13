@@ -77,6 +77,7 @@ class MeshActivity : ComponentActivity() {
     private var navSeq = 0
 
     private lateinit var themeStore: ThemeModeStore
+    private lateinit var onboardingStore: ProfileOnboardingStore
     private var locationProvider: AndroidLocationProvider? = null
 
     // Set in onCreate (applicationInfo is not available during construction).
@@ -171,6 +172,7 @@ class MeshActivity : ComponentActivity() {
         enableStrictModeInDebugBuilds()
 
         themeStore = SharedPreferencesThemeModeStore(this)
+        onboardingStore = SharedPreferencesProfileOnboardingStore(this)
         isDebugBuild = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         testLocationStore = if (isDebugBuild) SharedPreferencesTestLocationStore(applicationContext) else null
         // The debug switch survives process death; release builds stay off.
@@ -204,6 +206,8 @@ class MeshActivity : ComponentActivity() {
                         val neighbors by service.neighbors.collectAsState()
                         val messages by service.messages.collectAsState()
                         val locations by service.locations.collectAsState()
+                        val myProfile by service.myProfile.collectAsState()
+                        val profiles by service.profiles.collectAsState()
                         val events by service.events.collectAsState()
                         val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsState()
                         val autoMeshState by service.autoMeshState.collectAsState()
@@ -265,6 +269,15 @@ class MeshActivity : ComponentActivity() {
                             onSetAutoMeshEnabled = service::setAutoMeshEnabled,
                             discoveryStrategy = discoveryStrategy,
                             rawCallbackCount = rawCallbackCount,
+                            myProfile = myProfile,
+                            profiles = profiles,
+                            onSaveProfile = { name, colorIndex ->
+                                uiScope.launch { service.setMyProfile(name, colorIndex) }
+                            },
+                            // First run only: a stored name means the user already
+                            // answered (or saved) once, even after an app update.
+                            promptOnboarding = !onboardingStore.isDone() && myProfile.name == null,
+                            onOnboardingAnswered = { onboardingStore.markDone() },
                         )
                     }
                 }

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
@@ -299,4 +300,81 @@ private fun AutoMeshHeaderPreview() = ThemedTabPreview(darkTheme = false) {
     Column(modifier = Modifier.padding(16.dp)) {
         AutoMeshHeader(bannerText = "Searching for nearby AirMesh phones…", enabled = true, onSetEnabled = {})
     }
+}
+
+// --- Profile onboarding and sheet -------------------------------------------
+// Names used here on purpose: a 24-character name and an emoji name are the two
+// layouts most likely to break at fontScale 1.5.
+
+private const val PREVIEW_LONG_NAME = "Abdelrahman Mohamed Adel"
+private const val PREVIEW_EMOJI_NAME = "🚑 Rescue"
+
+@Composable
+private fun OnboardingPreviewContent(initialName: String, initialColorIndex: Int = 0) {
+    OnboardingDialog(
+        nodeId = 1,
+        initialName = initialName,
+        initialColorIndex = initialColorIndex,
+        onSave = { _, _ -> },
+        onSkip = {},
+    )
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Onboarding · empty · light")
+@Composable
+private fun OnboardingEmptyLightPreview() = ThemedTabPreview(darkTheme = false) {
+    OnboardingPreviewContent(initialName = "")
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Onboarding · long name · dark")
+@Composable
+private fun OnboardingLongDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    OnboardingPreviewContent(initialName = PREVIEW_LONG_NAME, initialColorIndex = 3)
+}
+
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = PREVIEW_HEIGHT_DP,
+    fontScale = 1.5f,
+    name = "Onboarding · emoji · light · large text",
+)
+@Composable
+private fun OnboardingEmojiLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    OnboardingPreviewContent(initialName = PREVIEW_EMOJI_NAME, initialColorIndex = 4)
+}
+
+@Composable
+private fun ProfileSheetPreviewContent(initialName: String, initialColorIndex: Int) {
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        ProfileSheetContent(
+            nodeId = 7,
+            initialName = initialName,
+            initialColorIndex = initialColorIndex,
+            onSave = { _, _ -> },
+            onCancel = {},
+        )
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 520, name = "Profile sheet · light")
+@Composable
+private fun ProfileSheetLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ProfileSheetPreviewContent(initialName = "Mira", initialColorIndex = 1)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 520, name = "Profile sheet · dark")
+@Composable
+private fun ProfileSheetDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ProfileSheetPreviewContent(initialName = PREVIEW_LONG_NAME, initialColorIndex = 5)
+}
+
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = 640,
+    fontScale = 1.5f,
+    name = "Profile sheet · emoji · large text",
+)
+@Composable
+private fun ProfileSheetEmojiLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    ProfileSheetPreviewContent(initialName = PREVIEW_EMOJI_NAME, initialColorIndex = 2)
 }
