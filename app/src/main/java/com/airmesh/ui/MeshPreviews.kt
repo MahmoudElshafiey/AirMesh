@@ -19,6 +19,7 @@ import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
+import com.airmesh.profile.ProfileInfo
 import com.airmesh.routing.Router
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.ConnectorState
@@ -34,6 +35,26 @@ private val previewMessages = listOf(
     MeshMessage(2, "Cellular is down here — does the mesh work?", 1_700_000_000_000L, Router.DEFAULT_TTL - 1, outgoing = false),
     MeshMessage(1, "Yes. I am two relays from base camp.", 1_700_000_060_000L, Router.DEFAULT_TTL, outgoing = true, handedTo = setOf(2, 3)),
     MeshMessage(3, "Copy that. Sending the supply list next.", 1_700_000_120_000L, Router.DEFAULT_TTL - 2, outgoing = false),
+)
+
+/**
+ * Display names for the preview senders. Node 3 carries exactly 24 characters
+ * (the payload cap), node 4 is an emoji name, and node 5 is deliberately absent
+ * so previews show the "User #5" fallback.
+ */
+private val previewProfiles = mapOf(
+    2 to ProfileInfo("Mira", 1, 0L),
+    3 to ProfileInfo("Abdelrahman Mohamed Adel", 4, 0L),
+    4 to ProfileInfo("🚑 Rescue", 5, 0L),
+)
+
+/** One bubble per name shape: short, emoji, unknown, and the 24-character cap. */
+private val previewProfileMessages = listOf(
+    MeshMessage(2, "Short name.", 1_700_000_000_000L, Router.DEFAULT_TTL - 1, outgoing = false),
+    MeshMessage(4, "Emoji name.", 1_700_000_030_000L, Router.DEFAULT_TTL, outgoing = false),
+    MeshMessage(5, "Unknown sender, so the id is the label.", 1_700_000_060_000L, Router.DEFAULT_TTL - 2, outgoing = false),
+    MeshMessage(3, "The 24-character name.", 1_700_000_090_000L, Router.DEFAULT_TTL - 1, outgoing = false),
+    MeshMessage(1, "My own bubble keeps the old layout.", 1_700_000_120_000L, Router.DEFAULT_TTL, outgoing = true, handedTo = setOf(2, 3)),
 )
 
 private val previewLocations = listOf(
@@ -92,16 +113,25 @@ private const val PREVIEW_WIDTH_DP = 360
 private const val PREVIEW_HEIGHT_DP = 720
 
 @Composable
-private fun ChatTabPreviewContent(emptyList: Boolean, testLocationOn: Boolean = false) {
+private fun ChatTabPreviewContent(
+    emptyList: Boolean,
+    testLocationOn: Boolean = false,
+    namedSenders: Boolean = false,
+) {
     MeshChatTab(
         nodeId = 1,
-        messages = if (emptyList) emptyList() else previewMessages,
+        messages = when {
+            emptyList -> emptyList()
+            namedSenders -> previewProfileMessages
+            else -> previewMessages
+        },
         locations = if (emptyList) emptyList() else previewLocations,
         myLastFix = previewMyFix,
         shareStatus = LocationShareStatus.IDLE,
         onSendText = {},
         onShareLocation = {},
         useTestLocation = testLocationOn,
+        profiles = previewProfiles,
     )
 }
 
@@ -115,6 +145,32 @@ private fun ChatTabMixedLightPreview() = ThemedTabPreview(darkTheme = false) {
 @Composable
 private fun ChatTabMixedDarkPreview() = ThemedTabPreview(darkTheme = true) {
     ChatTabPreviewContent(emptyList = false)
+}
+
+// Sender identity: short name, 24-character name, emoji name, and an unknown
+// sender that falls back to "User #id".
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · sender names · light")
+@Composable
+private fun ChatTabSenderNamesLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatTabPreviewContent(emptyList = false, namedSenders = true)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · sender names · dark")
+@Composable
+private fun ChatTabSenderNamesDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatTabPreviewContent(emptyList = false, namedSenders = true)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, fontScale = 1.5f, name = "Chat · sender names · light · large text")
+@Composable
+private fun ChatTabSenderNamesLightLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatTabPreviewContent(emptyList = false, namedSenders = true)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, fontScale = 1.5f, name = "Chat · sender names · dark · large text")
+@Composable
+private fun ChatTabSenderNamesDarkLargeTextPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatTabPreviewContent(emptyList = false, namedSenders = true)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · empty · light")
@@ -165,11 +221,19 @@ private fun ChatTabTestLocationChipPreview() = ThemedTabPreview(darkTheme = true
 @Composable
 private fun LocationCardsContent() {
     Column(modifier = Modifier.padding(16.dp)) {
-        LocationCard(location = previewLocations.first(), isMine = false, distanceMeters = 87.0)
+        LocationCard(
+            location = previewLocations.first(),
+            isMine = false,
+            distanceMeters = 87.0,
+            senderName = displayName(3, previewProfiles),
+            senderColorIndex = avatarColorIndex(3, previewProfiles),
+        )
         Spacer(modifier = Modifier.height(8.dp))
         LocationCard(
             location = MeshLocation(1, 30_044_000, 31_235_000, 8, 1_700_000_150_000L, Router.DEFAULT_TTL),
             isMine = true,
+            senderName = displayName(1, previewProfiles),
+            senderColorIndex = avatarColorIndex(1, previewProfiles),
         )
     }
 }
@@ -206,6 +270,7 @@ private fun NetworkTabLightPreview() = ThemedTabPreview(darkTheme = false) {
         // Debug card: off here, armed in the dark preview.
         showTestLocationToggle = true,
         useTestLocation = false,
+        profiles = previewProfiles,
     )
 }
 
@@ -227,6 +292,7 @@ private fun NetworkTabDarkPreview() = ThemedTabPreview(darkTheme = true) {
         onSetThemeMode = {},
         showTestLocationToggle = true,
         useTestLocation = true,
+        profiles = previewProfiles,
     )
 }
 

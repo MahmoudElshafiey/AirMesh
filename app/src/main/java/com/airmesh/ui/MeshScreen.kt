@@ -229,6 +229,9 @@ fun MeshScreen(
                             scrollToKey = navRequest?.target?.messageKey,
                             onScrollConsumed = onNavConsumed,
                             nowMs = nowMs,
+                            profiles = profiles,
+                            myName = myProfile.name ?: "User #$nodeId",
+                            myColorIndex = myProfile.colorIndex,
                         )
                     MeshTab.NETWORK ->
                         MeshNetworkTab(
@@ -250,6 +253,7 @@ fun MeshScreen(
                             onSetUseTestLocation = onSetUseTestLocation,
                             messageNotificationsEnabled = messageNotificationsEnabled,
                             onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
+                            profiles = profiles,
                         )
                     MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
                 }

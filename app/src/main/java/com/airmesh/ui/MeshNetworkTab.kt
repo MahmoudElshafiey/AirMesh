@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.airmesh.profile.ProfileInfo
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
@@ -72,6 +73,8 @@ fun MeshNetworkTab(
     // Per-message notifications while the app is in the background; persisted by the service.
     messageNotificationsEnabled: Boolean = true,
     onSetMessageNotificationsEnabled: (Boolean) -> Unit = {},
+    // Display names learned from the mesh; unknown neighbors fall back to "User #id".
+    profiles: Map<Int, ProfileInfo> = emptyMap(),
 ) {
     Column(
         modifier = Modifier
@@ -113,7 +116,7 @@ fun MeshNetworkTab(
             onConnectPeer = onConnectPeer,
         )
 
-        NeighborsSection(neighbors)
+        NeighborsSection(neighbors, profiles)
 
         MessageNotificationsCard(
             enabled = messageNotificationsEnabled,
@@ -338,9 +341,9 @@ private fun PeersSection(state: ConnectorState, airMeshPeers: List<AirMeshPeer>,
     }
 }
 
-/** Current neighbors as small chips with their node ids. */
+/** Current neighbors as small chips with the display name the mesh learned. */
 @Composable
-private fun NeighborsSection(neighbors: Set<Int>) {
+private fun NeighborsSection(neighbors: Set<Int>, profiles: Map<Int, ProfileInfo>) {
     Text("Neighbors (${neighbors.size})", style = MaterialTheme.typography.titleSmall)
     if (neighbors.isEmpty()) {
         Text(
@@ -357,7 +360,22 @@ private fun NeighborsSection(neighbors: Set<Int>) {
                     .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
                     .padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
-                Text("#$id", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        displayName(id, profiles),
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "#$id",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }

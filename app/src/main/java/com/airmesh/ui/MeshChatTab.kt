@@ -42,7 +42,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.airmesh.node.LOCATION_STALE_AFTER_MS
 import com.airmesh.node.LocationFix
@@ -52,6 +54,7 @@ import com.airmesh.node.formatAgeMs
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.protocol.LocationPayload
 import com.airmesh.protocol.haversineMeters
+import com.airmesh.profile.ProfileInfo
 import com.airmesh.service.IncomingKind
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -108,6 +111,11 @@ fun MeshChatTab(
     // Live clock from MeshScreen (ticks every second) so a queued message flips
     // to "not sent" once the store-and-forward max age passes.
     nowMs: Long = System.currentTimeMillis(),
+    // Display names learned from the mesh; unknown senders fall back to "User #id".
+    profiles: Map<Int, ProfileInfo> = emptyMap(),
+    // My own display identity, used by my location cards. My bubbles stay unnamed.
+    myName: String = "User #$nodeId",
+    myColorIndex: Int = 0,
 ) {
     val listState = rememberLazyListState()
     // Follow the newest item by default. Scrolling up pauses it so old items
@@ -200,7 +208,12 @@ fun MeshChatTab(
                 // Index keys: items have no id field and the list is append-only.
                 items(count = rows.size, key = { it }) { index ->
                     when (val row = rows[index]) {
-                        is ChatRow.TextMessage -> MessageBubble(row.message, nowMs)
+                        is ChatRow.TextMessage -> MessageBubble(
+                            message = row.message,
+                            nowMs = nowMs,
+                            senderName = displayName(row.message.senderId, profiles),
+                            senderColorIndex = avatarColorIndex(row.message.senderId, profiles),
+                        )
                         is ChatRow.LocationItem -> LocationCard(
                             location = row.location,
                             isMine = row.location.senderId == nodeId,
@@ -208,6 +221,16 @@ fun MeshChatTab(
                             cachedAgeMs = if (row.location.timestamp == myLatestLocationTimestamp) {
                                 myLatestCachedAgeMs
                             } else null,
+                            senderName = if (row.location.senderId == nodeId) {
+                                myName
+                            } else {
+                                displayName(row.location.senderId, profiles)
+                            },
+                            senderColorIndex = if (row.location.senderId == nodeId) {
+                                myColorIndex
+                            } else {
+                                avatarColorIndex(row.location.senderId, profiles)
+                            },
                         )
                     }
                 }
@@ -228,13 +251,27 @@ fun MeshChatTab(
 }
 
 @Composable
-private fun MessageBubble(message: MeshMessage, nowMs: Long) {
+private fun MessageBubble(
+    message: MeshMessage,
+    nowMs: Long,
+    senderName: String,
+    senderColorIndex: Int,
+) {
     val colors = MaterialTheme.colorScheme
     val mine = message.outgoing
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
+        horizontalArrangement = if (mine) Arrangement.End else Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.Bottom,
     ) {
+        // Received bubbles carry a small avatar; our own bubbles stay clean.
+        if (!mine) {
+            AvatarCircle(
+                initials = avatarInitials(senderName),
+                colorIndex = senderColorIndex,
+                size = 28.dp,
+            )
+        }
         Column(
             modifier = Modifier
                 .widthIn(max = 300.dp)
@@ -251,6 +288,25 @@ private fun MessageBubble(message: MeshMessage, nowMs: Long) {
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
         ) {
+            if (!mine) {
+                // Bold display name plus the small gray node id, so two phones
+                // with the same name stay distinguishable.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(bottom = 2.dp),
+                ) {
+                    Text(
+                        senderName,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Text("#${message.senderId}", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                }
+            }
             Text(message.text, style = MaterialTheme.typography.bodyLarge)
             Row(
                 modifier = Modifier.padding(top = 2.dp),
@@ -258,7 +314,10 @@ private fun MessageBubble(message: MeshMessage, nowMs: Long) {
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 val metaColor = if (mine) colors.onPrimaryContainer else colors.onSurfaceVariant
-                Text("#${message.senderId}", style = MaterialTheme.typography.labelSmall, color = metaColor)
+                // Received bubbles already show the id in the header line.
+                if (mine) {
+                    Text("#${message.senderId}", style = MaterialTheme.typography.labelSmall, color = metaColor)
+                }
                 Text(formatChatTime(message.timestamp), style = MaterialTheme.typography.labelSmall, color = metaColor)
                 // Relay count only makes sense for received messages: ours leave at full TTL.
                 if (!mine) {
@@ -290,6 +349,8 @@ fun LocationCard(
     isMine: Boolean = false,
     distanceMeters: Double? = null,
     cachedAgeMs: Long? = null,
+    senderName: String? = null,
+    senderColorIndex: Int = 0,
 ) {
     val colors = MaterialTheme.colorScheme
     val metaColor = if (isMine) colors.onPrimaryContainer else colors.onSurfaceVariant
@@ -304,11 +365,30 @@ fun LocationCard(
                 .background(if (isMine) colors.primaryContainer else colors.surfaceVariant)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            Text(
-                "Location from #${location.senderId}" + if (isMine) " (you)" else "",
-                style = MaterialTheme.typography.labelMedium,
-                color = metaColor,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (senderName != null) {
+                    AvatarCircle(
+                        initials = avatarInitials(senderName),
+                        colorIndex = senderColorIndex,
+                        size = 22.dp,
+                    )
+                }
+                Text(
+                    // Name when the mesh knows it; otherwise the id, as before.
+                    "Location from ${senderName ?: "#${location.senderId}"}" +
+                        if (isMine) " (you)" else "",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (senderName != null) {
+                    Text("#${location.senderId}", style = MaterialTheme.typography.labelSmall, color = metaColor)
+                }
+            }
             // Five decimals: the sixth micro-degree digit is below GPS accuracy.
             Text(
                 formatCoordinates(location.latitudeE6, location.longitudeE6),
