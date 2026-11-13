@@ -73,6 +73,9 @@ fun MeshNetworkTab(
     // Per-message notifications while the app is in the background; persisted by the service.
     messageNotificationsEnabled: Boolean = true,
     onSetMessageNotificationsEnabled: (Boolean) -> Unit = {},
+    // Whether a group owner keeps scanning for other groups to merge with (TASK M1).
+    mergeGroupsEnabled: Boolean = true,
+    onSetMergeGroupsEnabled: (Boolean) -> Unit = {},
     // Display names learned from the mesh; unknown neighbors fall back to "User #id".
     profiles: Map<Int, ProfileInfo> = emptyMap(),
 ) {
@@ -114,6 +117,8 @@ fun MeshNetworkTab(
             onCreateGroup = onCreateGroup,
             onRetryTcp = onRetryTcp,
             onConnectPeer = onConnectPeer,
+            mergeGroupsEnabled = mergeGroupsEnabled,
+            onSetMergeGroupsEnabled = onSetMergeGroupsEnabled,
         )
 
         NeighborsSection(neighbors, profiles)
@@ -149,6 +154,9 @@ internal fun AdvancedManualCard(
     onCreateGroup: () -> Unit,
     onRetryTcp: () -> Unit,
     onConnectPeer: (WifiP2pDevice) -> Unit,
+    /** Whether a group owner keeps scanning for other groups to merge with (TASK M1). */
+    mergeGroupsEnabled: Boolean = true,
+    onSetMergeGroupsEnabled: (Boolean) -> Unit = {},
     initiallyExpanded: Boolean = false,
 ) {
     var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
@@ -185,6 +193,22 @@ internal fun AdvancedManualCard(
                         ) {
                             Text("Retry TCP", maxLines = 1)
                         }
+                    }
+                    // TASK M1: an owner with this on keeps scanning for other groups
+                    // and yields to the bigger one; off restores "in a group: do nothing".
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Merge separate groups (experimental)", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "While you own a group, keep looking for other AirMesh groups and join the bigger one.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = mergeGroupsEnabled, onCheckedChange = onSetMergeGroupsEnabled)
                     }
                     PeersSection(state, airMeshPeers, onConnectPeer)
                 }

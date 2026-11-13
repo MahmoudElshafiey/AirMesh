@@ -210,6 +210,7 @@ class MeshActivity : ComponentActivity() {
                         val profiles by service.profiles.collectAsState()
                         val events by service.events.collectAsState()
                         val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsState()
+                        val mergeGroupsEnabled by service.mergeGroupsEnabled.collectAsState()
                         val autoMeshState by service.autoMeshState.collectAsState()
                         val autoIdleReason by service.autoIdleReason.collectAsState()
                         val airMeshPeers by service.airMeshPeers.collectAsState()
@@ -262,6 +263,8 @@ class MeshActivity : ComponentActivity() {
                             },
                             messageNotificationsEnabled = messageNotificationsEnabled,
                             onSetMessageNotificationsEnabled = service::setMessageNotificationsEnabled,
+                            mergeGroupsEnabled = mergeGroupsEnabled,
+                            onSetMergeGroupsEnabled = service::setMergeGroupsEnabled,
                             autoMeshState = autoMeshState,
                             autoIdleReason = autoIdleReason,
                             airMeshPeers = airMeshPeers,

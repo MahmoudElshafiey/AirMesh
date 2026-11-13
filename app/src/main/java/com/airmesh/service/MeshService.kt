@@ -36,6 +36,7 @@ import com.airmesh.transport.DiscoveryBackend
 import com.airmesh.transport.DiscoveryCoordinator
 import com.airmesh.transport.DiscoveryStrategySelector
 import com.airmesh.transport.DiscoveryStrategyStore
+import com.airmesh.transport.OwnerScanPolicy
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
 import com.airmesh.transport.StaleGroupGuardState
@@ -85,6 +86,19 @@ class MeshService : Service() {
 
     /** The auto-mesh state machine; created in [onCreate], address upgraded when the MAC arrives. */
     private var autoController: AutoMeshController? = null
+
+    /** Paces an owner's merge scans (TASK M1): 15 s empty, one 8 s window per 90 s with clients. */
+    private val ownerScanPolicy = OwnerScanPolicy()
+
+    /** Live neighbor count; feeds the scan policy and the advertised client count. */
+    private var liveNeighborCount = 0
+
+    /** Whether an owner scans for other groups to merge with (Advanced card switch). Persisted. */
+    private val _mergeGroupsEnabled = MutableStateFlow(true)
+    val mergeGroupsEnabled: StateFlow<Boolean> = _mergeGroupsEnabled.asStateFlow()
+
+    /** Persistence behind [mergeGroupsEnabled]; created in [onCreate]. */
+    private lateinit var mergeFlagStore: MergeGroupsFlagStore
 
     /** Monotonic startup-to-neighbor-up timeline recorder. */
     private val timelineRecorder = TimelineRecorder(SystemClock::elapsedRealtime)
@@ -238,6 +252,9 @@ class MeshService : Service() {
         // Auto-mesh is on by default; the Network tab switch persists the choice.
         _autoMeshEnabled.value = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_AUTO_MESH_ENABLED, true)
+        // Merging separate groups is on by default (TASK M1); the Advanced card persists it.
+        mergeFlagStore = SharedPreferencesMergeGroupsFlagStore(this)
+        _mergeGroupsEnabled.value = mergeFlagStore.load()
 
         // The election ranks by (node id, tie-break token); our own Wi-Fi Direct
         // address is not used at all — on many devices it stays a placeholder that
@@ -246,6 +263,7 @@ class MeshService : Service() {
             myNodeId = node.localNodeId,
             tieBreakToken = tieBreakToken,
             autoEnabled = _autoMeshEnabled.value,
+            mergeEnabled = _mergeGroupsEnabled.value,
         )
         _eventLog.log("auto: controller ready (node #${node.localNodeId}, tie-break=${tieBreakToken.toUInt().toString(16)})")
 
@@ -258,6 +276,12 @@ class MeshService : Service() {
                 if (neighbors.isNotEmpty()) {
                     timelineRecorder.onNeighborUp()?.let { line -> _eventLog.log(line) }
                 }
+                // A growing group means a client just joined: the owner's merge scan
+                // stays quiet for a few seconds while the new TCP link settles.
+                if (neighbors.size > liveNeighborCount) {
+                    ownerScanPolicy.noteClientJoined(System.currentTimeMillis())
+                }
+                liveNeighborCount = neighbors.size
                 // Owners re-advertise their live group size in the instance name;
                 // updateClientCount is a no-op unless we are an owner with a live ad.
                 peerDirectory.updateClientCount(neighbors.size)
@@ -457,6 +481,18 @@ class MeshService : Service() {
         applyAutoMeshEnabled(enabled, persist = true)
     }
 
+    /** Advanced card switch (TASK M1): start/stop an owner's merge scanning. */
+    fun setMergeGroupsEnabled(enabled: Boolean) {
+        if (_mergeGroupsEnabled.value == enabled) return
+        _mergeGroupsEnabled.value = enabled
+        mergeFlagStore.save(enabled)
+        val controller = autoController ?: return
+        val actions = controller.setMergeEnabled(enabled)
+        syncAutoUi(controller)
+        _eventLog.log("auto: merge flag ${if (enabled) "on" else "off"} => ${actions.joinToString(", ") { describeAction(it) }}")
+        actions.forEach(::executeAutoAction)
+    }
+
     private fun applyAutoMeshEnabled(enabled: Boolean, persist: Boolean) {
         _autoMeshEnabled.value = enabled
         if (persist) {
@@ -534,7 +570,14 @@ class MeshService : Service() {
     /** Executes one controller action against the connector and peer directory. */
     private fun executeAutoAction(action: AutoMeshAction) {
         when (action) {
-            is AutoMeshAction.StartDiscovery -> peerDirectory.setDiscovering(true)
+            is AutoMeshAction.StartDiscovery -> if (autoController?.state is AutoMeshState.Owner && _mergeGroupsEnabled.value) {
+                // An owner with merge on scans through the policy gate, not the
+                // Searching burst/refresh cadence (TASK M1).
+                startOwnerScanning()
+            } else {
+                peerDirectory.setDiscovering(true)
+            }
+
             is AutoMeshAction.StopDiscovery -> peerDirectory.setDiscovering(false)
             is AutoMeshAction.CreateGroup -> connector.createGroup()
             is AutoMeshAction.ConnectTo -> connector.connectByAddress(action.deviceAddress)
@@ -543,6 +586,25 @@ class MeshService : Service() {
                 connector.removeGroup("auto-mesh: clearing a stale group before retry")
             }
         }
+    }
+
+    /**
+     * Arm the coordinator's owner-scan gate and start discovering. The gate asks
+     * [ownerScanPolicy] on every loop slice, so scans follow the merge policy
+     * (15 s empty / one 8 s window per 90 s with clients) instead of the normal
+     * burst + 60 s refresh cadence.
+     */
+    private fun startOwnerScanning() {
+        discoveryCoordinator.ownerScanGate = { nowMs ->
+            ownerScanPolicy.shouldScan(
+                clients = liveNeighborCount,
+                mergeEnabled = _mergeGroupsEnabled.value,
+                // Becomes true while a merge is in progress (TASK M1 part 4).
+                mergeInProgress = false,
+                nowMs = nowMs,
+            )
+        }
+        peerDirectory.setDiscovering(true)
     }
 
     private fun describeState(controller: AutoMeshController): String = when (val s = controller.state) {

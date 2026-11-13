@@ -2,6 +2,7 @@ package com.airmesh.transport
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -122,5 +123,87 @@ class DiscoveryCoordinatorTest {
         assertEquals(listOf("clear"), backend.calls)
         assertFalse(coordinator.serviceDiscoveryActive)
         assertFalse(coordinator.peerScanActive)
+    }
+
+    // --- owner merge-scan gate mode (TASK M1 part 2) --------------------------
+
+    @Test
+    fun `gate mode issues a scan only while the gate allows`() {
+        var allow = false
+        coordinator.ownerScanGate = { allow }
+        now = 0L
+        coordinator.tick(0L, serviceWanted = true)
+        assertTrue("gate closed: no scan", backend.calls.isEmpty())
+        allow = true
+        coordinator.tick(1_000, serviceWanted = true)
+        assertEquals(listOf("clear", "add", "services"), backend.calls)
+    }
+
+    @Test
+    fun `gate mode does not run an armed startup burst`() {
+        now = 0L
+        coordinator.onEnterSearching(0L) // arms the +0.5 s / +6 s / +14 s burst
+        coordinator.ownerScanGate = { false }
+        backend.calls.clear()
+        now = 20_000 // past all three burst offsets
+        coordinator.tick(now, serviceWanted = true)
+        assertTrue("the gate owns pacing: no burst scan", backend.calls.isEmpty())
+    }
+
+    @Test
+    fun `gate mode releases the radio when a scan completes`() {
+        coordinator.ownerScanGate = { true }
+        now = 0L
+        coordinator.tick(0L, serviceWanted = true) // fake backend finishes synchronously
+        assertEquals(listOf("clear", "add", "services"), backend.calls)
+        assertFalse("one-shot: the radio is released on completion", coordinator.serviceDiscoveryActive)
+        backend.calls.clear()
+        now = 15_000
+        coordinator.tick(now, serviceWanted = true) // next allowed firing starts a fresh cycle
+        assertEquals(listOf("clear", "add", "services"), backend.calls)
+    }
+
+    @Test
+    fun `no further scans in gate mode once the gate closes`() {
+        var allow = true
+        coordinator.ownerScanGate = { allow }
+        now = 0L
+        coordinator.tick(0L, serviceWanted = true) // one gated scan
+        assertEquals(listOf("clear", "add", "services"), backend.calls)
+        allow = false
+        for (t in listOf(15_000L, 61_000L, 121_000L)) {
+            now = t
+            coordinator.tick(now, serviceWanted = true)
+            coordinator.refreshIfDue(now) // the directory loop calls both every slice
+        }
+        assertEquals("exactly one scan while gated", listOf("clear", "add", "services"), backend.calls)
+    }
+
+    @Test
+    fun `a silent gated scan rotates strategy without issuing a new scan`() {
+        var allow = true
+        coordinator.ownerScanGate = { allow }
+        now = 0L
+        coordinator.tick(0L, serviceWanted = true) // scans with the default strategy 1
+        assertEquals(1, coordinator.currentStrategy)
+        allow = false
+        backend.calls.clear()
+        now = 25_000 // silence window expired with no raw callback
+        coordinator.tick(now, serviceWanted = true)
+        assertTrue("rotation must not issue a scan in gate mode", backend.calls.isEmpty())
+        assertEquals(2, coordinator.currentStrategy)
+    }
+
+    @Test
+    fun `stopService leaves gate mode`() {
+        coordinator.ownerScanGate = { true }
+        now = 0L
+        coordinator.tick(0L, serviceWanted = true)
+        coordinator.stopService() // also issues a clear to drop the request
+        assertNull(coordinator.ownerScanGate)
+        backend.calls.clear()
+        now = 61_000
+        coordinator.tick(now, serviceWanted = true) // normal mode: plain cycle, no burst armed
+        assertEquals(listOf("clear", "add", "services"), backend.calls)
     }
 }

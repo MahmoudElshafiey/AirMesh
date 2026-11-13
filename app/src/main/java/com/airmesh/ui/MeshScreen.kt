@@ -115,6 +115,9 @@ fun MeshScreen(
     // the Network tab and persisted by the service.
     messageNotificationsEnabled: Boolean = true,
     onSetMessageNotificationsEnabled: (Boolean) -> Unit = {},
+    // Whether a group owner keeps scanning for other groups to merge with (TASK M1).
+    mergeGroupsEnabled: Boolean = true,
+    onSetMergeGroupsEnabled: (Boolean) -> Unit = {},
     // Auto-mesh status shown above every tab, its "Auto connect" switch, and the
     // DNS-SD peer list the Network tab's manual section sorts by.
     autoMeshState: AutoMeshState = AutoMeshState.Idle,
@@ -253,6 +256,8 @@ fun MeshScreen(
                             onSetUseTestLocation = onSetUseTestLocation,
                             messageNotificationsEnabled = messageNotificationsEnabled,
                             onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
+                            mergeGroupsEnabled = mergeGroupsEnabled,
+                            onSetMergeGroupsEnabled = onSetMergeGroupsEnabled,
                             profiles = profiles,
                         )
                     MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)

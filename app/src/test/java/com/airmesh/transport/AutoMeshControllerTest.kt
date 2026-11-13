@@ -508,4 +508,76 @@ class AutoMeshControllerTest {
         assertNull(noAirMeshPeersBannerText(AutoMeshState.Searching(0), t, 1, 3)) // an AirMesh peer is visible
         assertNull(noAirMeshPeersBannerText(AutoMeshState.Searching(0), t, 0, 0)) // nothing at all: plain searching banner
     }
+
+    // --- owner merge scanning (TASK M1 part 2) ------------------------------------
+
+    private fun mergeController(nodeId: Int, autoEnabled: Boolean = true) =
+        AutoMeshController(nodeId, 0x1000, clock, Random(1), autoEnabled, mergeEnabled = true)
+
+    @Test
+    fun `an owner with merge enabled keeps discovering after the group forms`() {
+        val c = mergeController(7)
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StartDiscovery),
+            c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER)))
+    }
+
+    @Test
+    fun `an owner with merge disabled stops discovering after the group forms`() {
+        val c = controller(7) // default: merge off — the old "in a group we do nothing" rule
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery),
+            c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER)))
+    }
+
+    @Test
+    fun `a client never starts merge scanning after the group forms`() {
+        val c = mergeController(7)
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery),
+            c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.CLIENT)))
+    }
+
+    @Test
+    fun `a paused owner with merge enabled does not scan`() {
+        val c = mergeController(7, autoEnabled = false) // pausing wins over the flag
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery),
+            c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER)))
+    }
+
+    @Test
+    fun `enabling merge while owning a group starts discovery`() {
+        val c = controller(7)
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery),
+            c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))) // merge off: stopped
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StartDiscovery), c.setMergeEnabled(true))
+    }
+
+    @Test
+    fun `disabling merge while owning a group stops discovery`() {
+        val c = mergeController(7)
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StartDiscovery),
+            c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))) // merge on: scanning
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery), c.setMergeEnabled(false))
+    }
+
+    @Test
+    fun `toggling merge to the same value or while not an owner changes nothing`() {
+        val c = mergeController(7)
+        assertTrue(c.setMergeEnabled(true).isEmpty()) // already on, still Idle
+        start(c)                                       // now Searching — not an owner yet
+        assertTrue("not an owner: no discovery change", c.setMergeEnabled(false).isEmpty())
+    }
+
+    @Test
+    fun `pausing auto-mesh stops an owner's merge scanning`() {
+        val c = mergeController(7)
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER)) // StartDiscovery (merge on)
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery), c.setAutoEnabled(false))
+    }
+
+    @Test
+    fun `resuming auto-mesh restarts an owner's merge scanning`() {
+        val c = mergeController(7)
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER)) // StartDiscovery (merge on)
+        c.setAutoEnabled(false)                                  // StopDiscovery, still Owner
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StartDiscovery), c.setAutoEnabled(true))
+    }
 }

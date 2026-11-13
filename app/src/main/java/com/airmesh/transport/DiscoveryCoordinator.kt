@@ -112,6 +112,15 @@ class DiscoveryCoordinator(
     val peerScanActive: Boolean get() = peerScanStartedAtMs != null
 
     /**
+     * Owner merge-scan mode (TASK M1): when non-null, [tick] issues a service
+     * cycle only if this gate allows it — no startup burst and no 60 s refresh;
+     * the gate owns all pacing. Each scan is one-shot: the radio is released on
+     * cycle completion so the next allowed firing starts a fresh cycle. Cleared
+     * by [stopService].
+     */
+    var ownerScanGate: ((Long) -> Boolean)? = null
+
+    /**
      * Arms the startup scan burst (+0.5 s, +6 s, +14 s) when entering Searching,
      * after which the normal 60 s cadence takes over.
      */
@@ -177,7 +186,12 @@ class DiscoveryCoordinator(
                 }
             }
 
-            DnsSdRefreshAction.CycleComplete -> log("dnssd: service cycle complete")
+            DnsSdRefreshAction.CycleComplete -> {
+                log("dnssd: service cycle complete")
+                // In owner merge-scan mode each scan is one-shot: release the radio
+                // so the next gate firing issues a fresh clear → add → discover.
+                if (ownerScanGate != null) serviceDiscoveryActive = false
+            }
             DnsSdRefreshAction.Ignored -> Unit
         }
     }
@@ -219,6 +233,9 @@ class DiscoveryCoordinator(
 
     /** Re-issue the cycle when a burst offset or [DISCOVERY_REFRESH_MS] is due. */
     fun refreshIfDue(nowMs: Long): Boolean {
+        // Owner merge-scan mode paces its own scans through the gate; the 60 s
+        // cadence must not bypass it (e.g. while a gated cycle is still active).
+        if (ownerScanGate != null) return false
         if (burstOriginMs != null) {
             return if (!peerScanActive) advanceBurstIfDue(nowMs) else false
         }
@@ -258,7 +275,14 @@ class DiscoveryCoordinator(
             return
         }
         if (!peerScanActive) {
-            if (burstOriginMs != null) {
+            val gate = ownerScanGate
+            if (gate != null) {
+                // Owner merge-scan mode: the gate paces every scan — no startup
+                // burst, no 60 s refresh. A cycle already running owns the radio.
+                if (!serviceDiscoveryActive && gate(nowMs)) {
+                    issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
+                }
+            } else if (burstOriginMs != null) {
                 advanceBurstIfDue(nowMs)
             } else if (!serviceDiscoveryActive) {
                 issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
@@ -296,6 +320,13 @@ class DiscoveryCoordinator(
         lastCycleAtMs = null
         burstOriginMs = null
         burstIndex = 0
+        if (ownerScanGate != null) {
+            // Gate mode: rotation must not issue a scan of its own — that would
+            // bypass the gate's pacing. The next gate-allowed firing uses the new
+            // strategy, so a broken variant is still learned around.
+            serviceDiscoveryActive = false
+            return
+        }
         serviceDiscoveryActive = true // let the fresh cycle below own the radio
         issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
     }
@@ -309,6 +340,7 @@ class DiscoveryCoordinator(
         burstOriginMs = null
         burstIndex = 0
         peerScanStartedAtMs = null
+        ownerScanGate = null // leaving merge-scan mode; the next start re-arms it
     }
 
     companion object {

@@ -227,7 +227,9 @@ class WifiP2pPeerDirectory(
         }
         // Entering Searching: arm the +0.5 s, +6 s, +14 s startup scan burst so
         // the first service scan starts within 500 ms instead of at the 5 s slice.
-        coordinator.onEnterSearching()
+        // Owner merge-scan mode (gate set) paces its own scans through the gate —
+        // a burst there would ignore the policy's intervals.
+        if (coordinator.ownerScanGate == null) coordinator.onEnterSearching()
         ensureLoop()
     }
 

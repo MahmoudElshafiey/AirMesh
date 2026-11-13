@@ -206,6 +206,8 @@ class AutoMeshController(
     autoEnabled: Boolean = true,
     /** Optional delay (<= 500 ms) before an intentional removal enters Searching; 0 ms by default. */
     private val intentionalRemovalDelayMs: Long = 0L,
+    /** Whether a group owner keeps scanning for other groups to merge with (TASK M1). */
+    mergeEnabled: Boolean = false,
 ) {
 
     var state: AutoMeshState = AutoMeshState.Idle
@@ -216,6 +218,10 @@ class AutoMeshController(
         private set
 
     var autoEnabled: Boolean = autoEnabled
+        private set
+
+    /** Owners keep scanning for other groups to merge with when this is on (TASK M1). */
+    var mergeEnabled: Boolean = mergeEnabled
         private set
 
     /** Consecutive failed attempts; drives the escalating backoff schedule. */
@@ -275,7 +281,9 @@ class AutoMeshController(
                     enterIdle()
                     emptyList()
                 }
-                else -> emptyList() // Idle / Owner / Client: nothing to unwind
+                // An owner with merge on may be scanning for other groups; stop it.
+                is AutoMeshState.Owner -> if (mergeEnabled) listOf(AutoMeshAction.StopDiscovery) else emptyList()
+                else -> emptyList() // Idle / Client: nothing to unwind
             }
         }
         return when (state) {
@@ -283,8 +291,20 @@ class AutoMeshController(
                 enterSearching(now)
                 listOf(AutoMeshAction.StartDiscovery)
             }
-            else -> emptyList() // Owner / Client: in a group we do nothing
+            // Resuming while owning a group restarts merge scanning if it is on.
+            is AutoMeshState.Owner -> if (mergeEnabled) listOf(AutoMeshAction.StartDiscovery) else emptyList()
+            else -> emptyList() // Client: in a group we do nothing
         }
+    }
+
+    /** Toggle owner merge-scanning at runtime; only an active, unpaused owner changes discovery. */
+    fun setMergeEnabled(enabled: Boolean): List<AutoMeshAction> {
+        if (mergeEnabled == enabled) return emptyList()
+        mergeEnabled = enabled
+        // A paused device never scans, even with the flag on: pausing wins.
+        return if (state is AutoMeshState.Owner && autoEnabled) {
+            if (enabled) listOf(AutoMeshAction.StartDiscovery) else listOf(AutoMeshAction.StopDiscovery)
+        } else emptyList()
     }
 
     private fun onPermissionsChanged(event: AutoMeshEvent.PermissionsChanged, now: Long): List<AutoMeshAction> {
@@ -371,8 +391,14 @@ class AutoMeshController(
         lastPeers = emptyList()
         state = if (role == AutoMeshRole.OWNER) AutoMeshState.Owner else AutoMeshState.Client
         // Rule (a): in a group we do nothing; stop discovering to save battery —
-        // other phones find us through our advertisement, not our discovery.
-        return listOf(AutoMeshAction.StopDiscovery)
+        // other phones find us through our advertisement, not our discovery. The
+        // one exception is an unpaused owner with merge enabled: it keeps scanning
+        // for other groups to join (TASK M1).
+        return if (state is AutoMeshState.Owner && autoEnabled && mergeEnabled) {
+            listOf(AutoMeshAction.StartDiscovery)
+        } else {
+            listOf(AutoMeshAction.StopDiscovery)
+        }
     }
 
     private fun onGroupGone(now: Long): List<AutoMeshAction> {
