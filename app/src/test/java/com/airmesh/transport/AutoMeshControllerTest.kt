@@ -582,4 +582,303 @@ class AutoMeshControllerTest {
         c.setAutoEnabled(false)                                  // StopDiscovery, still Owner
         assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StartDiscovery), c.setAutoEnabled(true))
     }
+
+    // --- owner merge integration (TASK M1 part 5) ---------------------------------
+
+    /** An owner peer seen "now" with [clients] phones — fresh for the merge decision. */
+    private fun ownerPeer(nodeId: Int, address: String, clients: Int) =
+        AirMeshPeer(address, nodeId, true, 0x2000, clients = clients, lastSeenMs = now)
+
+    @Test
+    fun `two empty owners merge and exactly one group remains`() {
+        val a = mergeController(2) // lower id: must yield
+        val c = mergeController(5) // higher id: stays
+        now = 0L
+        a.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+
+        var aYieldActions: List<AutoMeshAction>? = null
+        var movedByC = false
+        // Both see each other; sightings at least 6 s apart count as two scans.
+        for (t in listOf(0L, 6_000L, 7_000L, 8_000L, 9_000L, 10_000L, 11_000L, 12_000L)) {
+            now = t
+            val aActions = feed(a, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 0)))
+            val cActions = feed(c, listOf(ownerPeer(2, "AA:00:00:00:00:01", clients = 0)))
+            if (aActions.any { it is AutoMeshAction.RemoveGroup }) aYieldActions = aActions
+            if (cActions.any { it is AutoMeshAction.RemoveGroup || it is AutoMeshAction.ConnectTo }) movedByC = true
+        }
+        assertEquals(
+            "the lower id removes its group and joins the higher one",
+            listOf(AutoMeshAction.RemoveGroup, AutoMeshAction.ConnectTo("CC:00:00:00:00:03")),
+            aYieldActions,
+        )
+        assertFalse("the higher id never moves", movedByC)
+
+        // The service marks our own removal intentional; the join keeps running.
+        assertTrue(a.onEvent(AutoMeshEvent.IntentionalGroupGone).isEmpty())
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery),
+            a.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.CLIENT)))
+        assertTrue("exactly one group remains", a.state is AutoMeshState.Client)
+        assertTrue(c.state is AutoMeshState.Owner)
+    }
+
+    @Test
+    fun `the bigger group stays even with the lower rank`() {
+        val small = mergeController(9) // higher id but only 1 client: must yield
+        val big = mergeController(5)   // lower id but 3 clients: stays
+        now = 0L
+        small.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        big.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        small.onEvent(AutoMeshEvent.MyClientsChanged(1))
+        big.onEvent(AutoMeshEvent.MyClientsChanged(3))
+
+        var yieldActions: List<AutoMeshAction>? = null
+        var movedByBig = false
+        for (t in listOf(0L, 6_000L, 7_000L, 8_000L, 9_000L, 10_000L, 11_000L, 12_000L)) {
+            now = t
+            val smallActions = feed(small, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3)))
+            val bigActions = feed(big, listOf(ownerPeer(9, "II:00:00:00:00:04", clients = 1)))
+            if (smallActions.any { it is AutoMeshAction.RemoveGroup } && yieldActions == null) yieldActions = smallActions
+            if (bigActions.any { it is AutoMeshAction.RemoveGroup }) movedByBig = true
+        }
+        assertFalse("an owner with more clients never yields to fewer", movedByBig)
+        assertEquals(
+            listOf(AutoMeshAction.RemoveGroup, AutoMeshAction.ConnectTo("CC:00:00:00:00:03")),
+            yieldActions,
+        )
+    }
+
+    @Test
+    fun `a stale advert never triggers a merge`() {
+        val c = mergeController(9) // fewer clients: would yield if the ad were fresh
+        now = 0L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        c.onEvent(AutoMeshEvent.MyClientsChanged(1))
+
+        // The other owner's ad is already two minutes old and never updates.
+        val stalePeer = AirMeshPeer("CC:00:00:00:00:03", 5, true, 0x2000, clients = 3, lastSeenMs = -120_000L)
+        for (t in listOf(0L, 6_000L, 30_000L, 90_000L)) {
+            now = t
+            val actions = feed(c, listOf(stalePeer))
+            assertTrue("a stale ad must not yield at t=$t", actions.none { it is AutoMeshAction.RemoveGroup })
+        }
+        assertTrue(c.state is AutoMeshState.Owner)
+    }
+
+    @Test
+    fun `a single sighting that disappears never merges`() {
+        val c = mergeController(9)
+        now = 0L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+
+        feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3))) // seen once...
+        now = 1_000L
+        feed(c, emptyList())                                            // ...then gone
+        repeat(60) {
+            val actions = tick(c) // a minute of ticks with no peers visible
+            assertTrue("one sighting is not enough", actions.none { it is AutoMeshAction.RemoveGroup })
+        }
+        assertTrue(c.state is AutoMeshState.Owner)
+    }
+
+    @Test
+    fun `an unstable client count delays the merge yield`() {
+        val c = mergeController(9) // ends with 2 clients; the other has 3
+        now = 0L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+
+        feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3))) // sighting 1
+        now = 4_000L
+        c.onEvent(AutoMeshEvent.MyClientsChanged(2)) // count changes; unstable until t=9 s
+
+        now = 6_000L
+        assertTrue("second sighting, but the count changed only 2 s ago",
+            feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3))).isEmpty())
+        now = 8_999L
+        assertTrue("4.999 s since the change: still unstable",
+            feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3))).isEmpty())
+
+        // Exactly 5 s stable: settling starts (2–6 s), so the yield lands by t=15 s.
+        var yieldActions: List<AutoMeshAction>? = null
+        for (t in listOf(9_000L, 10_000L, 11_000L, 12_000L, 13_000L, 14_000L, 15_000L)) {
+            now = t
+            val actions = feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3)))
+            if (actions.any { it is AutoMeshAction.RemoveGroup }) yieldActions = actions
+        }
+        assertEquals(listOf(AutoMeshAction.RemoveGroup, AutoMeshAction.ConnectTo("CC:00:00:00:00:03")), yieldActions)
+    }
+
+    @Test
+    fun `two owners deciding at once end in exactly one group`() {
+        val a = mergeController(2) // lower id: starts as the expected yielder...
+        val c = mergeController(5)
+        now = 0L
+        a.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+
+        var removals = 0
+        for (t in listOf(0L, 6_000L)) { // both see each other with zero clients
+            now = t
+            val aActions = feed(a, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 0)))
+            val cActions = feed(c, listOf(ownerPeer(2, "AA:00:00:00:00:01", clients = 0)))
+            removals += aActions.count { it is AutoMeshAction.RemoveGroup } +
+                cActions.count { it is AutoMeshAction.RemoveGroup }
+        }
+
+        // ...but a client joins a mid-settle: the picture flips and c becomes the yielder.
+        now = 7_000L
+        a.onEvent(AutoMeshEvent.MyClientsChanged(1))
+        var aYielded = false
+        for (t in listOf(8_000L, 9_000L, 10_000L, 11_000L, 12_000L, 13_000L, 14_000L, 15_000L)) {
+            now = t
+            val aActions = feed(a, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 0)))
+            val cActions = feed(c, listOf(ownerPeer(2, "AA:00:00:00:00:01", clients = 1))) // a's new count
+            if (aActions.any { it is AutoMeshAction.RemoveGroup }) aYielded = true
+            removals += cActions.count { it is AutoMeshAction.RemoveGroup }
+        }
+        assertFalse("the bigger group stays even though it started settling", aYielded)
+        assertEquals("exactly one group was removed in total", 1, removals)
+
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.CLIENT)) // the merge lands
+        assertTrue(a.state is AutoMeshState.Owner)
+        assertTrue(c.state is AutoMeshState.Client)
+    }
+
+    @Test
+    fun `the yield cooldown blocks a quick second merge`() {
+        val c = mergeController(9)
+        now = 0L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        var yieldedAt: Long? = null
+        for (t in listOf(0L, 6_000L, 7_000L, 8_000L, 9_000L, 10_000L, 11_000L, 12_000L)) {
+            now = t
+            if (feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3))).any { it is AutoMeshAction.RemoveGroup }) {
+                yieldedAt = t
+                break
+            }
+        }
+        assertNotNull("the first yield happened", yieldedAt)
+
+        // The merge lands us as a client; the group is then lost unexpectedly.
+        now = (yieldedAt ?: 0L) + 1_000L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.CLIENT))
+        c.onEvent(AutoMeshEvent.GroupGone) // unexpected loss: backoff, then grace
+
+        // We re-own the group well inside the 120 s yield cooldown...
+        while (c.state is AutoMeshState.Backoff) tick(c)
+        now += POST_LOSS_CREATION_GRACE_MS + 2_000L // past the creation grace
+        feed(c, listOf(peer(1, "DD:00:00:00:00:05"))) // a client peer: we are the elected creator
+        assertTrue(c.state is AutoMeshState.Creating)
+        now += 1_000L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+
+        // ...so a bigger owner appearing now must not trigger a second yield yet.
+        var secondYield = false
+        repeat(30) {
+            val actions = tick(c).let { feed(c, listOf(ownerPeer(3, "EE:00:00:00:00:06", clients = 5))) }
+            if (actions.any { it is AutoMeshAction.RemoveGroup }) secondYield = true
+        }
+        assertFalse("still within the 120 s yield cooldown", secondYield)
+
+        // After the cooldown expires, the same owner does trigger a yield.
+        now = (yieldedAt ?: 0L) + MergeDecider.YIELD_COOLDOWN_MS + 1_000L
+        var lateYield = false
+        repeat(8) {
+            if (feed(c, listOf(ownerPeer(3, "EE:00:00:00:00:06", clients = 5))).any { it is AutoMeshAction.RemoveGroup }) {
+                lateYield = true
+            } else {
+                now += 1_000L
+            }
+        }
+        assertTrue("past the cooldown the merge proceeds", lateYield)
+    }
+
+    @Test
+    fun `after an unexpected loss we join a visible owner during the grace`() {
+        val c = mergeController(5)
+        now = 0L
+        start(c) // Searching
+        now += 1_000L
+        feed(c, listOf(peer(7, "BB:00:00:00:00:02", owner = true))) // joins the visible owner
+        now += 1_000L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.CLIENT))
+
+        // The group is lost unexpectedly; we wait out the backoff into Searching.
+        now += 1_000L
+        c.onEvent(AutoMeshEvent.GroupGone)
+        while (c.state is AutoMeshState.Backoff) tick(c)
+
+        // Inside the grace window: a visible owner is joined, not created around.
+        val actions = feed(c, listOf(peer(7, "BB:00:00:00:00:02", owner = true), peer(1, "DD:00:00:00:00:05")))
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.ConnectTo("BB:00:00:00:00:02")), actions)
+    }
+
+    @Test
+    fun `after an unexpected loss creation waits for the grace window`() {
+        val c = mergeController(9) // highest id: would be the elected creator
+        now = 0L
+        start(c)
+        now += 1_000L
+        feed(c, listOf(peer(7, "BB:00:00:00:00:02", owner = true)))
+        now += 1_000L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.CLIENT))
+
+        now += 1_000L
+        c.onEvent(AutoMeshEvent.GroupGone) // unexpected loss
+        while (c.state is AutoMeshState.Backoff) tick(c)
+
+        // Inside the grace: peers visible but no owner — we must NOT create yet.
+        val during = feed(c, listOf(peer(1, "DD:00:00:00:00:05")))
+        assertTrue("no creation inside the 10 s grace window", during.none { it is AutoMeshAction.CreateGroup })
+
+        // After the grace: the existing election applies and we create.
+        now += POST_LOSS_CREATION_GRACE_MS + 2_000L
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.CreateGroup), feed(c, listOf(peer(1, "DD:00:00:00:00:05"))))
+    }
+
+    @Test
+    fun `a fresh startup creates immediately without any grace delay`() {
+        val c = mergeController(9) // never lost a group: no grace can be armed
+        now = 0L
+        start(c)
+        now += 1_000L
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.CreateGroup), feed(c, listOf(peer(1, "DD:00:00:00:00:05"))))
+    }
+
+    @Test
+    fun `the yielding state shows the merge banner`() {
+        val s = AutoMeshState.Yielding("CC:00:00:00:00:03", 5, targetPhones = 2, sinceMs = 1_000L)
+        assertEquals("Merging with a nearby network (#5, 2 phones)…", autoMeshBannerText(s, 0, null, 2_000L))
+    }
+
+    @Test
+    fun `a failed merge join backs off instead of retrying`() {
+        val c = mergeController(9)
+        now = 0L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        for (t in listOf(0L, 6_000L, 7_000L, 8_000L, 9_000L, 10_000L, 11_000L, 12_000L)) {
+            now = t
+            if (feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3))).any { it is AutoMeshAction.RemoveGroup }) break
+        }
+        assertTrue(c.state is AutoMeshState.Yielding)
+
+        val actions = c.onEvent(AutoMeshEvent.ConnectFailed(AutoFailureReason.OTHER))
+        assertEquals(listOf<AutoMeshAction>(AutoMeshAction.StopDiscovery), actions)
+        assertTrue("a failed merge join goes straight to backoff", c.state is AutoMeshState.Backoff)
+    }
+
+    @Test
+    fun `a merge join that never forms a group times out like any join`() {
+        val c = mergeController(9)
+        now = 0L
+        c.onEvent(AutoMeshEvent.GroupFormed(AutoMeshRole.OWNER))
+        for (t in listOf(0L, 6_000L, 7_000L, 8_000L, 9_000L, 10_000L, 11_000L, 12_000L)) {
+            now = t
+            if (feed(c, listOf(ownerPeer(5, "CC:00:00:00:00:03", clients = 3))).any { it is AutoMeshAction.RemoveGroup }) break
+        }
+        assertTrue(c.state is AutoMeshState.Yielding)
+
+        repeat((AUTO_JOIN_TIMEOUT_MS / 1_000L + 2).toInt()) { tick(c) }
+        assertTrue("the merge join timed out into backoff", c.state is AutoMeshState.Backoff)
+    }
 }
