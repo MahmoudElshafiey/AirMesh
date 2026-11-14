@@ -29,8 +29,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
@@ -120,6 +123,38 @@ data class DeliveryReceipt(
     val receivedAt: Long,
 )
 
+/** Every decoded incoming frame proves its origin is alive (TASK D2 part 3). */
+data class NodeActivity(
+    /** Origin node id from the frame header — not the link peer that relayed it. */
+    val nodeId: Int,
+    val atMs: Long,
+)
+
+/** One piece of user content delivered to this node, with its real frame seq (TASK D2 part 3). */
+data class DeliveredContent(
+    /** MSG, LOCATION or DIRECT — the only frame types that carry user content. */
+    val type: FrameType,
+    val originNode: Int,
+    val seq: Int,
+    val text: String?,
+    val latitudeE6: Int?,
+    val longitudeE6: Int?,
+    val accuracyMeters: Int?,
+    val atMs: Long,
+)
+
+/** One outgoing send that has no chat row of its own (TASK D2 part 3). */
+data class SendResult(
+    /** DIRECT or LOCATION — the two kinds whose handoff state no StateFlow exposes. */
+    val type: FrameType,
+    /** Destination node id for DIRECT; null for LOCATION (broadcast to the mesh room). */
+    val destNode: Int?,
+    val seq: Int,
+    /** True when at least one neighbor accepted the first flood; false = queued for replay. */
+    val handed: Boolean,
+    val atMs: Long,
+)
+
 /**
  * The protocol engine behind the UI, with no Android or Compose imports.
  *
@@ -151,6 +186,8 @@ class AirMeshNode(
     private val replayIntervalMs: Long = DEFAULT_REPLAY_INTERVAL_MS,
     private val profileStorage: ProfileStorage = InMemoryProfileStorage(),
     private val profileAnnounceIntervalMs: Long = DEFAULT_PROFILE_ANNOUNCE_INTERVAL_MS,
+    /** When true and no name is set yet, announce "User #<localNodeId>" (TASK D2 part 3). */
+    private val announceWithoutName: Boolean = false,
 ) {
 
     companion object {
@@ -200,6 +237,21 @@ class AirMeshNode(
     /** Delivery receipts for our own direct messages, newest last. */
     private val _deliveryReceipts = MutableStateFlow<List<DeliveryReceipt>>(emptyList())
     val deliveryReceipts: StateFlow<List<DeliveryReceipt>> = _deliveryReceipts.asStateFlow()
+
+    // TASK D2 part 3 event feeds. tryEmit never suspends; an emission with no
+    // collector attached is dropped, which is fine because the service collects
+    // from startup and history itself lives in Room.
+    /** Origin node of every decoded incoming frame; feeds presence tracking. */
+    private val _nodeActivity = MutableSharedFlow<NodeActivity>(extraBufferCapacity = 64)
+    val nodeActivity: SharedFlow<NodeActivity> = _nodeActivity.asSharedFlow()
+
+    /** User content delivered to this node, with the real frame seq of each one. */
+    private val _deliveredContent = MutableSharedFlow<DeliveredContent>(extraBufferCapacity = 64)
+    val deliveredContent: SharedFlow<DeliveredContent> = _deliveredContent.asSharedFlow()
+
+    /** Results of DIRECT/LOCATION sends, which have no StateFlow row. */
+    private val _sendResults = MutableSharedFlow<SendResult>(extraBufferCapacity = 64)
+    val sendResults: SharedFlow<SendResult> = _sendResults.asSharedFlow()
 
     /** This node's own display profile; loaded from storage at construction. */
     private val _myProfile = MutableStateFlow(
@@ -272,6 +324,16 @@ class AirMeshNode(
     }
 
     /**
+     * Seq of my own LOCATION frames that at least one neighbor accepted on the
+     * first flood; read by [sendLocationCore] to report `handed`. Same shape as
+     * [directHandoffs]; guarded by [outgoingLock]. (TASK D2 part 3)
+     */
+    private val locationHandoffs = object : LinkedHashMap<Int, Unit>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Unit>?) =
+            size > MAX_MESSAGES
+    }
+
+    /**
      * Node policy for DIRECT traffic (TASK D1 part 3): a frame addressed to me
      * stops here — not forwarded and not queued. Frames for other nodes keep the
      * historical flood-and-store behavior so they can reach their recipient even
@@ -280,7 +342,11 @@ class AirMeshNode(
      */
     private val directFramePolicy = object : FramePolicy {
         override fun shouldForward(frame: Frame): Boolean = !isDirectTrafficForMe(frame)
-        override fun shouldStore(frame: Frame): Boolean = !isDirectTrafficForMe(frame)
+
+        // PROFILE frames are ephemeral presence info: still forwarded, but never
+        // queued — a replay would re-flood a stale name long after it changed.
+        override fun shouldStore(frame: Frame): Boolean =
+            !isDirectTrafficForMe(frame) && frame.type != FrameType.PROFILE
     }
 
     /** True when [frame] is DIRECT/DIRECT_ACK traffic addressed to this node. */
@@ -434,16 +500,25 @@ class AirMeshNode(
     }
 
     /**
-     * Floods our current profile as one PROFILE frame. No-op while no name is
-     * set; with no neighbors the frame simply lands in store-and-forward and is
-     * replayed when a link appears, so nothing is lost by announcing early.
+     * The name our PROFILE frames carry. Falls back to "User #<localNodeId>" when
+     * [announceWithoutName] and no real name is set yet (TASK D2 part 3); the
+     * generated string passes NameSanitizer/ProfilePayload unchanged, so it needs
+     * no sanitizing here.
+     */
+    private fun displayNameForAnnounce(): String? =
+        _myProfile.value.name ?: if (announceWithoutName) "User #$localNodeId" else null
+
+    /**
+     * Floods our current profile as one PROFILE frame. No-op while neither a real
+     * name nor the anonymous fallback is available. PROFILE frames are not stored
+     * (see [directFramePolicy]), so with no neighbors nothing is queued; the
+     * neighbor-up trigger in [onNeighbors] announces as soon as a link appears.
      */
     private suspend fun announceProfile() {
-        val profile = _myProfile.value
-        if (profile.name == null) return
+        val displayName = displayNameForAnnounce() ?: return
 
         try {
-            val payload = ProfilePayload(profile.name, profile.colorIndex).encode()
+            val payload = ProfilePayload(displayName, _myProfile.value.colorIndex).encode()
             val frame = router.originate(FrameType.PROFILE, payload)
             lastProfileAnnounceAt = clock()
             eventLog.log("originated PROFILE seq=${frame.seq} ttl=${frame.ttl}")
@@ -463,7 +538,7 @@ class AirMeshNode(
         while (currentCoroutineContext().isActive) {
             delay(replayIntervalMs)
             val now = clock()
-            if (_myProfile.value.name != null &&
+            if (displayNameForAnnounce() != null &&
                 transport.neighbors.value.isNotEmpty() &&
                 now - lastProfileAnnounceAt >= profileAnnounceIntervalMs
             ) {
@@ -493,6 +568,10 @@ class AirMeshNode(
         try {
             val payload = LocationPayload(latitudeE6, longitudeE6, accuracyMeters).encode()
             val frame = router.originate(FrameType.LOCATION, payload)
+            // The first flood ran inside originate; successful writes were
+            // recorded in locationHandoffs by sendFrame before we got here.
+            val handed = synchronized(outgoingLock) { locationHandoffs.containsKey(frame.seq) }
+            _sendResults.tryEmit(SendResult(FrameType.LOCATION, null, frame.seq, handed, clock()))
             appendLocation(
                 MeshLocation(
                     senderId = localNodeId,
@@ -550,6 +629,7 @@ class AirMeshNode(
             // The first flood ran inside originate; successful writes were
             // recorded in directHandoffs by sendFrame before we got here.
             val handed = synchronized(outgoingLock) { directHandoffs.containsKey(frame.seq) }
+            _sendResults.tryEmit(SendResult(FrameType.DIRECT, destNodeId, frame.seq, handed, clock()))
             eventLog.log("direct: sent to #$destNodeId seq=${frame.seq} ${if (handed) "handed" else "queued"}")
             DirectSendResult(seq = frame.seq, handed = handed)
         } catch (error: Exception) {
@@ -568,6 +648,9 @@ class AirMeshNode(
             "RX ${frame.type} node=${frame.nodeId} seq=${frame.seq} " +
                 "ttl=${frame.ttl} from=${packet.senderId}",
         )
+        // Presence input (TASK D2 part 3): any decoded frame proves its ORIGIN is
+        // alive, whether we deliver it or only relay it.
+        _nodeActivity.tryEmit(NodeActivity(frame.nodeId, clock()))
         router.onFrameReceived(frame, packet.senderId)
     }
 
@@ -594,6 +677,9 @@ class AirMeshNode(
                 outgoing = false,
             ),
         )
+        _deliveredContent.tryEmit(
+            DeliveredContent(FrameType.MSG, frame.nodeId, frame.seq, text, null, null, null, clock()),
+        )
         eventLog.log("delivered MSG node=${frame.nodeId} seq=${frame.seq} ttl=${frame.ttl}")
     }
 
@@ -613,6 +699,18 @@ class AirMeshNode(
                         accuracyMeters = payload.accuracyMeters,
                         timestamp = clock(),
                         ttl = frame.ttl,
+                    ),
+                )
+                _deliveredContent.tryEmit(
+                    DeliveredContent(
+                        FrameType.LOCATION,
+                        frame.nodeId,
+                        frame.seq,
+                        null,
+                        payload.latitudeE6,
+                        payload.longitudeE6,
+                        payload.accuracyMeters,
+                        clock(),
                     ),
                 )
                 eventLog.log("delivered LOCATION node=${frame.nodeId} seq=${frame.seq} ttl=${frame.ttl}")
@@ -672,6 +770,9 @@ class AirMeshNode(
         if (payload.destNodeId != localNodeId) return // for someone else: relayed, never shown
 
         appendDirectMessage(DirectMessage(frame.nodeId, payload.text, frame.seq, clock()))
+        _deliveredContent.tryEmit(
+            DeliveredContent(FrameType.DIRECT, frame.nodeId, frame.seq, payload.text, null, null, null, clock()),
+        )
         eventLog.log("direct: received from #${frame.nodeId}")
 
         val key = frame.nodeId to frame.seq
@@ -793,6 +894,10 @@ class AirMeshNode(
                 // recipient decides later whether to surface it.
                 if (frame.nodeId == localNodeId && frame.type == FrameType.DIRECT) {
                     synchronized(outgoingLock) { directHandoffs[frame.seq] = Unit }
+                }
+                // My own LOCATION frames feed the send-results flow's "handed" flag.
+                if (frame.nodeId == localNodeId && frame.type == FrameType.LOCATION) {
+                    synchronized(outgoingLock) { locationHandoffs[frame.seq] = Unit }
                 }
             } else {
                 eventLog.log(
