@@ -423,9 +423,15 @@ fun LocationCard(
 /** Material's minimum touch target; the spec calls for 48dp on both icon buttons. */
 private val IconTouchTarget = 48.dp
 
+/**
+ * Internal (not private) so the redesigned conversation screen (TASK U2 part 1) reuses the
+ * exact same composer — pill field, one-time share confirmation, payload-limit hint.
+ */
 @Composable
-private fun ComposeBar(
+internal fun ComposeBar(
     onSendText: (String) -> Unit,
+    // Location shares are broadcast-only by protocol, so direct chats hide the pin.
+    showLocationButton: Boolean = true,
     onShareLocation: () -> Unit,
     shareStatus: LocationShareStatus,
     useTestLocation: Boolean = false,
@@ -475,14 +481,16 @@ private fun ComposeBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            IconButton(
-                onClick = { if (hasConfirmedShare) onShareLocation() else confirmShare = true },
-                enabled = shareStatus != LocationShareStatus.WAITING_FOR_FIX,
-                modifier = Modifier.size(IconTouchTarget),
-            ) {
-                Icon(imageVector = MeshLocationPinIcon, contentDescription = "Share my location")
+            if (showLocationButton) {
+                IconButton(
+                    onClick = { if (hasConfirmedShare) onShareLocation() else confirmShare = true },
+                    enabled = shareStatus != LocationShareStatus.WAITING_FOR_FIX,
+                    modifier = Modifier.size(IconTouchTarget),
+                ) {
+                    Icon(imageVector = MeshLocationPinIcon, contentDescription = "Share my location")
+                }
+                if (useTestLocation) TestLocationChip()
             }
-            if (useTestLocation) TestLocationChip()
             OutlinedTextField(
                 value = text,
                 // Clamp at the codec limit so an overlong draft can never be sent.

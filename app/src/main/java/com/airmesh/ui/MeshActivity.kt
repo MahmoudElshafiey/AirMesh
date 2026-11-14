@@ -1,12 +1,16 @@
 package com.airmesh.ui
 
 import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -47,6 +51,7 @@ import com.airmesh.service.MeshService
 import com.airmesh.transport.PermissionRequirements
 import com.airmesh.transport.PrototypeActivity
 import com.airmesh.ui.theme.AirMeshTheme
+import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -79,6 +84,9 @@ class MeshActivity : ComponentActivity() {
 
     private lateinit var themeStore: ThemeModeStore
     private lateinit var onboardingStore: ProfileOnboardingStore
+    private lateinit var chatNoticeStore: ChatNoticeStore
+    /** One-time "not encrypted" note in conversations; persisted once dismissed (TASK U2 part 1). */
+    private val encryptionNoteDismissed = mutableStateOf(false)
     private var locationProvider: AndroidLocationProvider? = null
 
     // Set in onCreate (applicationInfo is not available during construction).
@@ -174,6 +182,8 @@ class MeshActivity : ComponentActivity() {
 
         themeStore = SharedPreferencesThemeModeStore(this)
         onboardingStore = SharedPreferencesProfileOnboardingStore(this)
+        chatNoticeStore = SharedPreferencesChatNoticeStore(this)
+        encryptionNoteDismissed.value = chatNoticeStore.isEncryptionNoteDismissed()
         isDebugBuild = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         testLocationStore = if (isDebugBuild) SharedPreferencesTestLocationStore(applicationContext) else null
         // The debug switch survives process death; release builds stay off.
@@ -291,6 +301,18 @@ class MeshActivity : ComponentActivity() {
                             // answered (or saved) once, even after an app update.
                             promptOnboarding = !onboardingStore.isDone() && myProfile.name == null,
                             onOnboardingAnswered = { onboardingStore.markDone() },
+                            // Conversation screen wiring (TASK U2 part 1): per-conversation message flow from the
+                            // store, direct sends, read marking, clearing and the location card's maps action.
+                            messagesFor = { id -> service.chatStore.messages(id) },
+                            onSendDirect = { destId, text -> uiScope.launch { service.sendDirect(destId, text) } },
+                            onMarkRead = { id -> uiScope.launch { service.chatStore.markRead(id) } },
+                            onClearChat = { id -> uiScope.launch { service.chatStore.clearConversation(id) } },
+                            onOpenInMaps = ::openInMaps,
+                            showEncryptionNote = !encryptionNoteDismissed.value,
+                            onDismissEncryptionNote = {
+                                encryptionNoteDismissed.value = true
+                                chatNoticeStore.markEncryptionNoteDismissed()
+                            },
                         )
                     }
                 }
@@ -476,6 +498,27 @@ class MeshActivity : ComponentActivity() {
         testLocationStore?.save(true)
         log("location: sharing the debug test location instead")
         shareMyLocation()
+    }
+
+    /**
+     * Location card "Open in maps" (TASK U2 part 1): a geo: intent for any maps app, then a
+     * web fallback; if nothing can handle either, copy the coordinates so they are not lost.
+     */
+    private fun openInMaps(latitudeE6: Int, longitudeE6: Int) {
+        val lat = String.format(Locale.US, "%.5f", latitudeE6 / 1_000_000.0)
+        val lon = String.format(Locale.US, "%.5f", longitudeE6 / 1_000_000.0)
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:$lat,$lon?z=15")))
+            return
+        } catch (_: ActivityNotFoundException) {
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/maps?q=$lat,$lon")))
+            return
+        } catch (_: ActivityNotFoundException) {
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("AirMesh location", "$lat, $lon"))
     }
 
     companion object {

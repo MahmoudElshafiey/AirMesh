@@ -201,3 +201,130 @@ val MeshSendIcon = ImageVector.Builder(
         close()
     }
 }.build()
+
+/** Delivery state of an outgoing direct message still in the queue (Material "schedule" clock). */
+val MeshClockIcon = ImageVector.Builder(
+    name = "MeshClockIcon",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+        // Ring: outer circle radius 10 at (12,12), inner radius 8 — EvenOdd cuts the hole.
+        moveTo(22f, 12f)
+        arcToRelative(10f, 10f, 0f, true, true, -20f, 0f)
+        arcToRelative(10f, 10f, 0f, true, true, 20f, 0f)
+        close()
+        moveTo(18f, 12f)
+        arcToRelative(6f, 6f, 0f, true, true, -12f, 0f)
+        arcToRelative(6f, 6f, 0f, true, true, 12f, 0f)
+        close()
+    }
+    // Hands: 12 -> 3 (hour) and 12 -> 8-ish (minute), as filled wedges.
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(12f, 7f); horizontalLineToRelative(1.5f); verticalLineToRelative(5.5f); lineToRelative(-4.5f, 2.6f); verticalLineToRelative(-1.5f); close()
+    }
+}.build()
+
+/** One tick: the message was handed to a neighbor (Material "check"). */
+val MeshCheckIcon = ImageVector.Builder(
+    name = "MeshCheckIcon",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(9f, 16.17f)
+        lineTo(4.83f, 12f)
+        lineTo(3.41f, 13.41f)
+        lineTo(9f, 19f)
+        lineTo(21f, 7f)
+        lineTo(19.59f, 5.59f)
+        close()
+    }
+}.build()
+
+/** Two ticks: the recipient's receipt arrived (Material "done_all"). */
+val MeshDoubleCheckIcon = ImageVector.Builder(
+    name = "MeshDoubleCheckIcon",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        // First tick.
+        moveTo(18f, 7f)
+        lineToRelative(-1.41f, -1.41f)
+        lineToRelative(-6.34f, 6.34f)
+        lineToRelative(1.41f, 1.41f)
+        close()
+        // Second tick (the longer one).
+        moveTo(22.24f, 5.59f)
+        lineTo(11.66f, 16.17f)
+        lineTo(7.48f, 12f)
+        lineToRelative(-1.41f, 1.41f)
+        lineTo(11.66f, 19f)
+        lineToRelative(12f, -12f)
+        close()
+        // Third tick (the short left one).
+        moveTo(0.41f, 13.41f)
+        lineTo(6f, 19f)
+        lineToRelative(1.41f, -1.41f)
+        lineTo(1.83f, 12f)
+        close()
+    }
+}.build()
+
+/** Outgoing message not delivered within the limit; tap to resend (Material "error" circle). */
+val MeshAlertIcon = ImageVector.Builder(
+    name = "MeshAlertIcon",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+        // Ring: outer radius 10 at (12,12), inner radius 8.
+        moveTo(22f, 12f)
+        arcToRelative(10f, 10f, 0f, true, true, -20f, 0f)
+        arcToRelative(10f, 10f, 0f, true, true, 20f, 0f)
+        close()
+        moveTo(18f, 12f)
+        arcToRelative(6f, 6f, 0f, true, true, -12f, 0f)
+        arcToRelative(6f, 6f, 0f, true, true, 12f, 0f)
+        close()
+    }
+    // Exclamation mark: stem + dot.
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(11f, 7f); horizontalLineToRelative(2f); verticalLineToRelative(6f); horizontalLineToRelative(-2f); close()
+        moveTo(11f, 15f); horizontalLineToRelative(2f); verticalLineToRelative(2f); horizontalLineToRelative(-2f); close()
+    }
+}.build()
+
+/** Dismiss button for the one-time "not encrypted" note (Material "close"). */
+val MeshCloseIcon = ImageVector.Builder(
+    name = "MeshCloseIcon",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(19f, 6.41f)
+        lineTo(17.59f, 5f)
+        lineTo(12f, 10.59f)
+        lineTo(6.41f, 5f)
+        lineTo(5f, 6.41f)
+        lineTo(10.59f, 12f)
+        lineTo(5f, 17.59f)
+        lineTo(6.41f, 19f)
+        lineTo(12f, 13.41f)
+        lineTo(17.59f, 19f)
+        lineTo(19f, 17.59f)
+        lineTo(13.41f, 12f)
+        close()
+    }
+}.build()
