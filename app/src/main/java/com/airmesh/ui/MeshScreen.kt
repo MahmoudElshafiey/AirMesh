@@ -58,7 +58,6 @@ import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.autoMeshBannerText
 import com.airmesh.transport.noAirMeshPeersBannerText
-import com.airmesh.ui.components.Avatar
 import com.airmesh.ui.components.ChipTone
 import com.airmesh.ui.components.StatusChip
 import com.airmesh.ui.theme.AirMeshSpacing
@@ -337,7 +336,19 @@ fun MeshScreen(
                     )
                 }
                 composable(ROUTE_LOG) { MeshLogTab(events = events, onClearLog = onClearLog) }
-                composable(ROUTE_PROFILE) { ProfilePlaceholderScreen(nodeId = nodeId, myProfile = myProfile) }
+                composable(ROUTE_PROFILE) {
+                    // Full-screen profile editor (TASK U1 part 4): the same content as the old
+                    // bottom sheet; saving goes through service.setMyProfile and pops back.
+                    ProfileScreen(
+                        nodeId = nodeId,
+                        myProfile = myProfile,
+                        onSave = { name, colorIndex ->
+                            onSaveProfile(name, colorIndex)
+                            navController.popBackStack()
+                        },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
             }
         }
     }
@@ -471,22 +482,21 @@ private fun ChatPlaceholderScreen(conversationId: Int) {
     }
 }
 
-/** Placeholder for the profile route; TASK U1 part 4 builds the full editor. */
+/** Profile route (TASK U1 part 4): the sheet editor as a full screen; saving pops back. */
 @Composable
-private fun ProfilePlaceholderScreen(nodeId: Int, myProfile: MyProfile) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(AirMeshSpacing.md),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Avatar(name = myProfile.name ?: "User #$nodeId", colorIndex = myProfile.colorIndex, size = 72.dp)
-        Spacer(modifier = Modifier.height(AirMeshSpacing.sm))
-        Text("Node #$nodeId", style = MaterialTheme.typography.titleMedium)
-        Spacer(modifier = Modifier.height(AirMeshSpacing.xs))
-        Text(
-            "Profile editing is built in a later step.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium,
+private fun ProfileScreen(
+    nodeId: Int,
+    myProfile: MyProfile,
+    onSave: (name: String, colorIndex: Int) -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        ProfileSheetContent(
+            nodeId = nodeId,
+            initialName = myProfile.name ?: "",
+            initialColorIndex = myProfile.colorIndex,
+            onSave = onSave,
+            onCancel = onBack,
         )
     }
 }
