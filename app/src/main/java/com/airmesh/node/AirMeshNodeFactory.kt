@@ -20,6 +20,9 @@ fun createAirMeshNode(
     nodeId: Int,
     eventLog: EventLog,
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    // TASK D2 part 4 pass-throughs; the defaults reproduce the pre-D2 behavior.
+    profileAnnounceIntervalMs: Long = AirMeshNode.DEFAULT_PROFILE_ANNOUNCE_INTERVAL_MS,
+    announceWithoutName: Boolean = false,
 ): AirMeshNode {
     // Share the node's event log with the transport so socket events (connect
     // phases, HELLO exchange, accept loop) show up in the on-device log.
@@ -36,5 +39,7 @@ fun createAirMeshNode(
         dispatcher = dispatcher,
         // Persist the node's own name/color and the profile directory across restarts.
         profileStorage = SharedPrefsProfileStorage(context),
+        profileAnnounceIntervalMs = profileAnnounceIntervalMs,
+        announceWithoutName = announceWithoutName,
     )
 }

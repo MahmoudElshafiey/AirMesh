@@ -133,6 +133,14 @@ class ChatRepository(
         store.updateOutgoingStatus(fromNode, ackedSeq, ChatStatus.DELIVERED)
     }
 
+    /**
+     * A queued outgoing row was handed to a neighbor (TASK D2 part 4): upgrade it
+     * to SENT. Content-free on purpose — the send-results feed carries only
+     * (conversation, seq), and the store's never-downgrade rule makes repeats safe.
+     */
+    suspend fun noteOutgoingHanded(conversationId: Int, originSeq: Int): Boolean =
+        store.updateOutgoingStatus(conversationId, originSeq, ChatStatus.SENT)
+
     /** The user opened a conversation: all its incoming rows become read. */
     suspend fun markRead(conversationId: Int) = store.markRead(conversationId)
 

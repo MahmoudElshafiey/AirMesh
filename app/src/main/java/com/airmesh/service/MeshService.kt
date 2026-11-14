@@ -13,7 +13,13 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.airmesh.R
+import com.airmesh.chat.ChatRepository
+import com.airmesh.chat.ChatStore
+import com.airmesh.chat.MESH_CONVERSATION_ID
+import com.airmesh.chat.NodePresence
+import com.airmesh.chat.PresenceTracker
 import com.airmesh.node.AirMeshNode
+import com.airmesh.node.DirectSendResult
 import com.airmesh.node.EventLog
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
@@ -23,6 +29,9 @@ import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
 import com.airmesh.profile.ProfileInfo
+import com.airmesh.protocol.FrameType
+import com.airmesh.storage.ChatDatabase
+import com.airmesh.storage.RoomChatStore
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoFailureReason
 import com.airmesh.transport.AutoMeshAction
@@ -78,6 +87,11 @@ class MeshService : Service() {
     private lateinit var node: AirMeshNode
     private lateinit var connector: WifiDirectConnector
 
+    /** Chat history layer (TASK D2 part 4): a separate Room DB from the packet store. */
+    private lateinit var _chatStore: RoomChatStore
+    private lateinit var _chatRepository: ChatRepository
+    private lateinit var presenceTracker: PresenceTracker
+
     /** DNS-SD directory of nearby AirMesh phones; created in [onCreate]. */
     private lateinit var peerDirectory: WifiP2pPeerDirectory
 
@@ -124,6 +138,15 @@ class MeshService : Service() {
     val myProfile: StateFlow<MyProfile> get() = node.myProfile
     /** Display names learned from the mesh, keyed by node id. */
     val profiles: StateFlow<Map<Int, ProfileInfo>> get() = node.profiles
+
+    /** Chat history rows/summaries/contacts for the bound UI (TASK D2 part 4). */
+    val chatStore: ChatStore get() = _chatStore
+    /** Turns node events into chat rows; also where the UI records its own sends. */
+    val chatRepository: ChatRepository get() = _chatRepository
+
+    /** Live presence of every node seen within the last 24 h; recomputed every 10 s. */
+    private val _presence = MutableStateFlow<Map<Int, NodePresence>>(emptyMap())
+    val presence: StateFlow<Map<Int, NodePresence>> = _presence.asStateFlow()
     val events: StateFlow<List<LogEntry>> get() = _eventLog.entries
     val connectorState: StateFlow<ConnectorState> get() = connector.state
 
@@ -175,8 +198,18 @@ class MeshService : Service() {
             applicationContext,
             NodeIdProvider(SharedPreferencesNodeIdStore(this)).getOrCreate(),
             _eventLog,
+            // TASK D2 part 4: re-announce the profile every 45 s (fresher names in
+            // history) and fall back to "User #id" so a nameless node still shows.
+            profileAnnounceIntervalMs = 45_000L,
+            announceWithoutName = true,
         )
         connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
+
+        // Chat history (TASK D2 part 4): separate Room DB so chat rows survive the
+        // packet store's lifecycle; presence ages out on the wall clock.
+        _chatStore = RoomChatStore(ChatDatabase.build(applicationContext))
+        _chatRepository = ChatRepository(localNodeId = node.localNodeId, store = _chatStore)
+        presenceTracker = PresenceTracker(clock = { System.currentTimeMillis() })
 
         // Auto-mesh: a DNS-SD directory of nearby AirMesh phones plus the pure
         // state machine that decides when to join or create groups. One coordinator
@@ -317,6 +350,91 @@ class MeshService : Service() {
             }
         }
 
+        // --- Chat history wiring (TASK D2 part 4) ---------------------------------
+
+        // Any decoded frame proves its origin is alive; also make sure a contact row
+        // exists so history can show a name as soon as one arrives.
+        serviceScope.launch {
+            node.nodeActivity.collect { activity ->
+                presenceTracker.noteActivity(activity.nodeId)
+                _chatStore.upsertContact(activity.nodeId, null, 0)
+            }
+        }
+
+        // PROFILE announcements fill in contact names/colors; the upsert never
+        // erases an already-known value.
+        serviceScope.launch {
+            node.profiles.collect { profiles ->
+                for ((nodeId, profile) in profiles) {
+                    _chatStore.upsertContact(nodeId, profile.name, profile.colorIndex)
+                }
+            }
+        }
+
+        // User content with its real frame seq: the only feed that can key chat rows.
+        serviceScope.launch {
+            node.deliveredContent.collect { content ->
+                when (content.type) {
+                    FrameType.MSG -> _chatRepository.onIncomingBroadcast(content.originNode, content.text.orEmpty(), content.seq)
+                    FrameType.LOCATION -> _chatRepository.onIncomingLocation(
+                        originNode = content.originNode,
+                        latitudeE6 = content.latitudeE6 ?: 0,
+                        longitudeE6 = content.longitudeE6 ?: 0,
+                        accuracyMeters = content.accuracyMeters ?: 0,
+                        originSeq = content.seq,
+                    )
+                    FrameType.DIRECT -> _chatRepository.onIncomingDirect(content.originNode, content.text.orEmpty(), content.seq)
+                    else -> Unit // ACK/HELLO/PROFILE carry no chat content
+                }
+            }
+        }
+
+        // Our own broadcast text rows. The StateFlow re-emits its whole list on every
+        // change, so this is idempotent by design: a duplicate insert upgrades the
+        // stored row instead (QUEUED -> SENT once a replay hands it to a neighbor).
+        serviceScope.launch {
+            node.messages.collect { messages ->
+                for (message in messages) {
+                    val seq = message.seq ?: continue
+                    if (!message.outgoing) continue
+                    _chatRepository.recordOutgoingBroadcast(message.text, seq, message.handedTo.isNotEmpty())
+                }
+            }
+        }
+
+        // DIRECT and LOCATION sends have no StateFlow row of their own; the result
+        // feed is their only handoff signal — upgrade the queued row to SENT (the
+        // store never downgrades, so repeats are harmless).
+        serviceScope.launch {
+            node.sendResults.collect { result ->
+                if (!result.handed) return@collect
+                val conversationId = when (result.type) {
+                    FrameType.DIRECT -> result.destNode ?: return@collect
+                    FrameType.LOCATION -> MESH_CONVERSATION_ID
+                    else -> return@collect
+                }
+                _chatRepository.noteOutgoingHanded(conversationId, result.seq)
+            }
+        }
+
+        // A recipient's DIRECT_ACK marks our DM row DELIVERED (never downgrades).
+        serviceScope.launch {
+            node.deliveryReceipts.collect { receipts ->
+                for (receipt in receipts) {
+                    _chatRepository.onReceipt(receipt.fromNodeId, receipt.ackedSeq)
+                }
+            }
+        }
+
+        // Presence ages out on the wall clock; recompute every 10 s so the UI updates
+        // without any new frame arriving.
+        serviceScope.launch {
+            while (isActive) {
+                _presence.value = presenceTracker.states(node.neighbors.value)
+                delay(10_000L)
+            }
+        }
+
         // --- Auto-mesh wiring ---------------------------------------------------
         // One tick per second drives backoff expiry, join timeouts and the takeover deadline.
         serviceScope.launch {
@@ -427,8 +545,27 @@ class MeshService : Service() {
 
     suspend fun sendText(text: String): Boolean = node.sendText(text)
 
-    suspend fun sendLocation(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Boolean =
-        node.sendLocation(latitudeE6, longitudeE6, accuracyMeters)
+    /**
+     * Shares our location with the mesh and records it in the chat history. The row
+     * starts QUEUED because `handed` is only known through the sendResults feed; that
+     * collector upgrades it to SENT when a neighbor accepts the first flood.
+     */
+    suspend fun sendLocation(latitudeE6: Int, longitudeE6: Int, accuracyMeters: Int): Boolean {
+        val seq = node.sendLocationWithSeq(latitudeE6, longitudeE6, accuracyMeters)
+        if (seq > 0) {
+            _chatRepository.recordOutgoingLocation(latitudeE6, longitudeE6, accuracyMeters, seq, handed = false)
+        }
+        return seq > 0
+    }
+
+    /** Sends a one-to-one direct message and records it in the chat history. */
+    suspend fun sendDirect(destNodeId: Int, text: String): DirectSendResult? {
+        val result = node.sendDirect(destNodeId, text) ?: return null
+        // The result already carries `handed`, so the row gets its final status now;
+        // the sendResults collector is a no-op safety net for this seq.
+        _chatRepository.recordOutgoingDirect(destNodeId, text, result.seq, result.handed)
+        return result
+    }
 
     /** Saves and announces this node's display name and avatar color. */
     suspend fun setMyProfile(name: String, colorIndex: Int): Boolean =

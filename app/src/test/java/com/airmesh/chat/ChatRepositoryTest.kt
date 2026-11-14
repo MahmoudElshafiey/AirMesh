@@ -132,4 +132,20 @@ class ChatRepositoryTest {
         assertTrue(rows(5).single().isRead)
         assertFalse(rows(6).single().isRead)
     }
+
+    @Test
+    fun noteOutgoingHandedUpgradesQueuedRowsAndIsHarmlessOtherwise() = runBlocking {
+        repo.recordOutgoingLocation(latitudeE6 = 1, longitudeE6 = 2, accuracyMeters = 3, seq = 4, handed = false)
+        assertEquals(ChatStatus.QUEUED, rows(MESH_CONVERSATION_ID).single().status)
+
+        // The sendResults feed reports the handoff: upgrade to SENT...
+        assertTrue(repo.noteOutgoingHanded(MESH_CONVERSATION_ID, 4))
+        assertEquals(ChatStatus.SENT, rows(MESH_CONVERSATION_ID).single().status)
+        // ...a second report is a no-op (same status)...
+        assertFalse(repo.noteOutgoingHanded(MESH_CONVERSATION_ID, 4))
+        // ...and it never touches other conversations or unknown seqs.
+        repo.recordOutgoingDirect(destNode = 3, text = "dm", seq = 5, handed = false)
+        assertFalse(repo.noteOutgoingHanded(99, 4))
+        assertEquals(ChatStatus.QUEUED, rows(3).single().status)
+    }
 }
