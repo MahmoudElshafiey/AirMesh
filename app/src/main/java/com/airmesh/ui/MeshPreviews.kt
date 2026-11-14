@@ -15,10 +15,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.airmesh.chat.ChatDirection
+import com.airmesh.chat.ChatKind
+import com.airmesh.chat.Contact
+import com.airmesh.chat.ConversationSummary
+import com.airmesh.chat.MESH_CONVERSATION_ID
+import com.airmesh.chat.NodePresence
+import com.airmesh.chat.PresenceState
 import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
+import com.airmesh.node.MyProfile
 import com.airmesh.profile.ProfileInfo
 import com.airmesh.routing.Router
 import com.airmesh.transport.AirMeshPeer
@@ -444,4 +452,201 @@ private fun ProfileSheetDarkPreview() = ThemedTabPreview(darkTheme = true) {
 @Composable
 private fun ProfileSheetEmojiLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
     ProfileSheetPreviewContent(initialName = PREVIEW_EMOJI_NAME, initialColorIndex = 2)
+}
+
+// --- Chats home (TASK U1 part 3) --------------------------------------------
+// A fixed "now" keeps the list times deterministic in design mode.
+
+private val previewNowMs = 1_700_002_000_000L
+
+/** Room row with a location message, plus two direct conversations (today + yesterday). */
+private val previewHomeSummaries = listOf(
+    ConversationSummary(MESH_CONVERSATION_ID, previewNowMs - 30_000L, ChatDirection.IN, ChatKind.LOCATION, null, 2),
+    ConversationSummary(2, previewNowMs - 60_000L, ChatDirection.IN, ChatKind.TEXT, "Copy that. Sending the supply list next.", 3),
+    ConversationSummary(3, previewNowMs - 86_400_000L, ChatDirection.OUT, ChatKind.TEXT, "On my way to the checkpoint.", 0),
+)
+
+/** Short name (has a chat), 24-character name (has a chat), emoji (no chat yet), anonymous. */
+private val previewHomeContacts = listOf(
+    Contact(2, "Mira", 1),
+    Contact(3, PREVIEW_LONG_NAME, 4),
+    Contact(4, PREVIEW_EMOJI_NAME, 5),
+    Contact(7, null, 0), // anonymous: no chat and no presence, so the home list skips it
+)
+
+private val previewHomePresence = mapOf(
+    2 to NodePresence(PresenceState.ONLINE, true),
+    3 to NodePresence(PresenceState.RECENT, false),
+    4 to NodePresence(PresenceState.ONLINE, true),
+)
+
+/** Thirty named contacts for the long-scroll state; presence alternates so both dots show. */
+private val previewManyContacts = (1..30).map { i -> Contact(i, "Rescuer $i", i % AVATAR_COLOR_COUNT) }
+
+private val previewManyPresence: Map<Int, NodePresence> = (1..30).associate { i ->
+    i to NodePresence(if (i % 2 == 0) PresenceState.RECENT else PresenceState.ONLINE, i % 3 == 0)
+}
+
+@Composable
+private fun ChatsHomePreviewContent(
+    summaries: List<ConversationSummary>,
+    contacts: List<Contact>,
+    presence: Map<Int, NodePresence>,
+) {
+    ChatsHomeContent(
+        summaries = summaries,
+        contacts = contacts,
+        presence = presence,
+        nowMs = previewNowMs,
+        onOpenConversation = {},
+    )
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chats home · mixed · light")
+@Composable
+private fun ChatsHomeMixedLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatsHomePreviewContent(previewHomeSummaries, previewHomeContacts, previewHomePresence)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chats home · mixed · dark")
+@Composable
+private fun ChatsHomeMixedDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatsHomePreviewContent(previewHomeSummaries, previewHomeContacts, previewHomePresence)
+}
+
+// fontScale 1.5: long and emoji names must stay on one line in every row.
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = PREVIEW_HEIGHT_DP,
+    fontScale = 1.5f,
+    name = "Chats home · mixed · light · large text",
+)
+@Composable
+private fun ChatsHomeMixedLightLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatsHomePreviewContent(previewHomeSummaries, previewHomeContacts, previewHomePresence)
+}
+
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = PREVIEW_HEIGHT_DP,
+    fontScale = 1.5f,
+    name = "Chats home · mixed · dark · large text",
+)
+@Composable
+private fun ChatsHomeMixedDarkLargeTextPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatsHomePreviewContent(previewHomeSummaries, previewHomeContacts, previewHomePresence)
+}
+
+// First-run state: only the pinned room and the animated "looking" illustration.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chats home · empty · light")
+@Composable
+private fun ChatsHomeEmptyLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatsHomePreviewContent(emptyList(), emptyList(), emptyMap())
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chats home · empty · dark")
+@Composable
+private fun ChatsHomeEmptyDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatsHomePreviewContent(emptyList(), emptyList(), emptyMap())
+}
+
+// One contact: the smallest non-empty list (room + a single "People" row).
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chats home · one contact · light")
+@Composable
+private fun ChatsHomeOneContactLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatsHomePreviewContent(
+        summaries = listOf(previewHomeSummaries.first()),
+        contacts = listOf(Contact(2, "Mira", 1)),
+        presence = mapOf(2 to NodePresence(PresenceState.ONLINE, true)),
+    )
+}
+
+// Thirty contacts: the long-scroll state with both presence dots.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chats home · 30 contacts · dark")
+@Composable
+private fun ChatsHomeManyContactsDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatsHomePreviewContent(
+        summaries = listOf(previewHomeSummaries.first()),
+        contacts = previewManyContacts,
+        presence = previewManyPresence,
+    )
+}
+
+// --- Contact picker and About (TASK U1 part 3) -------------------------------
+
+@Composable
+private fun ContactPickerPreviewContent(contacts: List<Contact>, presence: Map<Int, NodePresence>) {
+    ContactPickerSheet(
+        contacts = contacts,
+        presence = presence,
+        nowMs = previewNowMs,
+        onOpenConversation = {},
+        onDismiss = {},
+    )
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 480, name = "Contact picker · light")
+@Composable
+private fun ContactPickerLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ContactPickerPreviewContent(previewHomeContacts, previewHomePresence)
+}
+
+// Thirty contacts: the sheet's list must scroll inside its bounded height.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 560, name = "Contact picker · 30 contacts · dark")
+@Composable
+private fun ContactPickerManyDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ContactPickerPreviewContent(previewManyContacts, previewManyPresence)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 320, name = "Contact picker · empty")
+@Composable
+private fun ContactPickerEmptyPreview() = ThemedTabPreview(darkTheme = false) {
+    ContactPickerPreviewContent(emptyList(), emptyMap())
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "About · light")
+@Composable
+private fun AboutLightPreview() = ThemedTabPreview(darkTheme = false) {
+    AboutDialog(onDismiss = {})
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "About · dark")
+@Composable
+private fun AboutDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    AboutDialog(onDismiss = {})
+}
+
+// --- Profile screen (TASK U1 part 4) -----------------------------------------
+
+@Composable
+private fun ProfileScreenPreviewContent(initialName: String, initialColorIndex: Int) {
+    ProfileScreen(
+        nodeId = 7,
+        myProfile = MyProfile(name = initialName.ifEmpty { null }, colorIndex = initialColorIndex),
+        onSave = { _, _ -> },
+        onBack = {},
+    )
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Profile screen · light")
+@Composable
+private fun ProfileScreenLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ProfileScreenPreviewContent(initialName = "Mira", initialColorIndex = 1)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Profile screen · dark")
+@Composable
+private fun ProfileScreenDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ProfileScreenPreviewContent(initialName = PREVIEW_LONG_NAME, initialColorIndex = 5)
+}
+
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = PREVIEW_HEIGHT_DP,
+    fontScale = 1.5f,
+    name = "Profile screen · emoji · large text",
+)
+@Composable
+private fun ProfileScreenEmojiLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    ProfileScreenPreviewContent(initialName = PREVIEW_EMOJI_NAME, initialColorIndex = 2)
 }

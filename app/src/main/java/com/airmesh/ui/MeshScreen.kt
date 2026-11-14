@@ -482,9 +482,9 @@ private fun ChatPlaceholderScreen(conversationId: Int) {
     }
 }
 
-/** Profile route (TASK U1 part 4): the sheet editor as a full screen; saving pops back. */
+/** Profile route (TASK U1 part 4): the sheet editor as a full screen; saving pops back. Internal so previews can render it. */
 @Composable
-private fun ProfileScreen(
+internal fun ProfileScreen(
     nodeId: Int,
     myProfile: MyProfile,
     onSave: (name: String, colorIndex: Int) -> Unit,
