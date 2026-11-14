@@ -46,6 +46,7 @@ import com.airmesh.service.AppForeground
 import com.airmesh.service.MeshService
 import com.airmesh.transport.PermissionRequirements
 import com.airmesh.transport.PrototypeActivity
+import com.airmesh.ui.theme.AirMeshTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
