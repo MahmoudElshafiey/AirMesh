@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -80,11 +81,21 @@ fun ChatsHomeContent(
                     onClick = { onOpenConversation(MESH_CONVERSATION_ID) },
                 )
             }
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            // The box must span the full width (weight alone only sizes the height in a
+            // Column) or contentAlignment=Center has no room to center anything. The 96dp
+            // bottom padding keeps the block clear of the "New message" FAB; at 320dp max
+            // width it stays readable on wide/landscape screens too.
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
                 EmptyState(
                     title = "Looking for phones nearby…",
                     animate = true,
-                    modifier = Modifier.padding(AirMeshSpacing.lg),
+                    modifier = Modifier
+                        .padding(horizontal = 32.dp)
+                        .padding(bottom = 96.dp)
+                        .widthIn(max = 320.dp),
                 )
             }
         }
