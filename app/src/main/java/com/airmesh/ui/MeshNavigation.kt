@@ -71,3 +71,28 @@ fun parseMessageKey(raw: String?): MessageKey? {
     if (senderId < 0 || timestampMs < 0) return null
     return MessageKey(kind, senderId, timestampMs)
 }
+
+// --- Navigation graph routes (TASK U1 part 2) ---------------------------------
+
+/** Top-level routes: the ones that own a bottom-bar slot. */
+const val ROUTE_CHATS = "chats"
+const val ROUTE_NETWORK = "network"
+const val ROUTE_LOG = "log"
+
+/** Detail routes: no bottom bar, reached from a top-level screen. */
+const val ROUTE_CHAT = "chat/{conversationId}"
+const val ROUTE_PROFILE = "profile"
+
+/** The concrete route of one conversation, e.g. "chat/12". */
+fun chatRoute(conversationId: Int): String = "chat/$conversationId"
+
+/** Maps a notification target tab to the top-level route it should land on. */
+fun navTabToRoute(tab: NavTab): String = when (tab) {
+    NavTab.CHAT -> ROUTE_CHATS
+    NavTab.NETWORK -> ROUTE_NETWORK
+    NavTab.LOG -> ROUTE_LOG
+}
+
+/** True for routes that own a bottom-bar slot; null (no entry yet) counts as top-level. */
+fun isTopLevelRoute(route: String?): Boolean =
+    route == null || route == ROUTE_CHATS || route == ROUTE_NETWORK || route == ROUTE_LOG

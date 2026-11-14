@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -28,7 +30,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +39,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
 import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
@@ -50,9 +56,11 @@ import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.autoMeshBannerText
 import com.airmesh.transport.noAirMeshPeersBannerText
+import com.airmesh.ui.components.Avatar
+import com.airmesh.ui.theme.AirMeshSpacing
 import kotlinx.coroutines.delay
 
-/** Bottom tabs. The selection is stored as an ordinal so it survives rotation. */
+/** Bottom tabs. The selection is a navigation route now (TASK U1 part 2), so it survives rotation via the nav back stack. */
 enum class MeshTab(val label: String) { CHAT("Chat"), NETWORK("Network"), LOG("Log") }
 
 private val MeshTab.icon: ImageVector
@@ -60,6 +68,14 @@ private val MeshTab.icon: ImageVector
         MeshTab.CHAT -> MeshChatIcon
         MeshTab.NETWORK -> MeshNetworkIcon
         MeshTab.LOG -> MeshLogIcon
+    }
+
+/** The top-level route each bottom-bar tab navigates to. */
+private val MeshTab.route: String
+    get() = when (this) {
+        MeshTab.CHAT -> ROUTE_CHATS
+        MeshTab.NETWORK -> ROUTE_NETWORK
+        MeshTab.LOG -> ROUTE_LOG
     }
 
 /**
@@ -137,20 +153,24 @@ fun MeshScreen(
     promptOnboarding: Boolean = false,
     onOnboardingAnswered: () -> Unit = {},
 ) {
-    var selectedTab by rememberSaveable { mutableIntStateOf(MeshTab.CHAT.ordinal) }
-    val tab = MeshTab.values()[selectedTab.coerceIn(0, MeshTab.values().size - 1)]
+    // Navigation (TASK U1 part 2): the back stack is saved and restored by
+    // navigation-compose, so the selected route survives rotation for free.
+    val navController = rememberNavController()
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
 
     // The profile sheet opens from the top-bar avatar; onboarding shows once and
     // is only reachable again through that avatar after it has been answered.
     var showProfile by rememberSaveable { mutableStateOf(false) }
     var showOnboarding by rememberSaveable { mutableStateOf(promptOnboarding) }
 
-    // A notification tap switches to its target tab. Keyless targets (and keys for
-    // non-chat tabs, which we never post) are consumed here; the chat tab consumes
-    // its own scroll key after it has actually scrolled.
+    // A notification tap navigates to its target's top-level route, popping any
+    // detail screens first so repeated taps never grow the stack. Keyless targets
+    // (and keys for non-chat tabs, which we never post) are consumed here; the chat
+    // tab consumes its own scroll key after it has actually scrolled.
     LaunchedEffect(navRequest?.seq) {
         val request = navRequest ?: return@LaunchedEffect
-        selectedTab = request.target.tab.toMeshTab().ordinal
+        navController.navigateToTopLevel(navTabToRoute(request.target.tab))
         if (request.target.messageKey == null || request.target.tab != NavTab.CHAT) onNavConsumed()
     }
 
@@ -174,6 +194,15 @@ fun MeshScreen(
         topBar = {
             TopAppBar(
                 title = { Text("AirMesh") },
+                // Detail screens (chat/{id}, profile) get a back arrow; the
+                // bottom-bar routes do not.
+                navigationIcon = {
+                    if (!isTopLevelRoute(currentRoute)) {
+                        IconButton(onClick = { navController.popBackStack() }) {
+                            Icon(imageVector = MeshBackIcon, contentDescription = "Back")
+                        }
+                    }
+                },
                 actions = {
                     StatusChip(role = connectorState.role, neighborCount = neighbors.size)
                     Box(modifier = Modifier.padding(end = 4.dp)) {
@@ -187,14 +216,17 @@ fun MeshScreen(
             )
         },
         bottomBar = {
-            NavigationBar {
-                MeshTab.values().forEach { t ->
-                    NavigationBarItem(
-                        selected = tab == t,
-                        onClick = { selectedTab = t.ordinal },
-                        icon = { Icon(imageVector = t.icon, contentDescription = t.label) },
-                        label = { Text(t.label) },
-                    )
+            // The bar only exists on top-level routes (TASK U1 part 2).
+            if (isTopLevelRoute(currentRoute)) {
+                NavigationBar {
+                    MeshTab.values().forEach { t ->
+                        NavigationBarItem(
+                            selected = currentRoute == t.route,
+                            onClick = { navController.navigateToTopLevel(t.route) },
+                            icon = { Icon(imageVector = t.icon, contentDescription = t.label) },
+                            label = { Text(t.label) },
+                        )
+                    }
                 }
             }
         },
@@ -211,57 +243,67 @@ fun MeshScreen(
                 enabled = autoMeshEnabled,
                 onSetEnabled = onSetAutoMeshEnabled,
             )
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                when (tab) {
-                    MeshTab.CHAT ->
-                        MeshChatTab(
-                            nodeId = nodeId,
-                            messages = messages,
-                            locations = locations,
-                            myLastFix = myLastFix,
-                            shareStatus = shareStatus,
-                            onSendText = onSendText,
-                            onShareLocation = onShareLocation,
-                            useTestLocation = useTestLocation,
-                            showTestLocationToggle = showTestLocationToggle,
-                            shareDeadlineMs = shareDeadlineMs,
-                            onCancelShare = onCancelShare,
-                            shareFailureMessage = shareFailureMessage,
-                            myLatestShareWasCached = myLatestShareWasCached,
-                            onShareTestLocation = onShareTestLocation,
-                            scrollToKey = navRequest?.target?.messageKey,
-                            onScrollConsumed = onNavConsumed,
-                            nowMs = nowMs,
-                            profiles = profiles,
-                            myName = myProfile.name ?: "User #$nodeId",
-                            myColorIndex = myProfile.colorIndex,
-                        )
-                    MeshTab.NETWORK ->
-                        MeshNetworkTab(
-                            nodeId = nodeId,
-                            state = connectorState,
-                            neighbors = neighbors,
-                            onRequestPermissions = onRequestPermissions,
-                            onDiscover = onDiscover,
-                            onCreateGroup = onCreateGroup,
-                            onRetryTcp = onRetryTcp,
-                            onDisconnect = onDisconnect,
-                            onConnectPeer = onConnectPeer,
-                            onOpenPrototype = onOpenPrototype,
-                            themeMode = themeMode,
-                            onSetThemeMode = onSetThemeMode,
-                            airMeshPeers = airMeshPeers,
-                            showTestLocationToggle = showTestLocationToggle,
-                            useTestLocation = useTestLocation,
-                            onSetUseTestLocation = onSetUseTestLocation,
-                            messageNotificationsEnabled = messageNotificationsEnabled,
-                            onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
-                            mergeGroupsEnabled = mergeGroupsEnabled,
-                            onSetMergeGroupsEnabled = onSetMergeGroupsEnabled,
-                            profiles = profiles,
-                        )
-                    MeshTab.LOG -> MeshLogTab(events = events, onClearLog = onClearLog)
+            NavHost(
+                navController = navController,
+                startDestination = ROUTE_CHATS,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            ) {
+                composable(ROUTE_CHATS) {
+                    MeshChatTab(
+                        nodeId = nodeId,
+                        messages = messages,
+                        locations = locations,
+                        myLastFix = myLastFix,
+                        shareStatus = shareStatus,
+                        onSendText = onSendText,
+                        onShareLocation = onShareLocation,
+                        useTestLocation = useTestLocation,
+                        showTestLocationToggle = showTestLocationToggle,
+                        shareDeadlineMs = shareDeadlineMs,
+                        onCancelShare = onCancelShare,
+                        shareFailureMessage = shareFailureMessage,
+                        myLatestShareWasCached = myLatestShareWasCached,
+                        onShareTestLocation = onShareTestLocation,
+                        scrollToKey = navRequest?.target?.messageKey,
+                        onScrollConsumed = onNavConsumed,
+                        nowMs = nowMs,
+                        profiles = profiles,
+                        myName = myProfile.name ?: "User #$nodeId",
+                        myColorIndex = myProfile.colorIndex,
+                    )
                 }
+                composable(ROUTE_CHAT) { entry ->
+                    // The id is an Int in the chat model; a malformed argument just lands on 0.
+                    val conversationId = entry.arguments?.getString("conversationId")?.toIntOrNull() ?: 0
+                    ChatPlaceholderScreen(conversationId = conversationId)
+                }
+                composable(ROUTE_NETWORK) {
+                    MeshNetworkTab(
+                        nodeId = nodeId,
+                        state = connectorState,
+                        neighbors = neighbors,
+                        onRequestPermissions = onRequestPermissions,
+                        onDiscover = onDiscover,
+                        onCreateGroup = onCreateGroup,
+                        onRetryTcp = onRetryTcp,
+                        onDisconnect = onDisconnect,
+                        onConnectPeer = onConnectPeer,
+                        onOpenPrototype = onOpenPrototype,
+                        themeMode = themeMode,
+                        onSetThemeMode = onSetThemeMode,
+                        airMeshPeers = airMeshPeers,
+                        showTestLocationToggle = showTestLocationToggle,
+                        useTestLocation = useTestLocation,
+                        onSetUseTestLocation = onSetUseTestLocation,
+                        messageNotificationsEnabled = messageNotificationsEnabled,
+                        onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
+                        mergeGroupsEnabled = mergeGroupsEnabled,
+                        onSetMergeGroupsEnabled = onSetMergeGroupsEnabled,
+                        profiles = profiles,
+                    )
+                }
+                composable(ROUTE_LOG) { MeshLogTab(events = events, onClearLog = onClearLog) }
+                composable(ROUTE_PROFILE) { ProfilePlaceholderScreen(nodeId = nodeId, myProfile = myProfile) }
             }
         }
     }
@@ -379,10 +421,53 @@ private fun StatusChip(role: P2pRole, neighborCount: Int) {
     }
 }
 
-/** Explicit mapping so the two tab enums can never drift apart silently. */
-private fun NavTab.toMeshTab(): MeshTab = when (this) {
-    NavTab.CHAT -> MeshTab.CHAT
-    NavTab.NETWORK -> MeshTab.NETWORK
-    NavTab.LOG -> MeshTab.LOG
+/**
+ * Navigates to a top-level route without stacking duplicates: any detail screens
+ * above the start destination are popped first, and re-tapping the current tab is
+ * a no-op (launchSingleTop). Used by both the bottom bar and notification taps.
+ */
+private fun NavController.navigateToTopLevel(route: String) {
+    navigate(route) {
+        popUpTo(ROUTE_CHATS) { inclusive = false }
+        launchSingleTop = true
+    }
+}
+
+/** Placeholder for chat/{conversationId}; TASK U1 part 3 builds the real screen. */
+@Composable
+private fun ChatPlaceholderScreen(conversationId: Int) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(AirMeshSpacing.md),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("Conversation #$conversationId", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(AirMeshSpacing.sm))
+        Text(
+            "This screen is built in a later step.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+}
+
+/** Placeholder for the profile route; TASK U1 part 4 builds the full editor. */
+@Composable
+private fun ProfilePlaceholderScreen(nodeId: Int, myProfile: MyProfile) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(AirMeshSpacing.md),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Avatar(name = myProfile.name ?: "User #$nodeId", colorIndex = myProfile.colorIndex, size = 72.dp)
+        Spacer(modifier = Modifier.height(AirMeshSpacing.sm))
+        Text("Node #$nodeId", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(AirMeshSpacing.xs))
+        Text(
+            "Profile editing is built in a later step.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
 }
 
