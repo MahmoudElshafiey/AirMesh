@@ -12,12 +12,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -50,13 +50,17 @@ import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
 import com.airmesh.node.MyProfile
 import com.airmesh.profile.ProfileInfo
+import com.airmesh.chat.Contact
+import com.airmesh.chat.ConversationSummary
+import com.airmesh.chat.NodePresence
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
-import com.airmesh.transport.P2pRole
 import com.airmesh.transport.autoMeshBannerText
 import com.airmesh.transport.noAirMeshPeersBannerText
 import com.airmesh.ui.components.Avatar
+import com.airmesh.ui.components.ChipTone
+import com.airmesh.ui.components.StatusChip
 import com.airmesh.ui.theme.AirMeshSpacing
 import kotlinx.coroutines.delay
 
@@ -149,6 +153,11 @@ fun MeshScreen(
     // has been answered (saved or skipped) once.
     myProfile: MyProfile = MyProfile(name = null, colorIndex = 0),
     profiles: Map<Int, ProfileInfo> = emptyMap(),
+    // Chats home data (TASK U1 part 3): conversation rollups and known contacts from the
+    // store, plus per-node presence for the dots and "Online / Last seen" lines.
+    conversationSummaries: List<ConversationSummary> = emptyList(),
+    contacts: List<Contact> = emptyList(),
+    presence: Map<Int, NodePresence> = emptyMap(),
     onSaveProfile: (name: String, colorIndex: Int) -> Unit = { _, _ -> },
     promptOnboarding: Boolean = false,
     onOnboardingAnswered: () -> Unit = {},
@@ -159,19 +168,20 @@ fun MeshScreen(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
-    // The profile sheet opens from the top-bar avatar; onboarding shows once and
-    // is only reachable again through that avatar after it has been answered.
-    var showProfile by rememberSaveable { mutableStateOf(false) }
+    // The contact picker opens from the chats-home FAB and "About" from its overflow menu;
+    // onboarding shows once, first run only.
+    var showContactPicker by rememberSaveable { mutableStateOf(false) }
+    var showAbout by rememberSaveable { mutableStateOf(false) }
     var showOnboarding by rememberSaveable { mutableStateOf(promptOnboarding) }
 
-    // A notification tap navigates to its target's top-level route, popping any
-    // detail screens first so repeated taps never grow the stack. Keyless targets
-    // (and keys for non-chat tabs, which we never post) are consumed here; the chat
-    // tab consumes its own scroll key after it has actually scrolled.
+    // A notification tap navigates to its target's top-level route, popping any detail
+    // screens first so repeated taps never grow the stack. The chats home does not deep-link
+    // into messages yet (the conversation screen is built in a later step), so every request
+    // is consumed here after navigating.
     LaunchedEffect(navRequest?.seq) {
         val request = navRequest ?: return@LaunchedEffect
         navController.navigateToTopLevel(navTabToRoute(request.target.tab))
-        if (request.target.messageKey == null || request.target.tab != NavTab.CHAT) onNavConsumed()
+        onNavConsumed()
     }
 
     // The banner's "Retrying in Ns" and join-waiting texts need a live clock;
@@ -193,7 +203,7 @@ fun MeshScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("AirMesh") },
+                title = { Text(topBarTitle(currentRoute)) },
                 // Detail screens (chat/{id}, profile) get a back arrow; the
                 // bottom-bar routes do not.
                 navigationIcon = {
@@ -204,13 +214,39 @@ fun MeshScreen(
                     }
                 },
                 actions = {
-                    StatusChip(role = connectorState.role, neighborCount = neighbors.size)
-                    Box(modifier = Modifier.padding(end = 4.dp)) {
-                        ProfileAvatarButton(
-                            name = myProfile.name ?: "User #$nodeId",
-                            colorIndex = myProfile.colorIndex,
-                            onClick = { showProfile = true },
+                    // The chats home owns the status chip and overflow menu (TASK U1 part 3);
+                    // the other tabs keep a plain title bar.
+                    if (currentRoute == ROUTE_CHATS) {
+                        val status = ChatsStatus.from(autoMeshState, neighbors.size)
+                        StatusChip(
+                            text = status.text,
+                            tone = if (status.connected) ChipTone.Active else ChipTone.Neutral,
+                            modifier = Modifier.padding(end = AirMeshSpacing.xs),
                         )
+                        Box {
+                            var menuOpen by rememberSaveable { mutableStateOf(false) }
+                            IconButton(onClick = { menuOpen = true }) {
+                                Icon(imageVector = MeshMoreIcon, contentDescription = "Menu")
+                            }
+                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("My profile") },
+                                    onClick = { menuOpen = false; navController.navigate(ROUTE_PROFILE) },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Network") },
+                                    onClick = { menuOpen = false; navController.navigateToTopLevel(ROUTE_NETWORK) },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Event log") },
+                                    onClick = { menuOpen = false; navController.navigateToTopLevel(ROUTE_LOG) },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("About") },
+                                    onClick = { menuOpen = false; showAbout = true },
+                                )
+                            }
+                        }
                     }
                 },
             )
@@ -228,6 +264,16 @@ fun MeshScreen(
                         )
                     }
                 }
+            }
+        },
+        floatingActionButton = {
+            // The "New message" FAB only exists on the chats home (TASK U1 part 3).
+            if (currentRoute == ROUTE_CHATS) {
+                ExtendedFloatingActionButton(
+                    icon = { Icon(imageVector = MeshNewMessageIcon, contentDescription = null) },
+                    text = { Text("New message") },
+                    onClick = { showContactPicker = true },
+                )
             }
         },
     ) { innerPadding ->
@@ -249,27 +295,15 @@ fun MeshScreen(
                 modifier = Modifier.fillMaxWidth().weight(1f),
             ) {
                 composable(ROUTE_CHATS) {
-                    MeshChatTab(
-                        nodeId = nodeId,
-                        messages = messages,
-                        locations = locations,
-                        myLastFix = myLastFix,
-                        shareStatus = shareStatus,
-                        onSendText = onSendText,
-                        onShareLocation = onShareLocation,
-                        useTestLocation = useTestLocation,
-                        showTestLocationToggle = showTestLocationToggle,
-                        shareDeadlineMs = shareDeadlineMs,
-                        onCancelShare = onCancelShare,
-                        shareFailureMessage = shareFailureMessage,
-                        myLatestShareWasCached = myLatestShareWasCached,
-                        onShareTestLocation = onShareTestLocation,
-                        scrollToKey = navRequest?.target?.messageKey,
-                        onScrollConsumed = onNavConsumed,
+                    // The WhatsApp-style home (TASK U1 part 3). Rows navigate to the chat
+                    // route; the old MeshChatTab leaves the graph until the redesigned
+                    // conversation screen replaces the placeholder in a later step.
+                    ChatsHomeContent(
+                        summaries = conversationSummaries,
+                        contacts = contacts,
+                        presence = presence,
                         nowMs = nowMs,
-                        profiles = profiles,
-                        myName = myProfile.name ?: "User #$nodeId",
-                        myColorIndex = myProfile.colorIndex,
+                        onOpenConversation = { navController.navigate(chatRoute(it)) },
                     )
                 }
                 composable(ROUTE_CHAT) { entry ->
@@ -308,17 +342,21 @@ fun MeshScreen(
         }
     }
 
-    if (showProfile) {
-        ProfileSheet(
-            nodeId = nodeId,
-            initialName = myProfile.name ?: "",
-            initialColorIndex = myProfile.colorIndex,
-            onSave = { name, colorIndex ->
-                onSaveProfile(name, colorIndex)
-                showProfile = false
+    if (showContactPicker) {
+        ContactPickerSheet(
+            contacts = contacts,
+            presence = presence,
+            nowMs = nowMs,
+            onOpenConversation = { id ->
+                showContactPicker = false
+                navController.navigate(chatRoute(id))
             },
-            onDismiss = { showProfile = false },
+            onDismiss = { showContactPicker = false },
         )
+    }
+
+    if (showAbout) {
+        AboutDialog(onDismiss = { showAbout = false })
     }
 
     if (showOnboarding) {
@@ -396,29 +434,11 @@ fun AutoMeshBanner(text: String) {
     }
 }
 
-/** Compact top-bar chip: colored dot plus words, so state is readable without color. */
-@Composable
-private fun StatusChip(role: P2pRole, neighborCount: Int) {
-    val colors = MaterialTheme.colorScheme
-    val dotColor = when (meshStatus(role, neighborCount)) {
-        MeshStatus.CONNECTED -> colors.primary
-        MeshStatus.GROUP_NO_NEIGHBORS -> colors.tertiary
-        MeshStatus.NO_GROUP -> colors.outline
-    }
-    Box(
-        modifier = Modifier
-            .padding(end = 16.dp)
-            .background(colors.surfaceVariant, CircleShape),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(statusChipText(role, neighborCount), style = MaterialTheme.typography.labelMedium)
-        }
-    }
+/** Per-route top-bar title (TASK U1 part 3): the app name on chats, tab names elsewhere. */
+private fun topBarTitle(route: String?): String = when {
+    route == ROUTE_NETWORK -> "Network"
+    route == ROUTE_LOG -> "Event log"
+    else -> "AirMesh"
 }
 
 /**

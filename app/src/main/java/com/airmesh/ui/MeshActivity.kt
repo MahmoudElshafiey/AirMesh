@@ -218,6 +218,12 @@ class MeshActivity : ComponentActivity() {
                         val autoMeshEnabled by service.autoMeshEnabled.collectAsState()
                         val discoveryStrategy by service.discoveryStrategy.collectAsState()
                         val rawCallbackCount by service.rawCallbackCount.collectAsState()
+                        // Chats home data (TASK U1 part 3): presence plus the store's
+                        // conversation rollups and known contacts. The flows are cold, so
+                        // they start empty until Room emits its first snapshot.
+                        val presence by service.presence.collectAsState()
+                        val conversationSummaries by service.chatStore.summaries.collectAsState(initial = emptyList())
+                        val contacts by service.chatStore.contacts.collectAsState(initial = emptyList())
 
                         MeshScreen(
                             nodeId = service.nodeId,
@@ -275,6 +281,9 @@ class MeshActivity : ComponentActivity() {
                             rawCallbackCount = rawCallbackCount,
                             myProfile = myProfile,
                             profiles = profiles,
+                            conversationSummaries = conversationSummaries,
+                            contacts = contacts,
+                            presence = presence,
                             onSaveProfile = { name, colorIndex ->
                                 uiScope.launch { service.setMyProfile(name, colorIndex) }
                             },

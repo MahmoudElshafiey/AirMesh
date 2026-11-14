@@ -115,6 +115,51 @@ val MeshLocationPinIcon = ImageVector.Builder(
     }
 }.build()
 
+/** Overflow menu trigger in the chats top bar (Material "more_vert": three dots). */
+val MeshMoreIcon = ImageVector.Builder(
+    name = "MeshMoreIcon",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        // Dots at (12,5), (12,12) and (12,19), radius 2.
+        moveTo(14f, 5f); arcToRelative(2f, 2f, 0f, true, true, -4f, 0f); arcToRelative(2f, 2f, 0f, true, true, 4f, 0f)
+        moveTo(14f, 12f); arcToRelative(2f, 2f, 0f, true, true, -4f, 0f); arcToRelative(2f, 2f, 0f, true, true, 4f, 0f)
+        moveTo(14f, 19f); arcToRelative(2f, 2f, 0f, true, true, -4f, 0f); arcToRelative(2f, 2f, 0f, true, true, 4f, 0f)
+    }
+}.build()
+
+/** "New message" FAB trigger (Material "edit" pencil). */
+val MeshNewMessageIcon = ImageVector.Builder(
+    name = "MeshNewMessageIcon",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        // Pencil body.
+        moveTo(3f, 17.25f)
+        verticalLineTo(21f)
+        horizontalLineToRelative(3.75f)
+        lineTo(17.81f, 9.94f)
+        lineToRelative(-3.75f, -3.75f)
+        lineTo(3f, 17.25f)
+        close()
+        // Pencil tip.
+        moveTo(20.71f, 7.04f)
+        curveToRelative(0.39f, -0.39f, 0.39f, -1.02f, 0f, -1.41f)
+        lineToRelative(-2.34f, -2.34f)
+        curveToRelative(-0.39f, -0.39f, -1.02f, -0.39f, -1.41f, 0f)
+        lineToRelative(-1.83f, 1.83f)
+        lineToRelative(3.75f, 3.75f)
+        lineToRelative(1.83f, -1.83f)
+        close()
+    }
+}.build()
+
 /** Top-bar back arrow on detail screens (TASK U1 part 2; Material "arrow_back"). */
 val MeshBackIcon = ImageVector.Builder(
     name = "MeshBackIcon",
