@@ -21,7 +21,7 @@ class InMemoryChatStore : ChatStore {
     private val allRows = MutableStateFlow<List<ChatMessage>>(emptyList())
     private val contactList = MutableStateFlow<List<Contact>>(emptyList())
 
-    override fun insert(message: ChatMessage): Boolean = synchronized(lock) {
+    override suspend fun insert(message: ChatMessage): Boolean = synchronized(lock) {
         val duplicate = rows.any {
             it.originNode == message.originNode &&
                 it.originSeq == message.originSeq &&
@@ -33,7 +33,7 @@ class InMemoryChatStore : ChatStore {
         true
     }
 
-    override fun updateOutgoingStatus(conversationId: Int, originSeq: Int, status: ChatStatus): Boolean =
+    override suspend fun updateOutgoingStatus(conversationId: Int, originSeq: Int, status: ChatStatus): Boolean =
         synchronized(lock) {
             val index = rows.indexOfFirst {
                 it.conversationId == conversationId &&
@@ -51,7 +51,7 @@ class InMemoryChatStore : ChatStore {
             true
         }
 
-    override fun markRead(conversationId: Int) {
+    override suspend fun markRead(conversationId: Int) {
         synchronized(lock) {
             if (rows.none { it.conversationId == conversationId && !it.isRead }) return@synchronized
             rows = rows.map { row ->
@@ -81,7 +81,7 @@ class InMemoryChatStore : ChatStore {
             .sortedWith(compareBy({ it.createdAt }, { it.id }))
     }
 
-    override fun prune(maxPerConversation: Int) {
+    override suspend fun prune(maxPerConversation: Int) {
         synchronized(lock) {
             val kept = rows.groupByTo(LinkedHashMap(), ChatMessage::conversationId).values
                 .flatMap { msgs ->
@@ -94,7 +94,7 @@ class InMemoryChatStore : ChatStore {
         }
     }
 
-    override fun clearConversation(conversationId: Int) {
+    override suspend fun clearConversation(conversationId: Int) {
         synchronized(lock) {
             val kept = rows.filterNot { it.conversationId == conversationId }
             if (kept.size != rows.size) {
@@ -104,7 +104,7 @@ class InMemoryChatStore : ChatStore {
         }
     }
 
-    override fun upsertContact(nodeId: Int, displayName: String?, colorIndex: Int) {
+    override suspend fun upsertContact(nodeId: Int, displayName: String?, colorIndex: Int) {
         synchronized(lock) {
             val existing = contactsById[nodeId]
             // A null name or a zero color never erases an already-known value.
@@ -118,7 +118,7 @@ class InMemoryChatStore : ChatStore {
         }
     }
 
-    override fun contact(nodeId: Int): Contact? = synchronized(lock) { contactsById[nodeId] }
+    override suspend fun contact(nodeId: Int): Contact? = synchronized(lock) { contactsById[nodeId] }
 
     override val contacts: Flow<List<Contact>> = contactList
 }

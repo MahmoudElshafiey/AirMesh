@@ -38,7 +38,7 @@ class InMemoryChatStoreTest {
     private fun rows(conversationId: Int): List<ChatMessage> = runBlocking { store.messages(conversationId).first() }
 
     @Test
-    fun insertAssignsIdsAndRejectsUniqueKeyDuplicates() {
+    fun insertAssignsIdsAndRejectsUniqueKeyDuplicates() = runBlocking {
         assertTrue(store.insert(msg(0, ChatDirection.IN, originNode = 5, originSeq = 1)))
         // Same key with different content: still a duplicate.
         assertFalse(store.insert(msg(0, ChatDirection.OUT, text = "other", originNode = 5, originSeq = 1)))
@@ -53,7 +53,7 @@ class InMemoryChatStoreTest {
     }
 
     @Test
-    fun updateOutgoingStatusNeverDowngradesAndMissesReturnFalse() {
+    fun updateOutgoingStatusNeverDowngradesAndMissesReturnFalse() = runBlocking {
         store.insert(msg(3, ChatDirection.OUT, originNode = 42, originSeq = 9, status = ChatStatus.QUEUED))
 
         assertTrue(store.updateOutgoingStatus(3, 9, ChatStatus.SENT))
@@ -69,7 +69,7 @@ class InMemoryChatStoreTest {
     }
 
     @Test
-    fun markReadOnlyTouchesItsConversation() {
+    fun markReadOnlyTouchesItsConversation() = runBlocking {
         store.insert(msg(1, ChatDirection.IN, originNode = 5, originSeq = 1, isRead = false))
         store.insert(msg(2, ChatDirection.IN, originNode = 6, originSeq = 2, isRead = false))
 
@@ -80,7 +80,7 @@ class InMemoryChatStoreTest {
     }
 
     @Test
-    fun pruneKeepsTheNewestRowsPerConversation() {
+    fun pruneKeepsTheNewestRowsPerConversation() = runBlocking {
         repeat(3) { i ->
             now += 1_000
             store.insert(msg(0, ChatDirection.IN, originNode = 5, originSeq = i + 1))
@@ -94,7 +94,7 @@ class InMemoryChatStoreTest {
     }
 
     @Test
-    fun clearConversationRemovesOnlyThatConversation() {
+    fun clearConversationRemovesOnlyThatConversation() = runBlocking {
         store.insert(msg(1, ChatDirection.IN, originNode = 5, originSeq = 1))
         store.insert(msg(2, ChatDirection.IN, originNode = 6, originSeq = 2))
 
@@ -105,7 +105,7 @@ class InMemoryChatStoreTest {
     }
 
     @Test
-    fun contactUpsertMergesWithoutErasingKnownValues() {
+    fun contactUpsertMergesWithoutErasingKnownValues() = runBlocking {
         assertNull(store.contact(5))
 
         // Activity-driven upsert: id only.
@@ -120,18 +120,18 @@ class InMemoryChatStoreTest {
         store.upsertContact(5, null, 0)
         assertEquals(Contact(5, "Zed", 3), store.contact(5))
 
-        val all = runBlocking { store.contacts.first() }
+        val all = store.contacts.first()
         assertEquals(listOf(5), all.map { it.nodeId })
     }
 
     @Test
-    fun summariesCarryTheLastRowAndUnreadCount() {
+    fun summariesCarryTheLastRowAndUnreadCount() = runBlocking {
         now += 1_000
         store.insert(msg(4, ChatDirection.IN, originNode = 9, originSeq = 1, isRead = false))
         now += 1_000
         store.insert(msg(4, ChatDirection.OUT, text = "reply", originNode = 42, originSeq = 2))
 
-        val summary = runBlocking { store.summaries.first().single() }
+        val summary = store.summaries.first().single()
         assertEquals(4, summary.conversationId)
         assertEquals(now, summary.lastMessageAt)
         assertEquals(ChatDirection.OUT, summary.lastDirection)

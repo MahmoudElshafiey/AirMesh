@@ -22,7 +22,7 @@ class ChatRepository(
     }
 
     /** A broadcast text message received from [originNode]. Mesh room, read, SENT. */
-    fun onIncomingBroadcast(originNode: Int, text: String, originSeq: Int) {
+    suspend fun onIncomingBroadcast(originNode: Int, text: String, originSeq: Int) {
         insertAndPrune(
             ChatMessage(
                 conversationId = MESH_CONVERSATION_ID,
@@ -39,7 +39,7 @@ class ChatRepository(
     }
 
     /** A location share received from [originNode]. Mesh room, read, SENT. */
-    fun onIncomingLocation(
+    suspend fun onIncomingLocation(
         originNode: Int,
         latitudeE6: Int,
         longitudeE6: Int,
@@ -64,7 +64,7 @@ class ChatRepository(
     }
 
     /** A direct message received from [fromNode]: its own conversation, unread. */
-    fun onIncomingDirect(fromNode: Int, text: String, seq: Int) {
+    suspend fun onIncomingDirect(fromNode: Int, text: String, seq: Int) {
         insertAndPrune(
             ChatMessage(
                 conversationId = fromNode,
@@ -81,7 +81,7 @@ class ChatRepository(
     }
 
     /** Our broadcast send; [handed] says whether a neighbor accepted the first flood. */
-    fun recordOutgoingBroadcast(text: String, seq: Int, handed: Boolean) {
+    suspend fun recordOutgoingBroadcast(text: String, seq: Int, handed: Boolean) {
         recordOutgoing(
             conversationId = MESH_CONVERSATION_ID,
             kind = ChatKind.TEXT,
@@ -95,7 +95,7 @@ class ChatRepository(
     }
 
     /** Our direct send to [destNode]. */
-    fun recordOutgoingDirect(destNode: Int, text: String, seq: Int, handed: Boolean) {
+    suspend fun recordOutgoingDirect(destNode: Int, text: String, seq: Int, handed: Boolean) {
         recordOutgoing(
             conversationId = destNode,
             kind = ChatKind.TEXT,
@@ -109,7 +109,7 @@ class ChatRepository(
     }
 
     /** Our location share. */
-    fun recordOutgoingLocation(
+    suspend fun recordOutgoingLocation(
         latitudeE6: Int,
         longitudeE6: Int,
         accuracyMeters: Int,
@@ -129,14 +129,14 @@ class ChatRepository(
     }
 
     /** A receipt from [fromNode] for our frame [ackedSeq]: DELIVERED, never downgraded. */
-    fun onReceipt(fromNode: Int, ackedSeq: Int) {
+    suspend fun onReceipt(fromNode: Int, ackedSeq: Int) {
         store.updateOutgoingStatus(fromNode, ackedSeq, ChatStatus.DELIVERED)
     }
 
     /** The user opened a conversation: all its incoming rows become read. */
-    fun markRead(conversationId: Int) = store.markRead(conversationId)
+    suspend fun markRead(conversationId: Int) = store.markRead(conversationId)
 
-    private fun recordOutgoing(
+    private suspend fun recordOutgoing(
         conversationId: Int,
         kind: ChatKind,
         text: String?,
@@ -169,7 +169,7 @@ class ChatRepository(
         if (!inserted) store.updateOutgoingStatus(conversationId, seq, status)
     }
 
-    private fun insertAndPrune(message: ChatMessage) {
+    private suspend fun insertAndPrune(message: ChatMessage) {
         if (store.insert(message)) store.prune(RETENTION_PER_CONVERSATION)
     }
 }

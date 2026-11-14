@@ -19,7 +19,7 @@ class ChatRepositoryTest {
         runBlocking { store.messages(conversationId).first() }
 
     @Test
-    fun incomingBroadcastLandsInTheMeshRoomReadAndSent() {
+    fun incomingBroadcastLandsInTheMeshRoomReadAndSent() = runBlocking {
         repo.onIncomingBroadcast(originNode = 7, text = "hello mesh", originSeq = 3)
 
         val row = rows(MESH_CONVERSATION_ID).single()
@@ -34,7 +34,7 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun duplicateIncomingFrameIsIgnoredByTheUniqueKey() {
+    fun duplicateIncomingFrameIsIgnoredByTheUniqueKey() = runBlocking {
         repo.onIncomingBroadcast(7, "first", 3)
         now += 1_000
         // Same (originNode, originSeq, kind): a re-delivered frame adds no row.
@@ -46,22 +46,22 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun incomingDirectStartsAnUnreadConversationAndMarkReadClearsIt() {
+    fun incomingDirectStartsAnUnreadConversationAndMarkReadClearsIt() = runBlocking {
         repo.onIncomingDirect(fromNode = 9, text = "psst", seq = 5)
 
         val row = rows(9).single()
         assertEquals(ChatDirection.IN, row.direction)
         assertFalse(row.isRead)
-        assertEquals(1, runBlocking { store.summaries.first().single().unreadCount })
+        assertEquals(1, store.summaries.first().single().unreadCount)
 
         repo.markRead(9)
 
         assertTrue(rows(9).single().isRead)
-        assertEquals(0, runBlocking { store.summaries.first().single().unreadCount })
+        assertEquals(0, store.summaries.first().single().unreadCount)
     }
 
     @Test
-    fun outgoingStatusComesFromTheHandoffAndUpgradesOnReplay() {
+    fun outgoingStatusComesFromTheHandoffAndUpgradesOnReplay() = runBlocking {
         repo.recordOutgoingBroadcast("queued text", seq = 1, handed = false)
         assertEquals(ChatStatus.QUEUED, rows(MESH_CONVERSATION_ID).single().status)
 
@@ -75,7 +75,7 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun receiptMarksDeliveredAndNeverDowngrades() {
+    fun receiptMarksDeliveredAndNeverDowngrades() = runBlocking {
         repo.recordOutgoingDirect(destNode = 3, text = "dm", seq = 2, handed = true)
         repo.onReceipt(fromNode = 3, ackedSeq = 2)
         assertEquals(ChatStatus.DELIVERED, rows(3).single().status)
@@ -93,7 +93,7 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun outgoingLocationIsRecordedWithItsFields() {
+    fun outgoingLocationIsRecordedWithItsFields() = runBlocking {
         repo.recordOutgoingLocation(latitudeE6 = 1_000_000, longitudeE6 = -2_000_000, accuracyMeters = 12, seq = 8, handed = true)
 
         val row = rows(MESH_CONVERSATION_ID).single()
@@ -107,7 +107,7 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun retentionKeepsOnlyTheNewestFiveHundredPerConversation() {
+    fun retentionKeepsOnlyTheNewestFiveHundredPerConversation() = runBlocking {
         repeat(502) { i -> repo.onIncomingBroadcast(originNode = 7, text = "m$i", originSeq = i + 1) }
 
         val meshRows = rows(MESH_CONVERSATION_ID)
@@ -123,7 +123,7 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun markReadDoesNotTouchOtherConversations() {
+    fun markReadDoesNotTouchOtherConversations() = runBlocking {
         repo.onIncomingDirect(5, "a", 1)
         repo.onIncomingDirect(6, "b", 2)
 
