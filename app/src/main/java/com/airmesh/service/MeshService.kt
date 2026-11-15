@@ -281,6 +281,10 @@ class MeshService : Service() {
             // history) and fall back to "User #id" so a nameless node still shows.
             profileAnnounceIntervalMs = 45_000L,
             announceWithoutName = true,
+            // TASK U5 part 5: probe idle direct links every 8 s and declare one dead after
+            // 24 s of total silence (no bytes in either direction).
+            keepAliveIntervalMs = 8_000L,
+            deadAfterMs = 24_000L,
         )
         connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
 

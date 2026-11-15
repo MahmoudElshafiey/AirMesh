@@ -23,6 +23,9 @@ fun createAirMeshNode(
     // TASK D2 part 4 pass-throughs; the defaults reproduce the pre-D2 behavior.
     profileAnnounceIntervalMs: Long = AirMeshNode.DEFAULT_PROFILE_ANNOUNCE_INTERVAL_MS,
     announceWithoutName: Boolean = false,
+    // TASK U5 part 5 pass-throughs; 0/0 keeps today's transport behavior (no keepalive).
+    keepAliveIntervalMs: Long = 0L,
+    deadAfterMs: Long = 0L,
 ): AirMeshNode {
     // Share the node's event log with the transport so socket events (connect
     // phases, HELLO exchange, accept loop) show up in the on-device log.
@@ -30,6 +33,8 @@ fun createAirMeshNode(
         localNodeId = nodeId,
         dispatcher = dispatcher,
         eventLog = eventLog,
+        keepAliveIntervalMs = keepAliveIntervalMs,
+        deadAfterMs = deadAfterMs,
     )
     return AirMeshNode(
         localNodeId = nodeId,

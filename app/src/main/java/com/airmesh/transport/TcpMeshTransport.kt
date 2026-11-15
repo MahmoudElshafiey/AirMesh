@@ -13,10 +13,12 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineName
@@ -108,6 +110,21 @@ class TcpMeshTransport(
      * that window pile up in the socket buffer. Production uses 0.
      */
     private val postHandshakeDelayMs: Long = 0L,
+    /**
+     * TASK U5 part 5: optional link keepalive. When > 0, a writer coroutine sends the
+     * transport-internal HELLO frame to every live peer that has seen no traffic in either
+     * direction for at least this long, so an idle but healthy link keeps both sides' readers
+     * busy and can be probed. 0 (default) = off: exactly today's behavior.
+     */
+    private val keepAliveIntervalMs: Long = 0L,
+    /**
+     * TASK U5 part 5: reader-side silence timeout. When > 0, a peer that sends no bytes at all
+     * for this long is declared dead: the reader logs "link to #id timed out (no data for Xs)"
+     * and the socket goes through the normal close path. Any received byte — including keepalive
+     * HELLOs — resets the deadline, so a peer that keeps sending but never reads stays alive.
+     * 0 (default) = off: readers block forever, as before.
+     */
+    private val deadAfterMs: Long = 0L,
 ) : Transport {
 
     private companion object {
@@ -172,12 +189,39 @@ class TcpMeshTransport(
 
     /** Starts the coroutine scope. Idempotent; safe after [stop]. */
     override fun start() {
-        synchronized(lifecycleLock) {
+        val owner = synchronized(lifecycleLock) {
             if (running) return
             running = true
             scope = CoroutineScope(
                 SupervisorJob() + dispatcher + CoroutineName("TcpMeshTransport-$localNodeId"),
             )
+            checkNotNull(scope)
+        }
+        // TASK U5 part 5: the keepalive writer lives in this start's scope, so a
+        // stop()/start() cycle restarts it against the fresh peer set.
+        if (keepAliveIntervalMs > 0L) {
+            owner.launch { keepAliveLoop() }
+        }
+    }
+
+    /**
+     * TASK U5 part 5: every tick, send a HELLO to each live peer whose last activity is at least
+     * [keepAliveIntervalMs] old. Any traffic in either direction refreshes the timestamp (see
+     * [PeerConnection]), so active links never see a keepalive write; only idle ones do. The
+     * HELLO is consumed by the peer's reader and never reaches [incoming].
+     */
+    private suspend fun keepAliveLoop() {
+        // Half-interval ticks bound worst-case extra silence to one tick (the 50 ms floor keeps
+        // the CPU cost negligible).
+        val tickMs = (keepAliveIntervalMs / 2L).coerceAtLeast(50L)
+        while (true) {
+            delay(tickMs)
+            val now = System.currentTimeMillis()
+            for ((neighborId, peer) in peers.entries.toList()) {
+                if (now - peer.lastActivityMs >= keepAliveIntervalMs) {
+                    writeToPeer(neighborId, peer, helloBytes)
+                }
+            }
         }
     }
 
@@ -526,8 +570,21 @@ class TcpMeshTransport(
         (remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: "?"
 
     private suspend fun readFrames(remoteId: Int, peer: PeerConnection) {
+        if (deadAfterMs > 0L) {
+            // TASK U5 part 5: silence detection. Each blocking read gets a fresh deadline, so any
+            // received byte resets the clock; only deadAfterMs of total silence throws below.
+            peer.applyReadTimeout(deadAfterMs.toInt())
+        }
         while (true) {
-            val bytes = peer.readFrame() ?: return
+            val bytes = try {
+                peer.readFrame()
+            } catch (error: SocketTimeoutException) {
+                // No bytes at all for deadAfterMs: the link is dead even though TCP never noticed.
+                // End the reader normally; the caller's finally block removes the neighbor and
+                // closes the socket through the usual path.
+                log("link to #$remoteId timed out (no data for ${deadAfterMs / 1000}s)")
+                return
+            } ?: return
             val frame = FrameCodec.decode(bytes).getOrNull()
             if (frame == null) {
                 corruptFrames.incrementAndGet()
@@ -596,6 +653,12 @@ class TcpMeshTransport(
         private val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
         private val writeMutex = Mutex()
         private val closed = AtomicBoolean(false)
+        /** TASK U5 part 5: last time this link saw traffic in either direction. */
+        private val lastActivityAt = AtomicLong(System.currentTimeMillis())
+
+        /** Wall-clock ms of the most recent successful read or write on this socket. */
+        val lastActivityMs: Long
+            get() = lastActivityAt.get()
 
         suspend fun write(bytes: ByteArray) {
             if (bytes.size > MAX_FRAME_SIZE) {
@@ -606,6 +669,7 @@ class TcpMeshTransport(
                 output.writeShort(bytes.size)
                 output.write(bytes)
                 output.flush()
+                lastActivityAt.set(System.currentTimeMillis())
             }
         }
 
@@ -628,7 +692,13 @@ class TcpMeshTransport(
 
             val bytes = ByteArray(size)
             input.readFully(bytes)
+            lastActivityAt.set(System.currentTimeMillis())
             return bytes
+        }
+
+        /** TASK U5 part 5: bound each blocking read; 0 keeps "block forever". */
+        fun applyReadTimeout(timeoutMs: Int) {
+            socket.soTimeout = timeoutMs
         }
 
         fun close() {
