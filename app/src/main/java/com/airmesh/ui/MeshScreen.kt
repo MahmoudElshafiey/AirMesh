@@ -1,6 +1,5 @@
 package com.airmesh.ui
 
-import android.content.pm.ApplicationInfo
 import android.net.wifi.p2p.WifiP2pDevice
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -17,7 +16,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -26,7 +24,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -43,7 +40,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,8 +64,6 @@ import com.airmesh.chat.PresenceState
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
-import com.airmesh.transport.autoMeshBannerText
-import com.airmesh.transport.noAirMeshPeersBannerText
 import com.airmesh.ui.components.Avatar
 import com.airmesh.ui.components.ChipTone
 import com.airmesh.ui.components.StatusChip
@@ -255,18 +249,24 @@ fun MeshScreen(
         onNavConsumed()
     }
 
-    // While searching, a long wait with only non-AirMesh devices visible gets the
-    // hint banner; otherwise the state banner applies. The hint's second line (discovery
-    // strategy / raw callback count) is developer diagnostics: release builds keep just the
-    // first sentence. BuildConfig is not generated for this module, so the debuggable flag
-    // comes from applicationInfo — the same check MeshActivity uses.
-    val context = LocalContext.current
-    val isDebugBuild = remember(context) { context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 }
-    val autoBannerText = (noAirMeshPeersBannerText(
-        autoMeshState, nowMs, airMeshPeers.size, connectorState.peers.size,
-        strategy = discoveryStrategy, rawCallbacks = rawCallbackCount,
-    ) ?: autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs))
-        ?.let { if (isDebugBuild) it else it.substringBefore('\n') }
+    // Home banner (TASK U4 part 2): at most one, and only for actionable problems. The old
+    // "found N devices but none advertises AirMesh" hint is gone from home — its content now
+    // lives in the empty-state caption and the manual-connect button. The technical discovery
+    // line (strategy / raw callbacks) never appears here; it belongs to the Network tab's
+    // Debug card, which only exists in debuggable builds.
+    val homeEmptyStateVisible = remember(conversationSummaries, contacts, presence) {
+        // Mirrors ChatsHomeContent: the empty state shows exactly when no non-room row exists.
+        ConversationListBuilder.build(conversationSummaries, contacts, presence, 0L)
+            .none { it.conversationId != MESH_CONVERSATION_ID }
+    }
+    val homeBanner = homeBannerText(
+        status = autoMeshState,
+        permissionOk = permissionsGranted,
+        neighborCount = neighbors.size,
+        idleReason = autoIdleReason,
+        nowMs = nowMs,
+        emptyStateVisible = homeEmptyStateVisible,
+    )
 
     // Chats empty state (TASK U4 part 1): pure mapping from the controller state, how long we
     // have been Searching, and the count of classic (non-AirMesh) Wi-Fi Direct devices. The timer
@@ -424,11 +424,10 @@ fun MeshScreen(
                 // Keep the compose bar (and any content) above the keyboard.
                 .imePadding(),
         ) {
-            AutoMeshHeader(
-                bannerText = autoBannerText,
-                enabled = autoMeshEnabled,
-                onSetEnabled = onSetAutoMeshEnabled,
-            )
+            // At most one banner, and only on home (TASK U4 part 2); the other tabs stay clean.
+            if (baseRoute(currentRoute) == ROUTE_CHATS && homeBanner != null) {
+                AutoMeshBanner(homeBanner, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
             NavHost(
                 navController = navController,
                 startDestination = ROUTE_CHATS,
@@ -521,6 +520,13 @@ fun MeshScreen(
                         onSetMessageNotificationsEnabled = onSetMessageNotificationsEnabled,
                         mergeGroupsEnabled = mergeGroupsEnabled,
                         onSetMergeGroupsEnabled = onSetMergeGroupsEnabled,
+                        // The "Auto connect" switch moved here from the home header (TASK U4 part 2);
+                        // same flows, so storage and behavior are unchanged.
+                        autoMeshEnabled = autoMeshEnabled,
+                        onSetAutoMeshEnabled = onSetAutoMeshEnabled,
+                        // Discovery diagnostics for the Debug card (debuggable builds only).
+                        discoveryStrategy = discoveryStrategy,
+                        rawCallbackCount = rawCallbackCount,
                         profiles = profiles,
                         // Classic route parameters are Strings; "true" only comes from the hint.
                         advancedInitiallyExpanded = entry.arguments?.getString(ARG_EXPAND_ADVANCED) == "true",
@@ -636,46 +642,14 @@ internal fun ChatHeaderAvatar(
 }
 
 /**
- * Header shown above every tab: the auto-mesh status banner (when there is one)
- * and the "Auto connect" switch. The service persists the switch; manual Wi-Fi
- * Direct actions only pause auto-mesh temporarily until it is turned back on.
- * Internal (not private) so the design-time previews can render it directly.
+ * Auto-mesh status banner. The text is pure and JVM-tested (TASK U4 part 2: home shows at most
+ * one of these, only for actionable problems); when it carries a second newline-separated line,
+ * that line is rendered smaller so the first stays the prominent part.
  */
 @Composable
-internal fun AutoMeshHeader(bannerText: String?, enabled: Boolean, onSetEnabled: (Boolean) -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        if (bannerText != null) AutoMeshBanner(bannerText)
-        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Auto connect", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "Join or create a group automatically when other AirMesh phones are nearby.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = enabled, onCheckedChange = onSetEnabled)
-            }
-        }
-    }
-}
-
-/**
- * Auto-mesh status banner. The text is pure and JVM-tested; when it carries a
- * second newline-separated line (the discovery strategy detail), that line is
- * rendered smaller so the hint stays the prominent part.
- */
-@Composable
-fun AutoMeshBanner(text: String) {
+fun AutoMeshBanner(text: String, modifier: Modifier = Modifier) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),

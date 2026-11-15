@@ -40,15 +40,17 @@ import com.airmesh.profile.ProfileInfo
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
+import com.airmesh.transport.discoveryStatusLine
 
 /** Minimum touch target height required by the design spec. */
 private val MinTouch = 48.dp
 
 /**
- * Network tab: local-network permission banner, a status card, the action
- * buttons (equal width, two per row), discovered peers with Connect, the
- * current neighbor list, and — in debug builds only — a Debug card with the
- * fixed test-location toggle. Everything scrolls; the screen itself is fixed.
+ * Network tab: local-network permission banner, a status card, the "Auto connect" switch
+ * (moved here from home in TASK U4 part 2), the action buttons (equal width, two per row),
+ * discovered peers with Connect, the current neighbor list, and — in debug builds only — a
+ * Debug card with the fixed test-location toggle and the discovery diagnostics line.
+ * Everything scrolls; the screen itself is fixed.
  */
 @Composable
 fun MeshNetworkTab(
@@ -76,6 +78,13 @@ fun MeshNetworkTab(
     // Whether a group owner keeps scanning for other groups to merge with (TASK M1).
     mergeGroupsEnabled: Boolean = true,
     onSetMergeGroupsEnabled: (Boolean) -> Unit = {},
+    // The "Auto connect" switch moved here from the home header (TASK U4 part 2); same flows,
+    // so storage and behavior are unchanged.
+    autoMeshEnabled: Boolean = true,
+    onSetAutoMeshEnabled: (Boolean) -> Unit = {},
+    // Discovery diagnostics for the Debug card; that card only exists in debuggable builds.
+    discoveryStrategy: Int = 1,
+    rawCallbackCount: Int = 0,
     // Display names learned from the mesh; unknown neighbors fall back to "User #id".
     profiles: Map<Int, ProfileInfo> = emptyMap(),
     // TASK U4 part 1: true when entered via the chats home's "Manual connect" hint, so the
@@ -96,6 +105,8 @@ fun MeshNetworkTab(
         }
 
         StatusCard(nodeId, state)
+
+        AutoConnectCard(enabled = autoMeshEnabled, onSetEnabled = onSetAutoMeshEnabled)
 
         // The common path is automatic; only the always-useful actions stay out.
         FlowRow(
@@ -133,8 +144,14 @@ fun MeshNetworkTab(
         )
 
         if (showTestLocationToggle) {
-            // DEBUG builds only: GPS may never fix indoors, so offer a fixed point.
-            DebugCard(useTestLocation = useTestLocation, onSetUseTestLocation = onSetUseTestLocation)
+            // DEBUG builds only: GPS may never fix indoors, so offer a fixed point; the card
+            // also carries the discovery diagnostics line that left the home banner.
+            DebugCard(
+                useTestLocation = useTestLocation,
+                onSetUseTestLocation = onSetUseTestLocation,
+                discoveryStrategy = discoveryStrategy,
+                rawCallbackCount = rawCallbackCount,
+            )
         }
     }
 }
@@ -296,6 +313,32 @@ private fun StatusRow(label: String, value: String) {
     }
 }
 
+/**
+ * The "Auto connect" switch (TASK U4 part 2): moved here from the home header so the chats
+ * screen stays decluttered. Same flows as before — the service persists it; manual Wi-Fi Direct
+ * actions only pause auto-mesh temporarily until it is turned back on.
+ */
+// Internal (not private) so the design-time previews can render it directly.
+@Composable
+internal fun AutoConnectCard(enabled: Boolean, onSetEnabled: (Boolean) -> Unit) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Auto connect", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "Join or create a group automatically when other AirMesh phones are nearby.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onSetEnabled)
+        }
+    }
+}
+
 /** Discovered peers with a Connect button; disabled (with the reason shown)
  * while a group is formed or a connect request is in flight. Peers that also
  * advertise via DNS-SD are AirMesh phones and are listed first, tagged with
@@ -433,23 +476,40 @@ private fun MessageNotificationsCard(enabled: Boolean, onSetEnabled: (Boolean) -
     }
 }
 
-/** Debug-builds-only card: shares a fixed point instead of GPS (indoor testing). */
+/**
+ * Debug-builds-only card: shares a fixed point instead of GPS (indoor testing), and shows the
+ * discovery diagnostics line that used to sit under the home banner (TASK U4 part 2). The card
+ * is only composed in debuggable builds, so release builds never see either.
+ */
 @Composable
-private fun DebugCard(useTestLocation: Boolean, onSetUseTestLocation: (Boolean) -> Unit) {
+private fun DebugCard(
+    useTestLocation: Boolean,
+    onSetUseTestLocation: (Boolean) -> Unit,
+    discoveryStrategy: Int,
+    rawCallbackCount: Int,
+) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-        Row(
+        Column(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Share a fixed test location", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    TEST_LOCATION_LABEL,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Share a fixed test location", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        TEST_LOCATION_LABEL,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = useTestLocation, onCheckedChange = onSetUseTestLocation)
             }
-            Switch(checked = useTestLocation, onCheckedChange = onSetUseTestLocation)
+            // Pure helper from transport; the exact wording is unit-tested there.
+            Text(
+                discoveryStatusLine(discoveryStrategy, rawCallbackCount),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

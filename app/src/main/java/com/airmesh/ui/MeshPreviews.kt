@@ -289,6 +289,8 @@ private fun NetworkTabLightPreview() = ThemedTabPreview(darkTheme = false) {
         // Debug card: off here, armed in the dark preview.
         showTestLocationToggle = true,
         useTestLocation = false,
+        discoveryStrategy = 3,
+        rawCallbackCount = 47,
         profiles = previewProfiles,
     )
 }
@@ -311,6 +313,8 @@ private fun NetworkTabDarkPreview() = ThemedTabPreview(darkTheme = true) {
         onSetThemeMode = {},
         showTestLocationToggle = true,
         useTestLocation = true,
+        discoveryStrategy = 3,
+        rawCallbackCount = 47,
         profiles = previewProfiles,
     )
 }
@@ -344,16 +348,17 @@ private fun NetworkTabAdvancedExpandedPreview() = ThemedTabPreview(darkTheme = f
     }
 }
 
-/** Every banner text the auto-mesh controller can produce, in order of use. */
-private val bannerPreviewTexts = listOf(
-    "Searching for nearby AirMesh phones…",
-    "Found 2 Wi-Fi Direct devices but none advertises AirMesh. Open Advanced to connect manually.",
-    "Creating a group — waiting for another phone to join",
-    "Connecting to #7…",
-    "Waiting for the other phone to accept the connection request",
-    "Connected · 2 neighbors",
-    "Retrying in 5s — connect failed (other)",
-    "Wi-Fi Direct permission not granted",
+/**
+ * The banners home can actually show (TASK U4 part 2), built with the real pure mapping so the
+ * previews never drift from device behavior: a merge in progress, a retry after an error, and —
+ * only when conversations exist — the missing-permission line. Searching/connecting states get
+ * no banner; they are explained by the empty state instead.
+ */
+private val previewHomeBanners = listOfNotNull(
+    homeBannerText(AutoMeshState.Yielding("192.168.49.1", 7, 3, 0L), true, 2, null, 0L, false),
+    homeBannerText(AutoMeshState.Backoff(untilMs = 5_000L, reason = "connect failed (other)"), true, 0, null, 0L, false),
+    // emptyStateVisible = false: with conversations on screen the banner owns this message.
+    homeBannerText(AutoMeshState.Idle, permissionOk = false, neighborCount = 0, idleReason = null, nowMs = 0L, emptyStateVisible = false),
 )
 
 @Composable
@@ -362,28 +367,68 @@ private fun BannerPreviewContent() {
         modifier = Modifier.padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        bannerPreviewTexts.forEach { AutoMeshBanner(it) }
+        previewHomeBanners.forEach { AutoMeshBanner(it) }
     }
 }
 
-@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "Auto-mesh banners · light")
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "Home banners · light")
 @Composable
 private fun BannerLightPreview() = ThemedTabPreview(darkTheme = false) {
     BannerPreviewContent()
 }
 
-@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "Auto-mesh banners · dark")
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 420, name = "Home banners · dark")
 @Composable
 private fun BannerDarkPreview() = ThemedTabPreview(darkTheme = true) {
     BannerPreviewContent()
 }
 
-/** The full header: a banner plus the Auto connect switch. */
-@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 200, name = "Auto connect · header")
+/** The single banner above the empty state while a merge is in progress (TASK U4 part 2). */
+private val previewMergingState = AutoMeshState.Yielding(
+    targetAddress = "192.168.49.1", targetNodeId = 7, targetPhones = 3, sinceMs = 0L,
+)
+
 @Composable
-private fun AutoMeshHeaderPreview() = ThemedTabPreview(darkTheme = false) {
+private fun HomeBannerOverEmptyStateContent() {
+    Column(modifier = Modifier.fillMaxSize()) {
+        homeBannerText(previewMergingState, true, 2, null, 0L, false)?.let {
+            AutoMeshBanner(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+        }
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            ChatsEmptyState(
+                state = homeEmptyState(previewMergingState, otherDevicesFound = 0, searchingForMs = 0L, permissionOk = true),
+                modifier = Modifier.padding(horizontal = 32.dp).widthIn(max = 320.dp),
+            )
+        }
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Home · merging banner · light")
+@Composable
+private fun HomeMergingBannerLightPreview() = ThemedTabPreview(darkTheme = false) {
+    HomeBannerOverEmptyStateContent()
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Home · merging banner · dark")
+@Composable
+private fun HomeMergingBannerDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    HomeBannerOverEmptyStateContent()
+}
+
+/** The Auto connect switch in its new home: the Network tab (TASK U4 part 2). */
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 200, name = "Auto connect · network card")
+@Composable
+private fun AutoConnectCardPreview() = ThemedTabPreview(darkTheme = false) {
     Column(modifier = Modifier.padding(16.dp)) {
-        AutoMeshHeader(bannerText = "Searching for nearby AirMesh phones…", enabled = true, onSetEnabled = {})
+        AutoConnectCard(enabled = true, onSetEnabled = {})
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 200, name = "Auto connect · network card · dark")
+@Composable
+private fun AutoConnectCardDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    Column(modifier = Modifier.padding(16.dp)) {
+        AutoConnectCard(enabled = false, onSetEnabled = {})
     }
 }
 

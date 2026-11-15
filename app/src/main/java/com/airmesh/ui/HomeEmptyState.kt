@@ -1,6 +1,7 @@
 package com.airmesh.ui
 
 import com.airmesh.transport.AutoMeshState
+import com.airmesh.transport.autoMeshBannerText
 
 /**
  * What the chats home shows when there are no conversations yet (TASK U4 part 1).
@@ -92,6 +93,36 @@ fun homeEmptyState(
             showManualButton = false,
         )
     }
+}
+
+/**
+ * The single banner the chats home may show (TASK U4 part 2): only actionable problems —
+ * missing permissions, a merge in progress, or a retry after an error. Everything else
+ * (searching, connecting, connected, idle) returns null: those states are already explained by
+ * the empty state's headline, and repeating them in a banner was exactly the clutter this task
+ * removes. The old "found N devices but none advertises AirMesh" hint is gone from home too —
+ * its content now lives in the empty-state caption and the manual-connect button.
+ *
+ * [emptyStateVisible] mirrors ChatsHomeContent's condition (no conversation or people rows):
+ * when the empty state is on screen it owns the permission message (headline + Grant button), so
+ * a banner would repeat it; with conversations present, the banner is the only signal left.
+ * The technical discovery line never appears here — it belongs to the Network tab's Debug card.
+ */
+fun homeBannerText(
+    status: AutoMeshState,
+    permissionOk: Boolean,
+    neighborCount: Int,
+    idleReason: String?,
+    nowMs: Long,
+    emptyStateVisible: Boolean,
+): String? = when {
+    !permissionOk && !emptyStateVisible ->
+        // Same wording as the empty-state headline; the two are never on screen at once.
+        emptyStateText(EmptyStateKind.PERMISSION_MISSING, null)
+    // Merge in progress and retry-after-error: the only other actionable problems.
+    status is AutoMeshState.Yielding || status is AutoMeshState.Backoff ->
+        autoMeshBannerText(status, neighborCount, idleReason, nowMs)
+    else -> null
 }
 
 /** CONNECTING headline for an optional join target id. */
