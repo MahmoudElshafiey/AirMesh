@@ -261,6 +261,8 @@ class MeshActivity : ComponentActivity() {
                             shareFailureMessage = shareFailureMessage.value,
                             myLatestShareWasCached = myLatestShareWasCached.value,
                             showTestLocationToggle = isDebugBuild,
+                            // 30 s perf lines (recompositions + UI emissions) in debug builds only.
+                            showPerfCounters = isDebugBuild,
                             useTestLocation = useTestLocation.value,
                             onSetUseTestLocation = { value ->
                                 // Persist so the switch survives process death (debug builds only).

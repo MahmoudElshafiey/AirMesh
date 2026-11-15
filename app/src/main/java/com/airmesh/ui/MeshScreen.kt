@@ -43,6 +43,9 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -156,6 +159,9 @@ fun MeshScreen(
     // Discovery diagnostics shown as the banner's small second line.
     discoveryStrategy: Int = 1,
     rawCallbackCount: Int = 0,
+    // Debuggable builds only: per-screen recomposition counts and UI state emissions are
+    // reported to the event log every 30 s while the UI is visible (TASK U4 part 3).
+    showPerfCounters: Boolean = false,
     // Whether every Wi-Fi Direct runtime permission is currently held; when not, the chats
     // empty state offers a "Grant permission" button instead of searching forever.
     permissionsGranted: Boolean = true,
@@ -205,6 +211,56 @@ fun MeshScreen(
         while (true) {
             delay(1_000L)
             nowMs = System.currentTimeMillis()
+        }
+    }
+
+    // Debug-only perf probes (TASK U4 part 3): null in release builds, so none of the
+    // recording below runs there. The counters use plain fields and stay invisible to Compose.
+    val perfCounters = remember(showPerfCounters) { if (showPerfCounters) PerfCounters() else null }
+    val perf = perfCounters
+    if (perf != null) {
+        // Runs on the first composition and again exactly when any UI-facing value changes:
+        // one count per distinct UI update, batched across flows that change in the same frame.
+        TrackUiEmissions(
+            counter = perf.uiEmissions,
+            connectorState = connectorState,
+            neighbors = neighbors,
+            messages = messages,
+            locations = locations,
+            myProfile = myProfile,
+            profiles = profiles,
+            events = events,
+            messageNotificationsEnabled = messageNotificationsEnabled,
+            mergeGroupsEnabled = mergeGroupsEnabled,
+            autoMeshState = autoMeshState,
+            autoIdleReason = autoIdleReason,
+            airMeshPeers = airMeshPeers,
+            autoMeshEnabled = autoMeshEnabled,
+            discoveryStrategy = discoveryStrategy,
+            rawCallbackCount = rawCallbackCount,
+            presence = presence,
+            conversationSummaries = conversationSummaries,
+            contacts = contacts,
+        )
+    }
+    // Every 30 s while the UI is visible: report per-screen recompositions and how often any
+    // UI-facing value changed. The line goes to the event log (its "perf:" prefix is protected).
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(lifecycle, perfCounters) {
+        val counters = perfCounters ?: return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                delay(PERF_REPORT_INTERVAL_MS)
+                onUiEventLog(
+                    perfLine(
+                        counters.chats.drain(),
+                        counters.chat.drain(),
+                        counters.network.drain(),
+                        counters.logTab.drain(),
+                        counters.uiEmissions.drain(),
+                    ),
+                )
+            }
         }
     }
 
@@ -434,6 +490,7 @@ fun MeshScreen(
                 modifier = Modifier.fillMaxWidth().weight(1f),
             ) {
                 composable(ROUTE_CHATS) {
+                    perf?.chats?.record() // debug-only recomposition probe (TASK U4 part 3)
                     // The WhatsApp-style home (TASK U1 part 3). Rows navigate to the chat
                     // route; the old MeshChatTab leaves the graph until the redesigned
                     // conversation screen replaces the placeholder in a later step.
@@ -457,6 +514,7 @@ fun MeshScreen(
                     )
                 }
                 composable(ROUTE_CHAT) { entry ->
+                    perf?.chat?.record() // debug-only recomposition probe (TASK U4 part 3)
                     // The id is an Int in the chat model; a malformed argument just lands on 0.
                     val conversationId = entry.arguments?.getString("conversationId")?.toIntOrNull() ?: 0
                     var chatMessages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
@@ -498,6 +556,7 @@ fun MeshScreen(
                     )
                 }
                 composable(ROUTE_NETWORK_PATTERN) { entry ->
+                    perf?.network?.record() // debug-only recomposition probe (TASK U4 part 3)
                     // The optional argument is set by the chats home's "Manual connect" hint.
                     MeshNetworkTab(
                         nodeId = nodeId,
@@ -532,7 +591,10 @@ fun MeshScreen(
                         advancedInitiallyExpanded = entry.arguments?.getString(ARG_EXPAND_ADVANCED) == "true",
                     )
                 }
-                composable(ROUTE_LOG) { MeshLogTab(events = events, onClearLog = onClearLog) }
+                composable(ROUTE_LOG) {
+                    perf?.logTab?.record() // debug-only recomposition probe (TASK U4 part 3)
+                    MeshLogTab(events = events, onClearLog = onClearLog)
+                }
                 composable(ROUTE_PROFILE) {
                     // Full-screen profile editor (TASK U1 part 4): the same content as the old
                     // bottom sheet; saving goes through service.setMyProfile and pops back.
@@ -704,5 +766,36 @@ internal fun ProfileScreen(
             onCancel = onBack,
         )
     }
+}
+
+/**
+ * Counts UI state emissions for the 30 s perf line (TASK U4 part 3). Compose skips this body
+ * while every parameter stays structurally equal, so it records exactly once per distinct UI
+ * update — flows that change in the same frame count as one. The counter is invisible to
+ * Compose (plain fields), so recording never invalidates anything.
+ */
+@Composable
+private fun TrackUiEmissions(
+    counter: RecompositionCounter,
+    connectorState: ConnectorState,
+    neighbors: Set<Int>,
+    messages: List<MeshMessage>,
+    locations: List<MeshLocation>,
+    myProfile: MyProfile,
+    profiles: Map<Int, ProfileInfo>,
+    events: List<LogEntry>,
+    messageNotificationsEnabled: Boolean,
+    mergeGroupsEnabled: Boolean,
+    autoMeshState: AutoMeshState,
+    autoIdleReason: String?,
+    airMeshPeers: List<AirMeshPeer>,
+    autoMeshEnabled: Boolean,
+    discoveryStrategy: Int,
+    rawCallbackCount: Int,
+    presence: Map<Int, NodePresence>,
+    conversationSummaries: List<ConversationSummary>,
+    contacts: List<Contact>,
+) {
+    counter.record()
 }
 
