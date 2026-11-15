@@ -29,9 +29,11 @@ import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
 import com.airmesh.presence.PresenceBookkeeping
+import com.airmesh.presence.PresenceChangeContext
 import com.airmesh.presence.PresenceEvent
 import com.airmesh.presence.PresenceEventLog
 import com.airmesh.presence.PresenceState as LivePresenceState
+import com.airmesh.presence.presenceTransitionLine
 import com.airmesh.profile.ProfileInfo
 import com.airmesh.protocol.FrameType
 import com.airmesh.storage.ChatDatabase
@@ -106,6 +108,14 @@ class MeshService : Service() {
     private val presenceBookkeeping = PresenceBookkeeping()
     private val presenceEventLog = PresenceEventLog()
 
+    // Transition-reason context for the "presence: #id OLD -> NEW reason=X" log lines (TASK U5 part 4).
+    /** Neighbor set as of the last noteNeighbors call. */
+    private var presenceNeighborSet: Set<Int> = emptySet()
+    /** Neighbor set at the previous recompute; compared with [presenceNeighborSet] for link up/down. */
+    private var previousPresenceNeighborSet: Set<Int> = emptySet()
+    /** Nodes with at least one frame since the previous recompute (fresh evidence). */
+    private val freshPresenceFrames = HashSet<Int>()
+
     /** DNS-SD directory of nearby AirMesh phones; created in [onCreate]. */
     private lateinit var peerDirectory: WifiP2pPeerDirectory
 
@@ -178,6 +188,29 @@ class MeshService : Service() {
     private fun recomputePresenceNow() {
         val states = presenceBookkeeping.states()
         for ((nodeId, state) in states) presenceEventLog.note(nodeId, state)
+        // One event-log line per transition with its cause (TASK U5 part 4). First sight of a
+        // node has no previous published state, so it is not a transition and stays quiet.
+        val ownLinkWentDown = presenceNeighborSet.isEmpty() && previousPresenceNeighborSet.isNotEmpty()
+        val ownLinkCameUp = presenceNeighborSet.isNotEmpty() && previousPresenceNeighborSet.isEmpty()
+        for ((nodeId, next) in states) {
+            val previous = _livePresence.value[nodeId] ?: continue
+            val line = presenceTransitionLine(
+                nodeId,
+                previous,
+                next,
+                PresenceChangeContext(
+                    ownLinkWentDown = ownLinkWentDown,
+                    ownLinkCameUp = ownLinkCameUp,
+                    directLinkDropped = nodeId in previousPresenceNeighborSet &&
+                        nodeId !in presenceNeighborSet && presenceNeighborSet.isNotEmpty(),
+                    freshFrameArrived = nodeId in freshPresenceFrames,
+                ),
+            ) ?: continue
+            _eventLog.log(line)
+        }
+        // This round's context is consumed; the next round compares against what we just saw.
+        previousPresenceNeighborSet = presenceNeighborSet
+        freshPresenceFrames.clear()
         _livePresence.value = states
         val snapshot = presenceEventLog.snapshot()
         if (snapshot != _presenceEventsByNode.value) {
@@ -373,6 +406,7 @@ class MeshService : Service() {
                 }
                 // Truthful presence reacts to every neighbor up/down immediately (TASK U5 part 2).
                 presenceBookkeeping.noteNeighbors(neighbors)
+                presenceNeighborSet = neighbors // reason context for the next log lines (part 4)
                 recomputePresenceNow()
             }
         }
@@ -405,6 +439,7 @@ class MeshService : Service() {
         serviceScope.launch {
             node.nodeActivity.collect { activity ->
                 presenceBookkeeping.noteActivity(activity.nodeId)
+                freshPresenceFrames.add(activity.nodeId) // reason context (TASK U5 part 4)
                 _chatStore.upsertContact(activity.nodeId, null, 0)
                 // A frame is fresh evidence: recompute at once instead of waiting for the tick.
                 recomputePresenceNow()
