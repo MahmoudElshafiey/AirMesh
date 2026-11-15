@@ -26,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -37,7 +38,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import com.airmesh.node.LogEntry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.withContext
 
 /** Filter order for the chips: index 0 is "All" (no filter), then one per [LogCategory]. */
 private val FILTER_LABELS = listOf("All", "Messages", "Network", "TCP", "Errors")
@@ -62,8 +65,13 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
     var filterIndex by rememberSaveable { mutableIntStateOf(0) }
     val selected = filterFromIndex(filterIndex)
 
-    // Filtering is pure (see MeshUiHelpers), so it can be memoized on the input.
-    val visible = remember(events, selected) { events.filter { matchesFilter(it.text, selected) } }
+    // Filtering runs off the main thread (TASK U4 part 4): with up to 2000 lines a burst of log
+    // updates must not block composition. The unfiltered list seeds the first frame so an empty
+    // flash never appears; if a filter was restored via rememberSaveable, the producer corrects
+    // it within one frame.
+    val visible by produceState<List<LogEntry>>(initialValue = events, events, selected) {
+        value = withContext(Dispatchers.Default) { events.filter { matchesFilter(it.text, selected) } }
+    }
 
     val listState = rememberLazyListState()
     var follow by rememberSaveable { mutableStateOf(true) }
@@ -128,9 +136,9 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
                     )
                 }
             } else {
-                // Index keys: the log is append-only and LogEntry has no id.
-                items(count = visible.size, key = { it }) { index ->
-                    val entry = visible[index]
+                // Stable keys (TASK U4 part 4): EventLog assigns each line a monotonic seq, so
+                // appended lines never shift the identity of the rows already on screen.
+                items(visible, key = { it.seq }) { entry ->
                     Text(
                         "${formatLogTime(entry.timeMs)}  ${entry.text}",
                         fontFamily = FontFamily.Monospace,

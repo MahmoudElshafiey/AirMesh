@@ -33,7 +33,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.airmesh.node.AndroidLocationProvider
 import com.airmesh.node.LOCATION_MAX_WAIT_MS
 import com.airmesh.node.LocationFix
@@ -213,27 +213,30 @@ class MeshActivity : ComponentActivity() {
                         onStart = ::requestPermissions,
                     )
                     else -> {
-                        val connectorState by service.connectorState.collectAsState()
-                        val neighbors by service.neighbors.collectAsState()
-                        val messages by service.messages.collectAsState()
-                        val locations by service.locations.collectAsState()
-                        val myProfile by service.myProfile.collectAsState()
-                        val profiles by service.profiles.collectAsState()
-                        val events by service.events.collectAsState()
-                        val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsState()
-                        val mergeGroupsEnabled by service.mergeGroupsEnabled.collectAsState()
-                        val autoMeshState by service.autoMeshState.collectAsState()
-                        val autoIdleReason by service.autoIdleReason.collectAsState()
-                        val airMeshPeers by service.airMeshPeers.collectAsState()
-                        val autoMeshEnabled by service.autoMeshEnabled.collectAsState()
-                        val discoveryStrategy by service.discoveryStrategy.collectAsState()
-                        val rawCallbackCount by service.rawCallbackCount.collectAsState()
+                        // collectAsStateWithLifecycle (TASK U4 part 4): collection pauses while the
+                        // activity is below STARTED, so backgrounded UI costs nothing. The log tab
+                        // reads the batched uiEvents view (at most one update per 250 ms).
+                        val connectorState by service.connectorState.collectAsStateWithLifecycle()
+                        val neighbors by service.neighbors.collectAsStateWithLifecycle()
+                        val messages by service.messages.collectAsStateWithLifecycle()
+                        val locations by service.locations.collectAsStateWithLifecycle()
+                        val myProfile by service.myProfile.collectAsStateWithLifecycle()
+                        val profiles by service.profiles.collectAsStateWithLifecycle()
+                        val events by service.uiEvents.collectAsStateWithLifecycle()
+                        val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsStateWithLifecycle()
+                        val mergeGroupsEnabled by service.mergeGroupsEnabled.collectAsStateWithLifecycle()
+                        val autoMeshState by service.autoMeshState.collectAsStateWithLifecycle()
+                        val autoIdleReason by service.autoIdleReason.collectAsStateWithLifecycle()
+                        val airMeshPeers by service.airMeshPeers.collectAsStateWithLifecycle()
+                        val autoMeshEnabled by service.autoMeshEnabled.collectAsStateWithLifecycle()
+                        val discoveryStrategy by service.discoveryStrategy.collectAsStateWithLifecycle()
+                        val rawCallbackCount by service.rawCallbackCount.collectAsStateWithLifecycle()
                         // Chats home data (TASK U1 part 3): presence plus the store's
                         // conversation rollups and known contacts. The flows are cold, so
                         // they start empty until Room emits its first snapshot.
-                        val presence by service.presence.collectAsState()
-                        val conversationSummaries by service.chatStore.summaries.collectAsState(initial = emptyList())
-                        val contacts by service.chatStore.contacts.collectAsState(initial = emptyList())
+                        val presence by service.presence.collectAsStateWithLifecycle()
+                        val conversationSummaries by service.chatStore.summaries.collectAsStateWithLifecycle(initialValue = emptyList())
+                        val contacts by service.chatStore.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
 
                         MeshScreen(
                             nodeId = service.nodeId,

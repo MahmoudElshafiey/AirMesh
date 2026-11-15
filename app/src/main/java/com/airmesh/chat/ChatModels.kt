@@ -1,5 +1,7 @@
 package com.airmesh.chat
 
+import androidx.compose.runtime.Immutable
+
 /**
  * Conversation ids (TASK D2): [MESH_CONVERSATION_ID] is the broadcast room that
  * everyone shares; any other id is a peer node id, i.e. a one-to-one direct
@@ -24,6 +26,7 @@ enum class ChatStatus { QUEUED, SENT, DELIVERED }
  * One persisted chat row. [id] is assigned by the store; callers pass 0 and the
  * store replaces it on insert.
  */
+@Immutable // all fields are value types (TASK U4 part 4)
 data class ChatMessage(
     val id: Long = 0L,
     /** 0 = mesh room, otherwise the peer node id of a direct conversation. */
@@ -46,6 +49,7 @@ data class ChatMessage(
 )
 
 /** A peer we can address: learned from PROFILE frames or any frame activity. */
+@Immutable // all fields are value types (TASK U4 part 4)
 data class Contact(
     val nodeId: Int,
     /** null = the node never announced a display name. */
@@ -57,6 +61,7 @@ data class Contact(
 /** Coarse liveness of a node, derived from the last frame activity seen from it. */
 enum class PresenceState { ONLINE, RECENT, UNKNOWN }
 
+@Immutable // all fields are value types (TASK U4 part 4)
 data class NodePresence(
     val state: PresenceState,
     /** True when the node is in our live Wi-Fi Direct neighbor set right now. */
@@ -64,6 +69,7 @@ data class NodePresence(
 )
 
 /** Per-conversation rollup backing the conversation list. */
+@Immutable // all fields are value types (TASK U4 part 4)
 data class ConversationSummary(
     val conversationId: Int,
     val lastMessageAt: Long,
@@ -75,6 +81,7 @@ data class ConversationSummary(
 )
 
 /** One rendered row of the conversation list (TASK D2 part 1). */
+@Immutable // all fields are value types (TASK U4 part 4)
 data class ConversationItem(
     val conversationId: Int,
     val title: String,

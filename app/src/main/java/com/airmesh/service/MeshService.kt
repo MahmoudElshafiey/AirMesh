@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.net.wifi.p2p.WifiP2pDevice
 import android.os.Binder
 import android.os.IBinder
@@ -22,6 +23,7 @@ import com.airmesh.node.AirMeshNode
 import com.airmesh.node.DirectSendResult
 import com.airmesh.node.EventLog
 import com.airmesh.node.LogEntry
+import com.airmesh.node.LogUiBatcher
 import com.airmesh.node.MeshLocation
 import com.airmesh.node.MeshMessage
 import com.airmesh.node.MyProfile
@@ -66,6 +68,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -86,6 +89,12 @@ class MeshService : Service() {
     private lateinit var _eventLog: EventLog
     private lateinit var node: AirMeshNode
     private lateinit var connector: WifiDirectConnector
+
+    /**
+     * Number of bound UI clients (the Activity). UI-only stats are refreshed only while one is
+     * bound and visible (TASK U4 part 4); the networking loops never depend on this.
+     */
+    private var uiClientCount = 0
 
     /** Chat history layer (TASK D2 part 4): a separate Room DB from the packet store. */
     private lateinit var _chatStore: RoomChatStore
@@ -148,6 +157,14 @@ class MeshService : Service() {
     private val _presence = MutableStateFlow<Map<Int, NodePresence>>(emptyMap())
     val presence: StateFlow<Map<Int, NodePresence>> = _presence.asStateFlow()
     val events: StateFlow<List<LogEntry>> get() = _eventLog.entries
+
+    /**
+     * Batched view of [events] for the UI (TASK U4 part 4): republished at most every 250 ms, so
+     * a burst of log lines costs the UI one recomposition per window instead of one per line.
+     */
+    private val _uiEvents = MutableStateFlow<List<LogEntry>>(emptyList())
+    val uiEvents: StateFlow<List<LogEntry>> = _uiEvents.asStateFlow()
+
     val connectorState: StateFlow<ConnectorState> get() = connector.state
 
     /** Whether auto-mesh is on (Network tab switch, default on). Persisted. */
@@ -193,7 +210,8 @@ class MeshService : Service() {
         notificationManager = getSystemService(NotificationManager::class.java)
         createChannels()
 
-        _eventLog = EventLog()
+        // Verbose raw P2P callback lines and interface dumps are stored in debuggable builds only.
+        _eventLog = EventLog(verboseEnabled = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0)
         node = createAirMeshNode(
             applicationContext,
             NodeIdProvider(SharedPreferencesNodeIdStore(this)).getOrCreate(),
@@ -435,6 +453,18 @@ class MeshService : Service() {
             }
         }
 
+        // The UI consumes a batched view of the log: at most one publish per 250 ms window.
+        // collectLatest cancels this body when newer lines arrive, so reaching the end means
+        // [entries] is still the newest list — publish it and open the next window (TASK U4 part 4).
+        serviceScope.launch {
+            val batcher = LogUiBatcher()
+            _eventLog.entries.collectLatest { entries ->
+                if (!batcher.canPublish()) delay(batcher.waitMs())
+                _uiEvents.value = entries
+                batcher.markPublished()
+            }
+        }
+
         // --- Auto-mesh wiring ---------------------------------------------------
         // One tick per second drives backoff expiry, join timeouts and the takeover deadline.
         serviceScope.launch {
@@ -450,9 +480,14 @@ class MeshService : Service() {
                         peerDirectory.peers.value.size, connector.state.value.peers.size,
                     )
                 } else null
-                // Discovery diagnostics for the banner's small second line.
-                _discoveryStrategy.value = discoveryCoordinator.currentStrategy
-                _rawCallbackCount.value = discoveryCoordinator.rawCallbackCount
+                // Discovery diagnostics for the banner's small second line (TASK U4 part 4):
+                // refreshed only while a UI client is bound and visible. StateFlow equality
+                // already suppresses no-change emissions, so returning to the UI shows at most
+                // one second of stale values until this tick runs again.
+                if (uiClientCount > 0 && AppForeground.anyActivityVisible) {
+                    _discoveryStrategy.value = discoveryCoordinator.currentStrategy
+                    _rawCallbackCount.value = discoveryCoordinator.rawCallbackCount
+                }
                 connector.staleGroupGuard.tick()
                 when {
                     hint != null && !noAirMeshHintShown -> {
@@ -534,7 +569,16 @@ class MeshService : Service() {
         connector.start()
     }
 
-    override fun onBind(intent: Intent): IBinder = LocalBinder()
+    // Both run on the main thread, like the tick loop that reads [uiClientCount].
+    override fun onBind(intent: Intent): IBinder {
+        uiClientCount++
+        return LocalBinder()
+    }
+
+    override fun onUnbind(intent: Intent): Boolean {
+        if (uiClientCount > 0) uiClientCount--
+        return super.onUnbind(intent)
+    }
 
     /** In-process binding: the Activity gets a direct reference to this service. */
     inner class LocalBinder : Binder() {

@@ -105,12 +105,13 @@ private val previewAirMeshPeers = listOf(
     AirMeshPeer("AA:BB:CC:DD:EE:FF", nodeId = 2, isGroupOwner = true, tieBreakToken = 0x1234),
 )
 
+// Distinct seqs: the log tab uses them as stable list keys (TASK U4 part 4).
 private val previewEvents = listOf(
-    LogEntry(1_700_000_000_000L, "P2P: group formed, role=GROUP_OWNER"),
-    LogEntry(1_700_000_010_000L, "TX #1 -> all (ttl=5): \"does the mesh work?\""),
-    LogEntry(1_700_000_020_000L, "RX #2 from 3: delivered"),
-    LogEntry(1_700_000_030_000L, "TCP: listening on port 4780"),
-    LogEntry(1_700_000_040_000L, "TCP: connect to owner failed — retrying in 2s"),
+    LogEntry(1_700_000_000_000L, "P2P: group formed, role=GROUP_OWNER", seq = 1),
+    LogEntry(1_700_000_010_000L, "TX #1 -> all (ttl=5): \"does the mesh work?\"", seq = 2),
+    LogEntry(1_700_000_020_000L, "RX #2 from 3: delivered", seq = 3),
+    LogEntry(1_700_000_030_000L, "TCP: listening on port 4780", seq = 4),
+    LogEntry(1_700_000_040_000L, "TCP: connect to owner failed — retrying in 2s", seq = 5),
 )
 
 /** Shared wrapper: fixed palette + a full-screen background like the real screen. */

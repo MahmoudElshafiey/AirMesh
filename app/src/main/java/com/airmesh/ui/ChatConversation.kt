@@ -140,9 +140,18 @@ fun ChatConversationContent(
             if (rows.isEmpty()) {
                 item(key = "empty") { EmptyConversation(isMeshRoom) }
             } else {
-                // Index keys: the list is append-only and rows have no stable id of their own.
-                items(count = rows.size, key = { it }) { index ->
-                    when (val row = rows[index]) {
+                // Stable keys (TASK U4 part 4): messages carry the store-assigned id, and a day
+                // separator's label is unique within one conversation. Content types keep the
+                // light separators out of the heavy message-row reuse pool.
+                items(
+                    rows,
+                    key = { row -> when (row) {
+                        is ChatUiRow.Day -> "day:${row.label}"
+                        is ChatUiRow.Message -> row.message.id
+                    } },
+                    contentType = { row -> if (row is ChatUiRow.Day) "day" else "message" },
+                ) { row ->
+                    when (row) {
                         is ChatUiRow.Day -> DaySeparator(row.label)
                         is ChatUiRow.Message -> {
                             val contact = contactById[row.message.originNode]

@@ -109,12 +109,14 @@ fun ChatsHomeContent(
         }
     } else {
         LazyColumn(modifier = Modifier.fillMaxSize()) {
+            // Distinct content types per row kind (TASK U4 part 4) so the lazy list keeps
+            // separate reuse pools instead of recycling one heavy row into another.
             roomRow?.let { row ->
-                item(key = "room") { MeshRoomRow(row = row, nowMs = nowMs) { onOpenConversation(MESH_CONVERSATION_ID) } }
+                item(key = "room", contentType = { "room" }) { MeshRoomRow(row = row, nowMs = nowMs) { onOpenConversation(MESH_CONVERSATION_ID) } }
             }
             if (chatRows.isNotEmpty()) {
-                item(key = "chatsHeader") { SectionHeader("Chats") }
-                items(chatRows, key = { it.conversationId }) { row ->
+                item(key = "chatsHeader", contentType = { "header" }) { SectionHeader("Chats") }
+                items(chatRows, key = { it.conversationId }, contentType = { "chat" }) { row ->
                     ConversationRow(
                         title = row.title,
                         colorIndex = row.colorIndex,
@@ -128,8 +130,8 @@ fun ChatsHomeContent(
                 }
             }
             if (peopleRows.isNotEmpty()) {
-                item(key = "peopleHeader") { SectionHeader("People in your network") }
-                items(peopleRows, key = { it.conversationId }) { row ->
+                item(key = "peopleHeader", contentType = { "header" }) { SectionHeader("People in your network") }
+                items(peopleRows, key = { it.conversationId }, contentType = { "person" }) { row ->
                     PersonRow(item = row, nowMs = nowMs) { onOpenConversation(row.conversationId) }
                 }
             }
