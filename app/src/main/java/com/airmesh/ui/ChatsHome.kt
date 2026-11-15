@@ -11,12 +11,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -25,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.airmesh.chat.Contact
@@ -36,8 +40,9 @@ import com.airmesh.chat.NodePresence
 import com.airmesh.chat.PresenceState
 import com.airmesh.ui.components.Avatar
 import com.airmesh.ui.components.ConversationRow
-import com.airmesh.ui.components.EmptyState
+import com.airmesh.ui.components.EmptyMeshIllustration
 import com.airmesh.ui.components.PresenceText
+import com.airmesh.ui.components.RadarSearchIndicator
 import com.airmesh.ui.components.SectionHeader
 import com.airmesh.ui.theme.AirMeshSpacing
 import com.airmesh.ui.theme.LocalAirMeshColors
@@ -46,8 +51,8 @@ import com.airmesh.ui.theme.LocalAirMeshColors
  * WhatsApp-style chats home (TASK U1 part 3): the pinned "Everyone nearby" room, then
  * conversations with messages ("Chats"), then live contacts that have no conversation yet
  * ("People in your network"). The rows come from the pure [ConversationListBuilder]; this
- * composable only renders them. When both sections are empty, an animated
- * "Looking for phones nearby…" state sits below the still-tappable pinned room.
+ * composable only renders them. When both sections are empty, a kind-driven empty state
+ * (only SEARCHING/CONNECTING animate — TASK U3 part 2) sits below the still-tappable room.
  */
 @Composable
 fun ChatsHomeContent(
@@ -56,6 +61,13 @@ fun ChatsHomeContent(
     presence: Map<Int, NodePresence>,
     nowMs: Long,
     onOpenConversation: (Int) -> Unit,
+    // What the empty state below the pinned room should show. Defaults keep existing call
+    // sites (previews) compiling unchanged; MeshScreen passes the real values.
+    emptyKind: EmptyStateKind = EmptyStateKind.SEARCHING,
+    connectingTargetId: Int? = null,
+    noAirMeshPeersHint: String? = null,
+    onGrantPermission: () -> Unit = {},
+    onUiEventLog: (String) -> Unit = {},
 ) {
     val rows = remember(summaries, contacts, presence, nowMs) {
         ConversationListBuilder.build(summaries, contacts, presence, nowMs)
@@ -89,9 +101,12 @@ fun ChatsHomeContent(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentAlignment = Alignment.Center,
             ) {
-                EmptyState(
-                    title = "Looking for phones nearby…",
-                    animate = true,
+                ChatsEmptyState(
+                    kind = emptyKind,
+                    connectingTargetId = connectingTargetId,
+                    noAirMeshPeersHint = noAirMeshPeersHint,
+                    onGrantPermission = onGrantPermission,
+                    onUiEventLog = onUiEventLog,
                     modifier = Modifier
                         .padding(horizontal = 32.dp)
                         .padding(bottom = 96.dp)
@@ -135,6 +150,61 @@ fun ChatsHomeContent(
                     PersonRow(item = row, nowMs = nowMs) { onOpenConversation(row.conversationId) }
                 }
             }
+        }
+    }
+}
+
+/**
+ * The empty state below the pinned room (TASK U3 part 2), driven by [EmptyStateKind]. Only
+ * SEARCHING and CONNECTING animate via [RadarSearchIndicator]; every other kind reuses the
+ * static mesh illustration from components/EmptyState.kt so quiet states stay calm. Internal
+ * so previews can render each kind directly.
+ */
+@Composable
+internal fun ChatsEmptyState(
+    kind: EmptyStateKind,
+    connectingTargetId: Int? = null,
+    noAirMeshPeersHint: String? = null,
+    onGrantPermission: () -> Unit = {},
+    onUiEventLog: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(AirMeshSpacing.sm),
+    ) {
+        if (kind == EmptyStateKind.SEARCHING || kind == EmptyStateKind.CONNECTING) {
+            RadarSearchIndicator(
+                kind = kind,
+                periodMs = if (kind == EmptyStateKind.SEARCHING) RADAR_SEARCHING_PERIOD_MS else RADAR_CONNECTING_PERIOD_MS,
+                logEvent = onUiEventLog,
+            )
+        } else {
+            Icon(
+                imageVector = EmptyMeshIllustration,
+                contentDescription = null,
+                tint = colors.outline,
+                modifier = Modifier.size(72.dp),
+            )
+        }
+        Spacer(modifier = Modifier.height(AirMeshSpacing.xs))
+        // NO_AIRMESH_NEARBY shows the transport banner's own wording; every other kind uses
+        // its fixed text (CONNECTING gets the join target id when one is known).
+        val title = if (kind == EmptyStateKind.NO_AIRMESH_NEARBY && noAirMeshPeersHint != null) {
+            noAirMeshPeersHint
+        } else {
+            emptyStateText(kind, connectingTargetId)
+        }
+        Text(
+            text = title,
+            color = colors.onSurface,
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center,
+        )
+        if (kind == EmptyStateKind.PERMISSION_MISSING) {
+            Button(onClick = onGrantPermission) { Text("Grant permission") }
         }
     }
 }

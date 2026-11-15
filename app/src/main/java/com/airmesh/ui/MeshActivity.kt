@@ -289,6 +289,9 @@ class MeshActivity : ComponentActivity() {
                             onSetAutoMeshEnabled = service::setAutoMeshEnabled,
                             discoveryStrategy = discoveryStrategy,
                             rawCallbackCount = rawCallbackCount,
+                            permissionsGranted = wifiDirectGranted.value,
+                            // Radar indicator self-check lines go to the same Log tab.
+                            onUiEventLog = ::log,
                             myProfile = myProfile,
                             profiles = profiles,
                             conversationSummaries = conversationSummaries,
@@ -367,6 +370,13 @@ class MeshActivity : ComponentActivity() {
         // Direct drops when the phone sleeps. The mesh itself survives sleep via
         // the foreground service; backgrounding must never stop it.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // A permission can be revoked from system settings while we run; pick that up so the
+        // chats empty state can offer its "Grant permission" button again (TASK U3 part 2).
+        wifiDirectGranted.value = wifiDirectPermissionsGranted()
     }
 
     override fun onStop() {

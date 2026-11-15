@@ -41,6 +41,11 @@ dependencies {
     // @Preview support for the tab previews (debug builds only).
     debugImplementation("androidx.compose.ui:ui-tooling-preview")
 
+    // Compose UI tests for the radar indicator (TASK U3 part 2) — debug/androidTest only,
+    // never bundled into release. Versions come from the Compose BOM platform above.
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)

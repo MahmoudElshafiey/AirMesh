@@ -160,6 +160,11 @@ fun MeshScreen(
     // Discovery diagnostics shown as the banner's small second line.
     discoveryStrategy: Int = 1,
     rawCallbackCount: Int = 0,
+    // Whether every Wi-Fi Direct runtime permission is currently held; when not, the chats
+    // empty state offers a "Grant permission" button instead of searching forever.
+    permissionsGranted: Boolean = true,
+    // UI self-check lines (radar indicator) land in the same event log as transport events.
+    onUiEventLog: (String) -> Unit = {},
     // Display identity: my own profile, the names the mesh learned, and the save
     // action. promptOnboarding is true only on the first run, until the dialog
     // has been answered (saved or skipped) once.
@@ -253,6 +258,16 @@ fun MeshScreen(
         autoMeshState, nowMs, airMeshPeers.size, connectorState.peers.size,
         strategy = discoveryStrategy, rawCallbacks = rawCallbackCount,
     ) ?: autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs)
+
+    // Chats empty state (TASK U3 part 2): kind from the controller state; NO_AIRMESH_NEARBY
+    // reuses the banner's own wording (computed without the diagnostics args so it stays a
+    // single line), and CONNECTING shows the join target id when one is known.
+    val noAirMeshPeersHint = noAirMeshPeersBannerText(
+        autoMeshState, nowMs, airMeshPeers.size, connectorState.peers.size,
+    )
+    val emptyKind = emptyStateKind(autoMeshState, permissionsGranted, noAirMeshPeersHint != null)
+    val connectingTargetId = (autoMeshState as? AutoMeshState.Joining)?.targetNodeId
+        ?: (autoMeshState as? AutoMeshState.Yielding)?.targetNodeId
 
     Scaffold(
         topBar = {
@@ -413,6 +428,11 @@ fun MeshScreen(
                         presence = presence,
                         nowMs = nowMs,
                         onOpenConversation = { navController.navigate(chatRoute(it)) },
+                        emptyKind = emptyKind,
+                        connectingTargetId = connectingTargetId,
+                        noAirMeshPeersHint = noAirMeshPeersHint,
+                        onGrantPermission = onRequestPermissions,
+                        onUiEventLog = onUiEventLog,
                     )
                 }
                 composable(ROUTE_CHAT) { entry ->

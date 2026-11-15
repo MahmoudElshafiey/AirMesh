@@ -73,8 +73,8 @@ fun EmptyState(
     }
 }
 
-/** A small cluster of three nodes joined by links — the "mesh" at a glance. */
-private val EmptyMeshIllustration = ImageVector.Builder(
+/** A small cluster of three nodes joined by links — the "mesh" at a glance. Internal so the kind-driven empty state (TASK U3 part 2) can reuse it for its static kinds. */
+internal val EmptyMeshIllustration = ImageVector.Builder(
     name = "EmptyMeshIllustration",
     defaultWidth = 96.dp,
     defaultHeight = 96.dp,
