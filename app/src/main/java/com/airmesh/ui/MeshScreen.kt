@@ -64,6 +64,7 @@ import com.airmesh.chat.ConversationListBuilder
 import com.airmesh.chat.ConversationSummary
 import com.airmesh.chat.LiveConversationListBuilder
 import com.airmesh.chat.MESH_CONVERSATION_ID
+import com.airmesh.presence.PresenceEvent
 import com.airmesh.presence.PresenceState as LivePresenceState
 import com.airmesh.presence.formatPresenceLabel
 import com.airmesh.presence.liveChatBannerText
@@ -181,6 +182,8 @@ fun MeshScreen(
     conversationSummaries: List<ConversationSummary> = emptyList(),
     contacts: List<Contact> = emptyList(),
     livePresence: Map<Int, LivePresenceState> = emptyMap(),
+    // Confirmed presence transitions per node; the chat timeline renders them as system rows (TASK U5 part 3).
+    presenceEventsByNode: Map<Int, List<PresenceEvent>> = emptyMap(),
     onSaveProfile: (name: String, colorIndex: Int) -> Unit = { _, _ -> },
     promptOnboarding: Boolean = false,
     onOnboardingAnswered: () -> Unit = {},
@@ -533,6 +536,10 @@ fun MeshScreen(
                         conversationId = conversationId,
                         isMeshRoom = conversationId == MESH_CONVERSATION_ID,
                         messages = chatMessages,
+                        // System rows only make sense for a single peer; the room has none (TASK U5 part 3).
+                        presenceEvents = if (conversationId == MESH_CONVERSATION_ID) {
+                            emptyList()
+                        } else presenceEventsByNode[conversationId].orEmpty(),
                         nowMs = nowMs,
                         myLastFix = myLastFix,
                         contactById = remember(contacts) { contacts.associateBy { it.nodeId } },

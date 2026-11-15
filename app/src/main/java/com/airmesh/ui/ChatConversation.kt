@@ -51,7 +51,12 @@ import com.airmesh.node.LocationFix
 import com.airmesh.protocol.LocationPayload
 import com.airmesh.protocol.haversineMeters
 import com.airmesh.profile.ProfileInfo
+import com.airmesh.presence.PresenceEvent
+import com.airmesh.presence.PresenceEventLog
+import com.airmesh.presence.PresenceTransition
 import com.airmesh.ui.components.Avatar
+import com.airmesh.ui.theme.LocalAirMeshColors
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /**
@@ -68,6 +73,8 @@ fun ChatConversationContent(
     conversationId: Int,
     isMeshRoom: Boolean,
     messages: List<ChatMessage>,
+    // Confirmed presence transitions of the peer for direct chats; the room passes none (TASK U5 part 3).
+    presenceEvents: List<PresenceEvent> = emptyList(),
     nowMs: Long,
     myLastFix: LocationFix?,
     contactById: Map<Int, Contact> = emptyMap(),
@@ -97,8 +104,32 @@ fun ChatConversationContent(
     var unseenCount by rememberSaveable { mutableIntStateOf(0) }
     var lastRowsSize by remember { mutableIntStateOf(0) }
 
-    // Sticky date separators and grouping flags, decided purely (JVM-tested).
-    val rows = remember(messages, nowMs) { buildChatUiRows(messages, nowMs) }
+    // Timeline rows: messages merged with the peer's confirmed presence transitions; day
+    // separators and grouping are decided purely (JVM-tested, TASK U5 part 3).
+    val peerDisplayName = senderNameFor(conversationId, contactById[conversationId], profiles)
+    val rows = remember(messages, presenceEvents, nowMs) {
+        buildChatTimelineRows(messages, presenceEvents, peerDisplayName, nowMs)
+    }
+
+    // Transient "Back online" chip (TASK U5 part 3): shown for BACK_ONLINE_CHIP_MS after a
+    // confirmed BACK_ONLINE arrives while this chat is open. The event's atMs is when they came
+    // back, which precedes the debounce confirmation, so "just arrived" means atMs is within
+    // debounce + slack of now; older events (e.g. opening a stale chat) stay quiet.
+    var backOnlineChip by remember { mutableStateOf(false) }
+    LaunchedEffect(presenceEvents) {
+        val latest = presenceEvents.lastOrNull()
+        if (latest != null &&
+            latest.transition == PresenceTransition.BACK_ONLINE &&
+            nowMs - latest.atMs <= PresenceEventLog.DEBOUNCE_MS + 5_000L
+        ) {
+            backOnlineChip = true
+            delay(BACK_ONLINE_CHIP_MS)
+            backOnlineChip = false
+        } else {
+            // A newer non-back-online event cancels a still-visible chip.
+            backOnlineChip = false
+        }
+    }
 
     LaunchedEffect(rows.size, follow) {
         val delta = rows.size - lastRowsSize
@@ -146,14 +177,19 @@ fun ChatConversationContent(
                 items(
                     rows,
                     key = { row -> when (row) {
-                        is ChatUiRow.Day -> "day:${row.label}"
-                        is ChatUiRow.Message -> row.message.id
+                        is ChatTimelineRow.Day -> "day:${row.label}"
+                        is ChatTimelineRow.Message -> row.message.id
+                        is ChatTimelineRow.PresenceNote -> "presence:${row.event.atMs}:${row.event.transition}"
                     } },
-                    contentType = { row -> if (row is ChatUiRow.Day) "day" else "message" },
+                    contentType = { row -> when (row) {
+                        is ChatTimelineRow.Day -> "day"
+                        is ChatTimelineRow.PresenceNote -> "presence"
+                        else -> "message"
+                    } },
                 ) { row ->
                     when (row) {
-                        is ChatUiRow.Day -> DaySeparator(row.label)
-                        is ChatUiRow.Message -> {
+                        is ChatTimelineRow.Day -> DaySeparator(row.label)
+                        is ChatTimelineRow.Message -> {
                             val contact = contactById[row.message.originNode]
                             ChatMessageRow(
                                 message = row.message,
@@ -167,6 +203,8 @@ fun ChatConversationContent(
                                 onNotDeliveredTap = { notDeliveredMessage = it },
                             )
                         }
+                        // Centered system row for a confirmed presence transition (TASK U5 part 3).
+                        is ChatTimelineRow.PresenceNote -> PresenceSystemRow(row.text)
                     }
                 }
             }
@@ -190,6 +228,19 @@ fun ChatConversationContent(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
+            }
+        }
+        // Transient "Back online" chip: shown for a few seconds after a confirmed BACK_ONLINE
+        // while this chat is open (TASK U5 part 3). Not clickable — it just fades away.
+        if (backOnlineChip) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .clip(RoundedCornerShape(50))
+                    .background(LocalAirMeshColors.current.presenceOnline)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                Text("Back online", style = MaterialTheme.typography.labelMedium, color = Color.White)
             }
         }
         // The same composer as the old chat tab; location shares are broadcast-only by
@@ -411,6 +462,17 @@ private fun DaySeparator(label: String) {
         ) {
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+/** Small centered system row for a confirmed presence transition (TASK U5 part 3). */
+@Composable
+private fun PresenceSystemRow(text: String) {
+    Box(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

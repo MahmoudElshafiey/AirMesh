@@ -235,6 +235,8 @@ class MeshActivity : ComponentActivity() {
                         // conversation rollups and known contacts. The flows are cold, so
                         // they start empty until Room emits its first snapshot.
                         val livePresence by service.livePresence.collectAsStateWithLifecycle()
+                        // Confirmed presence transitions per node for the chat timeline (TASK U5 part 3).
+                        val presenceEventsByNode by service.presenceEventsByNode.collectAsStateWithLifecycle()
                         val conversationSummaries by service.chatStore.summaries.collectAsStateWithLifecycle(initialValue = emptyList())
                         val contacts by service.chatStore.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
 
@@ -302,6 +304,7 @@ class MeshActivity : ComponentActivity() {
                             conversationSummaries = conversationSummaries,
                             contacts = contacts,
                             livePresence = livePresence,
+                            presenceEventsByNode = presenceEventsByNode,
                             onSaveProfile = { name, colorIndex ->
                                 uiScope.launch { service.setMyProfile(name, colorIndex) }
                             },

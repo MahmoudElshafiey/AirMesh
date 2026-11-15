@@ -25,10 +25,15 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.airmesh.chat.ChatDirection
 import com.airmesh.chat.ChatKind
+import com.airmesh.chat.ChatMessage
+import com.airmesh.chat.ChatStatus
 import com.airmesh.chat.Contact
 import com.airmesh.chat.ConversationSummary
 import com.airmesh.chat.MESH_CONVERSATION_ID
+import com.airmesh.presence.PresenceEvent
 import com.airmesh.presence.PresenceState as LivePresenceState
+import com.airmesh.presence.PresenceTransition
+import com.airmesh.presence.liveChatBannerText
 import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
@@ -980,4 +985,98 @@ private fun EmptyStateWithFabLightPreview() = ThemedTabPreview(darkTheme = false
 @Composable
 private fun EmptyStateWithFabDarkPreview() = ThemedTabPreview(darkTheme = true) {
     HomeEmptyStatePreviewContent(previewSearchingLongWait, withFab = true)
+}
+
+// --- Chat presence timeline (TASK U5 part 3) ---------------------------------
+// A direct chat with two messages and one confirmed transition between them plus one after:
+// the centered system rows sit in their timestamp order, and each banner state gets a preview.
+
+private val previewChatMessages = listOf(
+    previewMessage(1L, ChatDirection.IN, previewNowMs - 3_600_000L, "Copy that. Sending the supply list next."),
+    previewMessage(2L, ChatDirection.OUT, previewNowMs - 1_800_000L, "On my way to the checkpoint."),
+)
+
+private val previewPresenceEvents = listOf(
+    PresenceEvent(nodeId = 2, transition = PresenceTransition.WENT_OUT_OF_RANGE, atMs = previewNowMs - 2_700_000L),
+    PresenceEvent(nodeId = 2, transition = PresenceTransition.BACK_ONLINE, atMs = previewNowMs - 900_000L),
+)
+
+private fun previewMessage(id: Long, direction: ChatDirection, atMs: Long, text: String): ChatMessage =
+    ChatMessage(
+        id = id,
+        conversationId = 2,
+        direction = direction,
+        kind = ChatKind.TEXT,
+        text = text,
+        originNode = if (direction == ChatDirection.IN) 2 else 1,
+        originSeq = id.toInt(),
+        createdAt = atMs,
+        status = if (direction == ChatDirection.OUT) ChatStatus.DELIVERED else ChatStatus.QUEUED,
+        isRead = true,
+    )
+
+@Composable
+private fun ChatPresencePreviewContent(
+    bannerText: String?,
+    events: List<PresenceEvent>,
+    peerName: String = "Mira",
+) {
+    ChatConversationContent(
+        conversationId = 2,
+        isMeshRoom = false,
+        messages = previewChatMessages,
+        presenceEvents = events,
+        nowMs = previewNowMs,
+        myLastFix = null,
+        contactById = mapOf(2 to Contact(2, peerName, 1)),
+        bannerText = bannerText,
+        onSendText = {},
+    )
+}
+
+// Online: no banner at all (liveChatBannerText returns null for the online states).
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · presence rows · light")
+@Composable
+private fun ChatPresenceRowsLightPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatPresencePreviewContent(bannerText = liveChatBannerText(LivePresenceState.ONLINE_DIRECT), events = previewPresenceEvents)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · presence rows · dark")
+@Composable
+private fun ChatPresenceRowsDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatPresencePreviewContent(bannerText = liveChatBannerText(LivePresenceState.ONLINE_DIRECT), events = previewPresenceEvents)
+}
+
+// fontScale 1.5 + the longest name: the system row must wrap cleanly under a long display name.
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = PREVIEW_HEIGHT_DP,
+    fontScale = 1.5f,
+    name = "Chat · presence rows · large text · long name",
+)
+@Composable
+private fun ChatPresenceRowsLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatPresencePreviewContent(
+        bannerText = liveChatBannerText(LivePresenceState.OUT_OF_RANGE),
+        events = previewPresenceEvents,
+        peerName = PREVIEW_LONG_NAME,
+    )
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · presence banner · out of range")
+@Composable
+private fun ChatPresenceBannerOutOfRangePreview() = ThemedTabPreview(darkTheme = false) {
+    ChatPresencePreviewContent(bannerText = liveChatBannerText(LivePresenceState.OUT_OF_RANGE), events = previewPresenceEvents)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · presence banner · checking")
+@Composable
+private fun ChatPresenceBannerCheckingPreview() = ThemedTabPreview(darkTheme = true) {
+    ChatPresencePreviewContent(bannerText = liveChatBannerText(LivePresenceState.CHECKING), events = previewPresenceEvents)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Chat · presence banner · not connected")
+@Composable
+private fun ChatPresenceBannerNotConnectedPreview() = ThemedTabPreview(darkTheme = false) {
+    ChatPresencePreviewContent(bannerText = liveChatBannerText(LivePresenceState.NOT_CONNECTED), events = emptyList())
 }
