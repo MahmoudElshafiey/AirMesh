@@ -79,6 +79,19 @@ const val ROUTE_CHATS = "chats"
 const val ROUTE_NETWORK = "network"
 const val ROUTE_LOG = "log"
 
+/**
+ * Registered route of the Network tab (TASK U4 part 1): an optional argument opens the Advanced
+ * card directly, which is where the chats home's "Manual connect" hint sends the user. Navigate
+ * with [ROUTE_NETWORK] plus a Bundle; compare destinations via [baseRoute].
+ */
+const val ROUTE_NETWORK_PATTERN = "network?expandAdvanced={expand}"
+
+/** The argument key of [ROUTE_NETWORK_PATTERN]: true opens the Advanced card on entry. */
+const val ARG_EXPAND_ADVANCED = "expandAdvanced"
+
+/** Concrete network route that opens the Advanced card (TASK U4 part 1). Classic routes carry query values in the string; the parameter is a String, so read it back with getString. */
+fun networkRouteExpandAdvanced(): String = "$ROUTE_NETWORK?$ARG_EXPAND_ADVANCED=true"
+
 /** Detail routes: no bottom bar, reached from a top-level screen. */
 const val ROUTE_CHAT = "chat/{conversationId}"
 const val ROUTE_PROFILE = "profile"
@@ -93,6 +106,15 @@ fun navTabToRoute(tab: NavTab): String = when (tab) {
     NavTab.LOG -> ROUTE_LOG
 }
 
+/**
+ * Strips the query part of a destination route (TASK U4 part 1). A registered pattern like
+ * "network?expandAdvanced={expand}" is what [androidx.navigation.NavDestination.route] reports,
+ * so every comparison against the plain constants must go through this first.
+ */
+fun baseRoute(route: String?): String? = route?.substringBefore('?')
+
 /** True for routes that own a bottom-bar slot; null (no entry yet) counts as top-level. */
-fun isTopLevelRoute(route: String?): Boolean =
-    route == null || route == ROUTE_CHATS || route == ROUTE_NETWORK || route == ROUTE_LOG
+fun isTopLevelRoute(route: String?): Boolean {
+    val base = baseRoute(route)
+    return base == null || base == ROUTE_CHATS || base == ROUTE_NETWORK || base == ROUTE_LOG
+}

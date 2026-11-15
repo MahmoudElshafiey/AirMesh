@@ -217,7 +217,8 @@ fun MeshScreen(
     // Chat route header (TASK U2 part 1): the shared top bar shows avatar + name + presence
     // subtitle on chat/{id}, and its overflow menu offers Contact info / Clear chat. The
     // dialogs are keyed by conversation id so a stale flag can never show another chat's data.
-    val chatConversationId: Int? = if (currentRoute == ROUTE_CHAT) {
+    // baseRoute(): destination.route reports the registered pattern, which may carry a query.
+    val chatConversationId: Int? = if (baseRoute(currentRoute) == ROUTE_CHAT) {
         backStackEntry?.arguments?.getString("conversationId")?.toIntOrNull() ?: 0
     } else null
     var contactInfoConversation by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -267,15 +268,22 @@ fun MeshScreen(
     ) ?: autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs))
         ?.let { if (isDebugBuild) it else it.substringBefore('\n') }
 
-    // Chats empty state (TASK U3 part 2): kind from the controller state; NO_AIRMESH_NEARBY
-    // reuses the banner's own wording (computed without the diagnostics args so it stays a
-    // single line), and CONNECTING shows the join target id when one is known.
-    val noAirMeshPeersHint = noAirMeshPeersBannerText(
-        autoMeshState, nowMs, airMeshPeers.size, connectorState.peers.size,
+    // Chats empty state (TASK U4 part 1): pure mapping from the controller state, how long we
+    // have been Searching, and the count of classic (non-AirMesh) Wi-Fi Direct devices. The timer
+    // is fed on every nowMs tick so the 90 s manual-connect hint appears on time even though the
+    // Searching object itself never changes while discovery runs.
+    val searchTimer = remember { SearchTimer() }
+    var searchingForMs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(autoMeshState, nowMs) {
+        searchingForMs = searchTimer.update(autoMeshState)
+    }
+    // The CONNECTING target id is derived from the state inside homeEmptyState.
+    val homeEmptyState = homeEmptyState(
+        status = autoMeshState,
+        otherDevicesFound = connectorState.peers.size,
+        searchingForMs = searchingForMs,
+        permissionOk = permissionsGranted,
     )
-    val emptyKind = emptyStateKind(autoMeshState, permissionsGranted, noAirMeshPeersHint != null)
-    val connectingTargetId = (autoMeshState as? AutoMeshState.Joining)?.targetNodeId
-        ?: (autoMeshState as? AutoMeshState.Yielding)?.targetNodeId
 
     Scaffold(
         topBar = {
@@ -329,7 +337,7 @@ fun MeshScreen(
                 actions = {
                     // The chats home owns the status chip and overflow menu (TASK U1 part 3);
                     // the other tabs keep a plain title bar.
-                    if (currentRoute == ROUTE_CHATS) {
+                    if (baseRoute(currentRoute) == ROUTE_CHATS) {
                         val status = ChatsStatus.from(autoMeshState, neighbors.size)
                         StatusChip(
                             text = status.text,
@@ -362,7 +370,7 @@ fun MeshScreen(
                         }
                     }
                     // The conversation screen owns Contact info / Clear chat (TASK U2 part 1).
-                    else if (currentRoute == ROUTE_CHAT && chatConversationId != null) {
+                    else if (baseRoute(currentRoute) == ROUTE_CHAT && chatConversationId != null) {
                         Box {
                             var menuOpen by rememberSaveable { mutableStateOf(false) }
                             IconButton(onClick = { menuOpen = true }) {
@@ -389,7 +397,7 @@ fun MeshScreen(
                 NavigationBar {
                     MeshTab.values().forEach { t ->
                         NavigationBarItem(
-                            selected = currentRoute == t.route,
+                            selected = baseRoute(currentRoute) == t.route,
                             onClick = { navController.navigateToTopLevel(t.route) },
                             icon = { Icon(imageVector = t.icon, contentDescription = t.label) },
                             label = { Text(t.label) },
@@ -400,7 +408,7 @@ fun MeshScreen(
         },
         floatingActionButton = {
             // The "New message" FAB only exists on the chats home (TASK U1 part 3).
-            if (currentRoute == ROUTE_CHATS) {
+            if (baseRoute(currentRoute) == ROUTE_CHATS) {
                 ExtendedFloatingActionButton(
                     icon = { Icon(imageVector = MeshNewMessageIcon, contentDescription = null) },
                     text = { Text("New message") },
@@ -436,10 +444,16 @@ fun MeshScreen(
                         presence = presence,
                         nowMs = nowMs,
                         onOpenConversation = { navController.navigate(chatRoute(it)) },
-                        emptyKind = emptyKind,
-                        connectingTargetId = connectingTargetId,
-                        noAirMeshPeersHint = noAirMeshPeersHint,
+                        homeEmptyState = homeEmptyState,
                         onGrantPermission = onRequestPermissions,
+                        // Escape hatch after a long search: jump to the Network tab with the
+                        // Advanced card already open (TASK U4 part 1).
+                        onManualConnect = {
+                            navController.navigate(networkRouteExpandAdvanced()) {
+                                popUpTo(ROUTE_CHATS) { inclusive = false }
+                                launchSingleTop = true
+                            }
+                        },
                         onUiEventLog = onUiEventLog,
                     )
                 }
@@ -484,7 +498,8 @@ fun MeshScreen(
                         onOpenInMaps = onOpenInMaps,
                     )
                 }
-                composable(ROUTE_NETWORK) {
+                composable(ROUTE_NETWORK_PATTERN) { entry ->
+                    // The optional argument is set by the chats home's "Manual connect" hint.
                     MeshNetworkTab(
                         nodeId = nodeId,
                         state = connectorState,
@@ -507,6 +522,8 @@ fun MeshScreen(
                         mergeGroupsEnabled = mergeGroupsEnabled,
                         onSetMergeGroupsEnabled = onSetMergeGroupsEnabled,
                         profiles = profiles,
+                        // Classic route parameters are Strings; "true" only comes from the hint.
+                        advancedInitiallyExpanded = entry.arguments?.getString(ARG_EXPAND_ADVANCED) == "true",
                     )
                 }
                 composable(ROUTE_LOG) { MeshLogTab(events = events, onClearLog = onClearLog) }
@@ -678,9 +695,9 @@ fun AutoMeshBanner(text: String) {
 }
 
 /** Per-route top-bar title (TASK U1 part 3): the app name on chats, tab names elsewhere. */
-private fun topBarTitle(route: String?): String = when {
-    route == ROUTE_NETWORK -> "Network"
-    route == ROUTE_LOG -> "Event log"
+private fun topBarTitle(route: String?): String = when (baseRoute(route)) {
+    ROUTE_NETWORK -> "Network"
+    ROUTE_LOG -> "Event log"
     else -> "AirMesh"
 }
 

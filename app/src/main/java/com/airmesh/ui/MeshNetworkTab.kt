@@ -78,6 +78,9 @@ fun MeshNetworkTab(
     onSetMergeGroupsEnabled: (Boolean) -> Unit = {},
     // Display names learned from the mesh; unknown neighbors fall back to "User #id".
     profiles: Map<Int, ProfileInfo> = emptyMap(),
+    // TASK U4 part 1: true when entered via the chats home's "Manual connect" hint, so the
+    // Advanced card opens directly instead of making the user find it collapsed.
+    advancedInitiallyExpanded: Boolean = false,
 ) {
     Column(
         modifier = Modifier
@@ -119,6 +122,7 @@ fun MeshNetworkTab(
             onConnectPeer = onConnectPeer,
             mergeGroupsEnabled = mergeGroupsEnabled,
             onSetMergeGroupsEnabled = onSetMergeGroupsEnabled,
+            initiallyExpanded = advancedInitiallyExpanded,
         )
 
         NeighborsSection(neighbors, profiles)

@@ -144,6 +144,22 @@ fun RadarSearchIndicator(
 }
 
 /**
+ * The deliberately composed static radar frame (rings at [REDUCED_MOTION_RING_PHASES]) for the
+ * empty-state kinds that do not animate (TASK U4 part 1): the exact same drawing code as the
+ * reduced-motion branch, so a quiet state never falls back to plain dots. No clock runs here.
+ */
+@Composable
+internal fun RadarStaticFrame(modifier: Modifier = Modifier) {
+    val color = MaterialTheme.colorScheme.primary
+    val glyphColor = MaterialTheme.colorScheme.onPrimary
+    Canvas(
+        modifier = modifier.size(RADAR_SIZE),
+    ) {
+        drawRadar(color, glyphColor, REDUCED_MOTION_RING_PHASES.map(::ringAt))
+    }
+}
+
+/**
  * Thin wrapper over Settings.Global.ANIMATOR_DURATION_SCALE. Any read failure falls back to the
  * default scale of 1f — we must never report reduced motion by accident.
  */

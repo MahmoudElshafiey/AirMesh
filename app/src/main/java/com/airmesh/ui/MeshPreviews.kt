@@ -41,7 +41,6 @@ import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
-import com.airmesh.transport.noAirMeshPeersBannerText
 import com.airmesh.ui.components.drawRadar
 import com.airmesh.ui.theme.AirMeshTheme
 
@@ -667,23 +666,65 @@ private fun ProfileScreenEmojiLargeTextPreview() = ThemedTabPreview(darkTheme = 
 // case for text wrapping and FAB clearance, which is what these previews verify.
 private const val EMPTY_STATE_PREVIEW_HEIGHT_DP = 480
 
-/** The real banner hint for NO_AIRMESH_NEARBY (transport function used read-only). */
-private val previewNoAirMeshHint: String? = noAirMeshPeersBannerText(
-    state = AutoMeshState.Searching(sinceMs = 0L),
-    nowMs = Long.MAX_VALUE / 2, // far past the "no peers" threshold
-    airMeshPeerCount = 0,
-    classicDeviceCount = 2,
+// TASK U4 part 1 scenarios, built with the real pure mapping so previews show exactly what
+// homeEmptyState(...) produces on device. NO_AIRMESH_NEARBY is unreachable from it by design:
+// "a classic device was found" now only changes the caption while the radar keeps animating.
+private val previewSearchingNoDevices = homeEmptyState(
+    status = AutoMeshState.Searching(sinceMs = 0L),
+    otherDevicesFound = 0,
+    searchingForMs = 5_000L,
+    permissionOk = true,
+)
+
+private val previewSearchingOtherDevice = homeEmptyState(
+    status = AutoMeshState.Searching(sinceMs = 0L),
+    otherDevicesFound = 1,
+    searchingForMs = 5_000L,
+    permissionOk = true,
+)
+
+private val previewSearchingLongWait = homeEmptyState(
+    status = AutoMeshState.Searching(sinceMs = 0L),
+    otherDevicesFound = 2,
+    searchingForMs = HOME_MANUAL_BUTTON_AFTER_MS, // exactly at the boundary: button appears
+    permissionOk = true,
+)
+
+private val previewConnecting = homeEmptyState(
+    status = AutoMeshState.Joining(targetAddress = "192.168.49.1", targetNodeId = 42, sinceMs = 0L),
+    otherDevicesFound = 0,
+    searchingForMs = 0L,
+    permissionOk = true,
+)
+
+private val previewPermissionMissing = homeEmptyState(
+    status = AutoMeshState.Searching(sinceMs = 0L),
+    otherDevicesFound = 0,
+    searchingForMs = 5_000L,
+    permissionOk = false,
+)
+
+private val previewIdleBackoff = homeEmptyState(
+    status = AutoMeshState.Backoff(untilMs = Long.MAX_VALUE / 2, reason = "join failed"),
+    otherDevicesFound = 0,
+    searchingForMs = 0L,
+    permissionOk = true,
+)
+
+private val previewConnectedNoContacts = homeEmptyState(
+    status = AutoMeshState.Owner,
+    otherDevicesFound = 0,
+    searchingForMs = 0L,
+    permissionOk = true,
 )
 
 /** The empty-state block exactly as ChatsHomeContent lays it out (centered + FAB clearance). */
 @Composable
-private fun EmptyStateKindPreviewContent(kind: EmptyStateKind, withFab: Boolean = false) {
+private fun HomeEmptyStatePreviewContent(state: HomeEmptyState, withFab: Boolean = false) {
     Box(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             ChatsEmptyState(
-                kind = kind,
-                connectingTargetId = if (kind == EmptyStateKind.CONNECTING) 42 else null,
-                noAirMeshPeersHint = if (kind == EmptyStateKind.NO_AIRMESH_NEARBY) previewNoAirMeshHint else null,
+                state = state,
                 modifier = Modifier
                     .padding(horizontal = 32.dp)
                     .padding(bottom = 96.dp)
@@ -770,85 +811,101 @@ private fun RadarReducedMotionDarkPreview() = ThemedTabPreview(darkTheme = true)
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching · light")
 @Composable
 private fun EmptyStateSearchingLightPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING)
+    HomeEmptyStatePreviewContent(previewSearchingNoDevices)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching · dark")
 @Composable
 private fun EmptyStateSearchingDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING)
+    HomeEmptyStatePreviewContent(previewSearchingNoDevices)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connecting · light")
 @Composable
 private fun EmptyStateConnectingLightPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTING)
+    HomeEmptyStatePreviewContent(previewConnecting)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connecting · dark")
 @Composable
 private fun EmptyStateConnectingDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTING)
+    HomeEmptyStatePreviewContent(previewConnecting)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · permission missing · light")
 @Composable
 private fun EmptyStatePermissionMissingLightPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.PERMISSION_MISSING)
+    HomeEmptyStatePreviewContent(previewPermissionMissing)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · permission missing · dark")
 @Composable
 private fun EmptyStatePermissionMissingDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    EmptyStateKindPreviewContent(EmptyStateKind.PERMISSION_MISSING)
+    HomeEmptyStatePreviewContent(previewPermissionMissing)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · idle backoff · light")
 @Composable
 private fun EmptyStateIdleBackoffLightPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.IDLE_BACKOFF)
+    HomeEmptyStatePreviewContent(previewIdleBackoff)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · idle backoff · dark")
 @Composable
 private fun EmptyStateIdleBackoffDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    EmptyStateKindPreviewContent(EmptyStateKind.IDLE_BACKOFF)
+    HomeEmptyStatePreviewContent(previewIdleBackoff)
 }
 
-@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · no airmesh nearby · light")
+// The bug this task fixes: a classic (non-AirMesh) device is found. The radar stays animated,
+// the headline never repeats the banner, and only the small caption mentions the ignored device.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · other device found · light")
 @Composable
-private fun EmptyStateNoAirMeshNearbyLightPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.NO_AIRMESH_NEARBY)
+private fun EmptyStateOtherDeviceLightPreview() = ThemedTabPreview(darkTheme = false) {
+    HomeEmptyStatePreviewContent(previewSearchingOtherDevice)
 }
 
-@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · no airmesh nearby · dark")
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · other device found · dark")
 @Composable
-private fun EmptyStateNoAirMeshNearbyDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    EmptyStateKindPreviewContent(EmptyStateKind.NO_AIRMESH_NEARBY)
+private fun EmptyStateOtherDeviceDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    HomeEmptyStatePreviewContent(previewSearchingOtherDevice)
+}
+
+// 90 s of searching: the long-wait caption replaces the ignored-device one and the
+// "Manual connect" escape hatch appears.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · 90s + manual button · light")
+@Composable
+private fun EmptyStateLongWaitLightPreview() = ThemedTabPreview(darkTheme = false) {
+    HomeEmptyStatePreviewContent(previewSearchingLongWait)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · 90s + manual button · dark")
+@Composable
+private fun EmptyStateLongWaitDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    HomeEmptyStatePreviewContent(previewSearchingLongWait)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connected no contacts · light")
 @Composable
 private fun EmptyStateConnectedNoContactsLightPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTED_NO_CONTACTS)
+    HomeEmptyStatePreviewContent(previewConnectedNoContacts)
 }
 
 @Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connected no contacts · dark")
 @Composable
 private fun EmptyStateConnectedNoContactsDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTED_NO_CONTACTS)
+    HomeEmptyStatePreviewContent(previewConnectedNoContacts)
 }
 
-// fontScale 1.5: the longest titles must wrap cleanly inside the 320dp cap.
+// fontScale 1.5: the longest caption must wrap cleanly inside the 320dp cap.
 @Preview(
     widthDp = PREVIEW_WIDTH_DP,
     heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP,
     fontScale = 1.5f,
-    name = "Empty state · searching · large text",
+    name = "Empty state · other device found · large text",
 )
 @Composable
-private fun EmptyStateSearchingLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING)
+private fun EmptyStateOtherDeviceLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    HomeEmptyStatePreviewContent(previewSearchingOtherDevice)
 }
 
 @Preview(
@@ -859,18 +916,18 @@ private fun EmptyStateSearchingLargeTextPreview() = ThemedTabPreview(darkTheme =
 )
 @Composable
 private fun EmptyStateConnectedNoContactsLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTED_NO_CONTACTS)
+    HomeEmptyStatePreviewContent(previewConnectedNoContacts)
 }
 
-// The real FAB over the corner: the 96dp bottom padding must keep the text clear of it.
-@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching + FAB · light")
+// The real FAB over the corner: the 96dp bottom padding must keep the button clear of it.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · 90s + manual button + FAB · light")
 @Composable
 private fun EmptyStateWithFabLightPreview() = ThemedTabPreview(darkTheme = false) {
-    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING, withFab = true)
+    HomeEmptyStatePreviewContent(previewSearchingLongWait, withFab = true)
 }
 
-@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching + FAB · dark")
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · 90s + manual button + FAB · dark")
 @Composable
 private fun EmptyStateWithFabDarkPreview() = ThemedTabPreview(darkTheme = true) {
-    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING, withFab = true)
+    HomeEmptyStatePreviewContent(previewSearchingLongWait, withFab = true)
 }

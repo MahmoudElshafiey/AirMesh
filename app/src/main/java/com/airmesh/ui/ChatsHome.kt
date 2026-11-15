@@ -43,9 +43,9 @@ import com.airmesh.chat.NodePresence
 import com.airmesh.chat.PresenceState
 import com.airmesh.ui.components.Avatar
 import com.airmesh.ui.components.ConversationRow
-import com.airmesh.ui.components.EmptyMeshIllustration
 import com.airmesh.ui.components.PresenceText
 import com.airmesh.ui.components.RadarSearchIndicator
+import com.airmesh.ui.components.RadarStaticFrame
 import com.airmesh.ui.components.SectionHeader
 import com.airmesh.ui.components.UnreadBadge
 import com.airmesh.ui.theme.AirMeshSpacing
@@ -65,12 +65,13 @@ fun ChatsHomeContent(
     presence: Map<Int, NodePresence>,
     nowMs: Long,
     onOpenConversation: (Int) -> Unit,
-    // What the empty state below the pinned room should show. Defaults keep existing call
-    // sites (previews) compiling unchanged; MeshScreen passes the real values.
-    emptyKind: EmptyStateKind = EmptyStateKind.SEARCHING,
-    connectingTargetId: Int? = null,
-    noAirMeshPeersHint: String? = null,
+    // What the empty state below the pinned room should show (TASK U4 part 1): kind + headline
+    // + optional caption + manual-connect button flag. Defaults keep previews compiling;
+    // MeshScreen passes the real values from homeEmptyState(...).
+    homeEmptyState: HomeEmptyState =
+        HomeEmptyState(EmptyStateKind.SEARCHING, HOME_SEARCHING_HEADLINE, null, false),
     onGrantPermission: () -> Unit = {},
+    onManualConnect: () -> Unit = {},
     onUiEventLog: (String) -> Unit = {},
 ) {
     val rows = remember(summaries, contacts, presence, nowMs) {
@@ -95,10 +96,9 @@ fun ChatsHomeContent(
                 contentAlignment = Alignment.Center,
             ) {
                 ChatsEmptyState(
-                    kind = emptyKind,
-                    connectingTargetId = connectingTargetId,
-                    noAirMeshPeersHint = noAirMeshPeersHint,
+                    state = homeEmptyState,
                     onGrantPermission = onGrantPermission,
+                    onManualConnect = onManualConnect,
                     onUiEventLog = onUiEventLog,
                     modifier = Modifier
                         .padding(horizontal = 32.dp)
@@ -202,17 +202,18 @@ private fun MeshRoomRow(row: ConversationItem, nowMs: Long, onClick: () -> Unit)
 }
 
 /**
- * The empty state below the pinned room (TASK U3 part 2), driven by [EmptyStateKind]. Only
- * SEARCHING and CONNECTING animate via [RadarSearchIndicator]; every other kind reuses the
- * static mesh illustration from components/EmptyState.kt so quiet states stay calm. Internal
- * so previews can render each kind directly.
+ * The empty state below the pinned room (TASK U3 part 2, reworked in TASK U4 part 1), driven by
+ * [HomeEmptyState]. Only SEARCHING and CONNECTING animate via [RadarSearchIndicator]; every other
+ * kind draws the composed static radar frame ([RadarStaticFrame]) so quiet states stay calm but
+ * never look like plain dots. The headline is fixed per state; the caption (when present) carries
+ * the "other devices are ignored" / long-wait note without repeating any banner text. Internal
+ * so previews can render each scenario directly.
  */
 @Composable
 internal fun ChatsEmptyState(
-    kind: EmptyStateKind,
-    connectingTargetId: Int? = null,
-    noAirMeshPeersHint: String? = null,
+    state: HomeEmptyState,
     onGrantPermission: () -> Unit = {},
+    onManualConnect: () -> Unit = {},
     onUiEventLog: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -222,36 +223,36 @@ internal fun ChatsEmptyState(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(AirMeshSpacing.sm),
     ) {
-        if (kind == EmptyStateKind.SEARCHING || kind == EmptyStateKind.CONNECTING) {
+        if (state.kind == EmptyStateKind.SEARCHING || state.kind == EmptyStateKind.CONNECTING) {
             RadarSearchIndicator(
-                kind = kind,
-                periodMs = if (kind == EmptyStateKind.SEARCHING) RADAR_SEARCHING_PERIOD_MS else RADAR_CONNECTING_PERIOD_MS,
+                kind = state.kind,
+                periodMs = if (state.kind == EmptyStateKind.SEARCHING) RADAR_SEARCHING_PERIOD_MS else RADAR_CONNECTING_PERIOD_MS,
                 logEvent = onUiEventLog,
             )
         } else {
-            Icon(
-                imageVector = EmptyMeshIllustration,
-                contentDescription = null,
-                tint = colors.outline,
-                modifier = Modifier.size(72.dp),
-            )
+            RadarStaticFrame()
         }
         Spacer(modifier = Modifier.height(AirMeshSpacing.xs))
-        // NO_AIRMESH_NEARBY shows the transport banner's own wording; every other kind uses
-        // its fixed text (CONNECTING gets the join target id when one is known).
-        val title = if (kind == EmptyStateKind.NO_AIRMESH_NEARBY && noAirMeshPeersHint != null) {
-            noAirMeshPeersHint
-        } else {
-            emptyStateText(kind, connectingTargetId)
-        }
         Text(
-            text = title,
+            text = state.headline,
             color = colors.onSurface,
             style = MaterialTheme.typography.titleMedium,
             textAlign = TextAlign.Center,
         )
-        if (kind == EmptyStateKind.PERMISSION_MISSING) {
+        if (state.caption != null) {
+            Text(
+                text = state.caption,
+                color = colors.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+            )
+        }
+        if (state.kind == EmptyStateKind.PERMISSION_MISSING) {
             Button(onClick = onGrantPermission) { Text("Grant permission") }
+        }
+        if (state.showManualButton) {
+            // Escape hatch after a long search: opens the Network tab with Advanced expanded.
+            Button(onClick = onManualConnect) { Text("Manual connect") }
         }
     }
 }
