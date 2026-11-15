@@ -17,8 +17,6 @@ import com.airmesh.R
 import com.airmesh.chat.ChatRepository
 import com.airmesh.chat.ChatStore
 import com.airmesh.chat.MESH_CONVERSATION_ID
-import com.airmesh.chat.NodePresence
-import com.airmesh.chat.PresenceTracker
 import com.airmesh.node.AirMeshNode
 import com.airmesh.node.DirectSendResult
 import com.airmesh.node.EventLog
@@ -30,6 +28,10 @@ import com.airmesh.node.MyProfile
 import com.airmesh.node.NodeIdProvider
 import com.airmesh.node.SharedPreferencesNodeIdStore
 import com.airmesh.node.createAirMeshNode
+import com.airmesh.presence.PresenceBookkeeping
+import com.airmesh.presence.PresenceEvent
+import com.airmesh.presence.PresenceEventLog
+import com.airmesh.presence.PresenceState as LivePresenceState
 import com.airmesh.profile.ProfileInfo
 import com.airmesh.protocol.FrameType
 import com.airmesh.storage.ChatDatabase
@@ -99,7 +101,10 @@ class MeshService : Service() {
     /** Chat history layer (TASK D2 part 4): a separate Room DB from the packet store. */
     private lateinit var _chatStore: RoomChatStore
     private lateinit var _chatRepository: ChatRepository
-    private lateinit var presenceTracker: PresenceTracker
+
+    /** Truthful presence (TASK U5 part 2): per-node evidence plus event-driven recompute. */
+    private val presenceBookkeeping = PresenceBookkeeping()
+    private val presenceEventLog = PresenceEventLog()
 
     /** DNS-SD directory of nearby AirMesh phones; created in [onCreate]. */
     private lateinit var peerDirectory: WifiP2pPeerDirectory
@@ -153,9 +158,32 @@ class MeshService : Service() {
     /** Turns node events into chat rows; also where the UI records its own sends. */
     val chatRepository: ChatRepository get() = _chatRepository
 
-    /** Live presence of every node seen within the last 24 h; recomputed every 10 s. */
-    private val _presence = MutableStateFlow<Map<Int, NodePresence>>(emptyMap())
-    val presence: StateFlow<Map<Int, NodePresence>> = _presence.asStateFlow()
+    /**
+     * Truthful presence of every node we have ever seen (TASK U5 part 2): recomputed on every
+     * neighbor up/down and frame activity, plus a 5 s tick so aging states move without traffic.
+     */
+    private val _livePresence = MutableStateFlow<Map<Int, LivePresenceState>>(emptyMap())
+    val livePresence: StateFlow<Map<Int, LivePresenceState>> = _livePresence.asStateFlow()
+
+    /** Debounced presence transitions per node (TASK U5 part 2); the chat timeline renders them. */
+    private val _presenceEventsByNode = MutableStateFlow<Map<Int, List<PresenceEvent>>>(emptyMap())
+    val presenceEventsByNode: StateFlow<Map<Int, List<PresenceEvent>>> = _presenceEventsByNode.asStateFlow()
+
+    /**
+     * Recompute every node's state and publish it. The event log is noted for EVERY node on
+     * every recompute — even when the published map does not change — because a StateFlow
+     * suppresses no-change emissions, yet repeated notes are what advance a pending transition
+     * past its debounce window while states stay stable.
+     */
+    private fun recomputePresenceNow() {
+        val states = presenceBookkeeping.states()
+        for ((nodeId, state) in states) presenceEventLog.note(nodeId, state)
+        _livePresence.value = states
+        val snapshot = presenceEventLog.snapshot()
+        if (snapshot != _presenceEventsByNode.value) {
+            _presenceEventsByNode.value = snapshot
+        }
+    }
     val events: StateFlow<List<LogEntry>> get() = _eventLog.entries
 
     /**
@@ -227,7 +255,6 @@ class MeshService : Service() {
         // packet store's lifecycle; presence ages out on the wall clock.
         _chatStore = RoomChatStore(ChatDatabase.build(applicationContext))
         _chatRepository = ChatRepository(localNodeId = node.localNodeId, store = _chatStore)
-        presenceTracker = PresenceTracker(clock = { System.currentTimeMillis() })
 
         // Auto-mesh: a DNS-SD directory of nearby AirMesh phones plus the pure
         // state machine that decides when to join or create groups. One coordinator
@@ -344,6 +371,9 @@ class MeshService : Service() {
                 if (runningThrottle.shouldPost(System.currentTimeMillis())) {
                     notificationManager.notify(RUNNING_NOTIFICATION_ID, buildRunningNotification(neighbors.size))
                 }
+                // Truthful presence reacts to every neighbor up/down immediately (TASK U5 part 2).
+                presenceBookkeeping.noteNeighbors(neighbors)
+                recomputePresenceNow()
             }
         }
 
@@ -374,8 +404,10 @@ class MeshService : Service() {
         // exists so history can show a name as soon as one arrives.
         serviceScope.launch {
             node.nodeActivity.collect { activity ->
-                presenceTracker.noteActivity(activity.nodeId)
+                presenceBookkeeping.noteActivity(activity.nodeId)
                 _chatStore.upsertContact(activity.nodeId, null, 0)
+                // A frame is fresh evidence: recompute at once instead of waiting for the tick.
+                recomputePresenceNow()
             }
         }
 
@@ -444,12 +476,13 @@ class MeshService : Service() {
             }
         }
 
-        // Presence ages out on the wall clock; recompute every 10 s so the UI updates
-        // without any new frame arriving.
+        // Presence ages out on the wall clock; recompute every 5 s so the UI updates without
+        // any new frame arriving (TASK U5 part 2). Neighbor up/down and node activity already
+        // trigger an immediate recompute in their collectors.
         serviceScope.launch {
             while (isActive) {
-                _presence.value = presenceTracker.states(node.neighbors.value)
-                delay(10_000L)
+                delay(5_000L)
+                recomputePresenceNow()
             }
         }
 

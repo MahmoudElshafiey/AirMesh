@@ -234,7 +234,7 @@ class MeshActivity : ComponentActivity() {
                         // Chats home data (TASK U1 part 3): presence plus the store's
                         // conversation rollups and known contacts. The flows are cold, so
                         // they start empty until Room emits its first snapshot.
-                        val presence by service.presence.collectAsStateWithLifecycle()
+                        val livePresence by service.livePresence.collectAsStateWithLifecycle()
                         val conversationSummaries by service.chatStore.summaries.collectAsStateWithLifecycle(initialValue = emptyList())
                         val contacts by service.chatStore.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
 
@@ -301,7 +301,7 @@ class MeshActivity : ComponentActivity() {
                             profiles = profiles,
                             conversationSummaries = conversationSummaries,
                             contacts = contacts,
-                            presence = presence,
+                            livePresence = livePresence,
                             onSaveProfile = { name, colorIndex ->
                                 uiScope.launch { service.setMyProfile(name, colorIndex) }
                             },

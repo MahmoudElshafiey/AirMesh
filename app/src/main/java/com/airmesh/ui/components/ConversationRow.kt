@@ -17,6 +17,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.airmesh.chat.PresenceState
+import com.airmesh.presence.PresenceState as LivePresenceState
 import com.airmesh.ui.theme.AirMeshSpacing
 import com.airmesh.ui.theme.AirMeshTheme
 
@@ -34,6 +35,7 @@ fun ConversationRow(
     timeText: String,
     unreadCount: Int,
     presence: PresenceState?,
+    livePresence: LivePresenceState? = null,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -45,7 +47,7 @@ fun ConversationRow(
             .padding(horizontal = AirMeshSpacing.md, vertical = AirMeshSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(name = title, colorIndex = colorIndex, size = 48.dp, presence = presence)
+        Avatar(name = title, colorIndex = colorIndex, size = 48.dp, presence = presence, livePresence = livePresence)
         Spacer(modifier = Modifier.width(AirMeshSpacing.md))
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

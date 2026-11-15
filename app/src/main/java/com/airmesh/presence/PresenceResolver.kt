@@ -79,13 +79,17 @@ class PresenceResolver(
         if (ownLink.liveNeighborCount == 0) return PresenceState.NOT_CONNECTED
         // Rule 2: a live direct socket is the strongest possible signal.
         if (evidence.isDirectNeighbor) return PresenceState.ONLINE_DIRECT
-        val lastActivity = evidence.lastActivityAt ?: return PresenceState.UNKNOWN
 
+        val lastActivity = evidence.lastActivityAt
+        val directLostAt = evidence.directLostAt
         // Rule 3: they were our direct neighbor and that link dropped. Only a relayed frame
         // STRICTLY after the drop proves they are still out there; otherwise it is over now,
-        // without waiting for any timer to age out.
-        val directLostAt = evidence.directLostAt
-        if (directLostAt != null && lastActivity <= directLostAt) return PresenceState.OUT_OF_RANGE
+        // without waiting for any timer to age out. No frames at all also counts as "over":
+        // we held the socket, then lost it — nothing says they are anywhere else.
+        if (directLostAt != null && (lastActivity == null || lastActivity <= directLostAt)) {
+            return PresenceState.OUT_OF_RANGE
+        }
+        if (lastActivity == null) return PresenceState.UNKNOWN
 
         // Rule 4a: our own link just came back and we have no frame from them since the
         // restore, so their pre-loss evidence may be stale (we were deaf during the outage).

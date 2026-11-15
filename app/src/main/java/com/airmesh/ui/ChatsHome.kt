@@ -31,19 +31,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.airmesh.chat.Contact
-import com.airmesh.chat.ConversationItem
 import com.airmesh.chat.ConversationListBuilder
 import com.airmesh.chat.ConversationSummary
+import com.airmesh.chat.LiveConversationItem
+import com.airmesh.chat.LiveConversationListBuilder
 import com.airmesh.chat.MESH_CONVERSATION_ID
-import com.airmesh.chat.NodePresence
-import com.airmesh.chat.PresenceState
+import com.airmesh.presence.PresenceState as LivePresenceState
+import com.airmesh.presence.formatPresenceLabel
+import com.airmesh.presence.presenceLabel
 import com.airmesh.ui.components.Avatar
 import com.airmesh.ui.components.ConversationRow
-import com.airmesh.ui.components.PresenceText
 import com.airmesh.ui.components.RadarSearchIndicator
 import com.airmesh.ui.components.RadarStaticFrame
 import com.airmesh.ui.components.SectionHeader
@@ -62,7 +64,7 @@ import com.airmesh.ui.theme.LocalAirMeshColors
 fun ChatsHomeContent(
     summaries: List<ConversationSummary>,
     contacts: List<Contact>,
-    presence: Map<Int, NodePresence>,
+    livePresence: Map<Int, LivePresenceState>,
     nowMs: Long,
     onOpenConversation: (Int) -> Unit,
     // What the empty state below the pinned room should show (TASK U4 part 1): kind + headline
@@ -74,8 +76,8 @@ fun ChatsHomeContent(
     onManualConnect: () -> Unit = {},
     onUiEventLog: (String) -> Unit = {},
 ) {
-    val rows = remember(summaries, contacts, presence, nowMs) {
-        ConversationListBuilder.build(summaries, contacts, presence, nowMs)
+    val rows = remember(summaries, contacts, livePresence, nowMs) {
+        LiveConversationListBuilder.build(summaries, contacts, livePresence, nowMs)
     }
     // The builder's flat list splits into the three sections by construction: the room is
     // id 0, conversation rows carry a last-message time, people rows do not.
@@ -123,8 +125,10 @@ fun ChatsHomeContent(
                         preview = row.preview,
                         timeText = formatListTime(row.timeMs, nowMs),
                         unreadCount = row.unreadCount,
+                        // The legacy dot stays off; the truthful state drives it (TASK U5 part 2).
+                        presence = null,
                         // No dot for UNKNOWN peers — a gray dot would read as "offline".
-                        presence = row.presence.state.takeIf { it != PresenceState.UNKNOWN },
+                        livePresence = row.liveState.takeIf { it != LivePresenceState.UNKNOWN },
                         onClick = { onOpenConversation(row.conversationId) },
                     )
                 }
@@ -146,7 +150,7 @@ fun ChatsHomeContent(
  * that it carries the last-message preview, and time/unread badge appear when present.
  */
 @Composable
-private fun MeshRoomRow(row: ConversationItem, nowMs: Long, onClick: () -> Unit) {
+private fun MeshRoomRow(row: LiveConversationItem, nowMs: Long, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
@@ -259,9 +263,17 @@ internal fun ChatsEmptyState(
     }
 }
 
+/** Presence line color by truthful state (TASK U5 part 2): green online, amber checking, gray otherwise. */
+@Composable
+internal fun livePresenceLabelColor(state: LivePresenceState?): Color = when {
+    state == LivePresenceState.ONLINE_DIRECT || state == LivePresenceState.ONLINE_RELAYED -> LocalAirMeshColors.current.presenceOnline
+    state == LivePresenceState.CHECKING -> LocalAirMeshColors.current.warning
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+}
+
 /** A contact without a conversation yet: avatar with presence dot, name and presence line. */
 @Composable
-private fun PersonRow(item: ConversationItem, nowMs: Long, onClick: () -> Unit) {
+private fun PersonRow(item: LiveConversationItem, nowMs: Long, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -269,8 +281,8 @@ private fun PersonRow(item: ConversationItem, nowMs: Long, onClick: () -> Unit) 
             .padding(horizontal = AirMeshSpacing.md, vertical = AirMeshSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // The builder only lists ONLINE/RECENT contacts here, so the dot always means something.
-        Avatar(name = item.title, colorIndex = item.colorIndex, size = 48.dp, presence = item.presence.state)
+        // The builder only lists online/checking/recently-seen contacts here, so the dot always means something.
+        Avatar(name = item.title, colorIndex = item.colorIndex, size = 48.dp, livePresence = item.liveState)
         Spacer(modifier = Modifier.width(AirMeshSpacing.md))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -280,7 +292,11 @@ private fun PersonRow(item: ConversationItem, nowMs: Long, onClick: () -> Unit) 
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            PresenceText(presence = item.presence, nowMs = nowMs)
+            Text(
+                text = formatPresenceLabel(presenceLabel(item.liveState, nowMs), nowMs).ifEmpty { "Not nearby" },
+                color = livePresenceLabelColor(item.liveState),
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
     }
 }
@@ -293,7 +309,7 @@ private fun PersonRow(item: ConversationItem, nowMs: Long, onClick: () -> Unit) 
 @Composable
 internal fun ContactPickerSheet(
     contacts: List<Contact>,
-    presence: Map<Int, NodePresence>,
+    livePresence: Map<Int, LivePresenceState>,
     nowMs: Long,
     onOpenConversation: (Int) -> Unit,
     onDismiss: () -> Unit,
@@ -315,7 +331,7 @@ internal fun ContactPickerSheet(
                 // Bounded height so a long contact list scrolls inside the sheet.
                 LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
                     items(contacts, key = { it.nodeId }) { contact ->
-                        val nodePresence = presence[contact.nodeId] ?: NodePresence(PresenceState.UNKNOWN, false)
+                        val state = livePresence[contact.nodeId] ?: LivePresenceState.UNKNOWN
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -327,7 +343,7 @@ internal fun ContactPickerSheet(
                                 name = ConversationListBuilder.titleFor(contact.nodeId, contact),
                                 colorIndex = contact.colorIndex,
                                 size = 40.dp,
-                                presence = nodePresence.state.takeIf { it != PresenceState.UNKNOWN },
+                                livePresence = state.takeIf { it != LivePresenceState.UNKNOWN },
                             )
                             Spacer(modifier = Modifier.width(AirMeshSpacing.md))
                             Column(modifier = Modifier.weight(1f)) {
@@ -338,7 +354,11 @@ internal fun ContactPickerSheet(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
-                                PresenceText(presence = nodePresence, nowMs = nowMs)
+                                Text(
+                                    text = formatPresenceLabel(presenceLabel(state, nowMs), nowMs).ifEmpty { "Not nearby" },
+                                    color = livePresenceLabelColor(state),
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
                             }
                         }
                     }

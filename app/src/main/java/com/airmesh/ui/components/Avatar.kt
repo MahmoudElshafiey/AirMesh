@@ -16,6 +16,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.airmesh.chat.PresenceState
+import com.airmesh.presence.PresenceState as LivePresenceState
 import com.airmesh.ui.avatarColor
 import com.airmesh.ui.avatarInitials
 import com.airmesh.ui.theme.AirMeshTheme
@@ -25,7 +26,9 @@ import com.airmesh.ui.theme.LocalAirMeshColors
  * A circular avatar with the node's initials on its palette color (TASK U1 part 1).
  * Optionally shows a presence dot at the bottom-right: green for ONLINE, amber for
  * RECENT, neutral for UNKNOWN. Initials and fill come from the pure profile helpers
- * so they are emoji-safe and JVM-tested; only the presence dot uses theme colors.
+ * so they are emoji-safe and JVM-tested; only the presence dot uses theme colors. The
+ * newer [livePresence] (truthful state, TASK U5 part 2) takes precedence when set:
+ * green online, amber checking, gray for everything else.
  */
 @Composable
 fun Avatar(
@@ -34,6 +37,7 @@ fun Avatar(
     modifier: Modifier = Modifier,
     size: Dp = 40.dp,
     presence: PresenceState? = null,
+    livePresence: LivePresenceState? = null,
 ) {
     // The fill is the user-chosen identity color (data, not a theme literal).
     val fill = Color(avatarColor(colorIndex))
@@ -53,11 +57,15 @@ fun Avatar(
                 maxLines = 1,
             )
         }
-        if (presence != null) {
-            val dotColor = when (presence) {
-                PresenceState.ONLINE -> LocalAirMeshColors.current.presenceOnline
-                PresenceState.RECENT -> LocalAirMeshColors.current.warning
-                PresenceState.UNKNOWN -> MaterialTheme.colorScheme.outline
+        if (presence != null || livePresence != null) {
+            // The truthful state wins when both are set; the legacy enum stays for old call sites.
+            val dotColor = when {
+                livePresence == LivePresenceState.ONLINE_DIRECT || livePresence == LivePresenceState.ONLINE_RELAYED -> LocalAirMeshColors.current.presenceOnline
+                livePresence == LivePresenceState.CHECKING -> LocalAirMeshColors.current.warning
+                livePresence != null -> MaterialTheme.colorScheme.outline
+                presence == PresenceState.ONLINE -> LocalAirMeshColors.current.presenceOnline
+                presence == PresenceState.RECENT -> LocalAirMeshColors.current.warning
+                else -> MaterialTheme.colorScheme.outline
             }
             // A screen-colored ring separates the dot from the avatar edge.
             Box(

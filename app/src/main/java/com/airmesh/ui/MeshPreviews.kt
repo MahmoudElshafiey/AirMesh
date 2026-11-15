@@ -28,8 +28,7 @@ import com.airmesh.chat.ChatKind
 import com.airmesh.chat.Contact
 import com.airmesh.chat.ConversationSummary
 import com.airmesh.chat.MESH_CONVERSATION_ID
-import com.airmesh.chat.NodePresence
-import com.airmesh.chat.PresenceState
+import com.airmesh.presence.PresenceState as LivePresenceState
 import com.airmesh.node.LocationFix
 import com.airmesh.node.LogEntry
 import com.airmesh.node.MeshLocation
@@ -531,28 +530,33 @@ private val previewHomeContacts = listOf(
 )
 
 private val previewHomePresence = mapOf(
-    2 to NodePresence(PresenceState.ONLINE, true),
-    3 to NodePresence(PresenceState.RECENT, false),
-    4 to NodePresence(PresenceState.ONLINE, true),
+    2 to LivePresenceState.ONLINE_DIRECT,
+    // Five minutes ago: still inside the people-section window, gray dot + "Last seen" line.
+    3 to LivePresenceState.LastSeen(previewNowMs - 5 * 60_000L),
+    4 to LivePresenceState.CHECKING,
 )
 
-/** Thirty named contacts for the long-scroll state; presence alternates so both dots show. */
+/** Thirty named contacts for the long-scroll state; presence cycles so all three dot colors show. */
 private val previewManyContacts = (1..30).map { i -> Contact(i, "Rescuer $i", i % AVATAR_COLOR_COUNT) }
 
-private val previewManyPresence: Map<Int, NodePresence> = (1..30).associate { i ->
-    i to NodePresence(if (i % 2 == 0) PresenceState.RECENT else PresenceState.ONLINE, i % 3 == 0)
+private val previewManyPresence: Map<Int, LivePresenceState> = (1..30).associate { i ->
+    i to when (i % 3) {
+        0 -> LivePresenceState.ONLINE_DIRECT
+        1 -> LivePresenceState.CHECKING
+        else -> LivePresenceState.LastSeen(previewNowMs - 5 * 60_000L)
+    }
 }
 
 @Composable
 private fun ChatsHomePreviewContent(
     summaries: List<ConversationSummary>,
     contacts: List<Contact>,
-    presence: Map<Int, NodePresence>,
+    livePresence: Map<Int, LivePresenceState>,
 ) {
     ChatsHomeContent(
         summaries = summaries,
         contacts = contacts,
-        presence = presence,
+        livePresence = livePresence,
         nowMs = previewNowMs,
         onOpenConversation = {},
     )
@@ -613,7 +617,7 @@ private fun ChatsHomeOneContactLightPreview() = ThemedTabPreview(darkTheme = fal
     ChatsHomePreviewContent(
         summaries = listOf(previewHomeSummaries.first()),
         contacts = listOf(Contact(2, "Mira", 1)),
-        presence = mapOf(2 to NodePresence(PresenceState.ONLINE, true)),
+        livePresence = mapOf(2 to LivePresenceState.ONLINE_DIRECT),
     )
 }
 
@@ -624,17 +628,17 @@ private fun ChatsHomeManyContactsDarkPreview() = ThemedTabPreview(darkTheme = tr
     ChatsHomePreviewContent(
         summaries = listOf(previewHomeSummaries.first()),
         contacts = previewManyContacts,
-        presence = previewManyPresence,
+        livePresence = previewManyPresence,
     )
 }
 
 // --- Contact picker and About (TASK U1 part 3) -------------------------------
 
 @Composable
-private fun ContactPickerPreviewContent(contacts: List<Contact>, presence: Map<Int, NodePresence>) {
+private fun ContactPickerPreviewContent(contacts: List<Contact>, livePresence: Map<Int, LivePresenceState>) {
     ContactPickerSheet(
         contacts = contacts,
-        presence = presence,
+        livePresence = livePresence,
         nowMs = previewNowMs,
         onOpenConversation = {},
         onDismiss = {},

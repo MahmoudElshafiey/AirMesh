@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -61,9 +62,12 @@ import com.airmesh.chat.ChatMessage
 import com.airmesh.chat.Contact
 import com.airmesh.chat.ConversationListBuilder
 import com.airmesh.chat.ConversationSummary
+import com.airmesh.chat.LiveConversationListBuilder
 import com.airmesh.chat.MESH_CONVERSATION_ID
-import com.airmesh.chat.NodePresence
-import com.airmesh.chat.PresenceState
+import com.airmesh.presence.PresenceState as LivePresenceState
+import com.airmesh.presence.formatPresenceLabel
+import com.airmesh.presence.liveChatBannerText
+import com.airmesh.presence.presenceLabel
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
@@ -176,7 +180,7 @@ fun MeshScreen(
     // store, plus per-node presence for the dots and "Online / Last seen" lines.
     conversationSummaries: List<ConversationSummary> = emptyList(),
     contacts: List<Contact> = emptyList(),
-    presence: Map<Int, NodePresence> = emptyMap(),
+    livePresence: Map<Int, LivePresenceState> = emptyMap(),
     onSaveProfile: (name: String, colorIndex: Int) -> Unit = { _, _ -> },
     promptOnboarding: Boolean = false,
     onOnboardingAnswered: () -> Unit = {},
@@ -238,7 +242,7 @@ fun MeshScreen(
             autoMeshEnabled = autoMeshEnabled,
             discoveryStrategy = discoveryStrategy,
             rawCallbackCount = rawCallbackCount,
-            presence = presence,
+            livePresence = livePresence,
             conversationSummaries = conversationSummaries,
             contacts = contacts,
         )
@@ -277,23 +281,27 @@ fun MeshScreen(
         contacts.firstOrNull { it.nodeId == chatConversationId }
     } else null
     val chatTitle = chatConversationId?.let { ConversationListBuilder.titleFor(it, chatContact) }.orEmpty()
-    // Room: live group size; direct chat: the peer's presence line ("Not nearby" when unknown).
+    // Room: live group size; direct chat: the peer's truthful presence line ("Not nearby" when unknown).
     val chatSubtitle: String? = when (chatConversationId) {
         null -> null
         MESH_CONVERSATION_ID -> "${neighbors.size} phones"
-        else -> presenceText(
-            presence[chatConversationId] ?: NodePresence(PresenceState.UNKNOWN, false), nowMs,
+        else -> formatPresenceLabel(
+            presenceLabel(livePresence[chatConversationId] ?: LivePresenceState.UNKNOWN, nowMs), nowMs,
         ).ifEmpty { "Not nearby" }
     }
     // Header avatar: the peer's identity color (deterministic fallback when unknown);
-    // the room uses a neutral mesh icon instead. The presence dot only shows for direct
-    // chats with a known state — UNKNOWN means "we have no data", not "offline".
+    // the room uses a neutral mesh icon instead. For direct chats the dot always shows —
+    // green online, amber checking, gray for everything else including UNKNOWN (TASK U5 part 2).
     val chatColorIndex = if (chatConversationId != null && chatConversationId != MESH_CONVERSATION_ID) {
         (chatContact?.colorIndex ?: 0).takeIf { it != 0 } ?: avatarColorIndex(chatConversationId, profiles)
     } else 0
-    val chatPresenceDot: PresenceState? = if (chatConversationId == null || chatConversationId == MESH_CONVERSATION_ID) {
+    val chatPresenceDot: LivePresenceState? = if (chatConversationId == null || chatConversationId == MESH_CONVERSATION_ID) {
         null
-    } else presence[chatConversationId]?.state?.takeIf { it != PresenceState.UNKNOWN }
+    } else livePresence[chatConversationId]
+    // The subtitle is colored like the dot for direct chats; the room line stays neutral.
+    val chatSubtitleColor: Color = if (chatPresenceDot != null) {
+        livePresenceLabelColor(chatPresenceDot)
+    } else MaterialTheme.colorScheme.onSurfaceVariant
 
     // A notification tap navigates to its target's top-level route, popping any detail
     // screens first so repeated taps never grow the stack. The chats home does not deep-link
@@ -310,9 +318,9 @@ fun MeshScreen(
     // lives in the empty-state caption and the manual-connect button. The technical discovery
     // line (strategy / raw callbacks) never appears here; it belongs to the Network tab's
     // Debug card, which only exists in debuggable builds.
-    val homeEmptyStateVisible = remember(conversationSummaries, contacts, presence) {
+    val homeEmptyStateVisible = remember(conversationSummaries, contacts, livePresence, nowMs) {
         // Mirrors ChatsHomeContent: the empty state shows exactly when no non-room row exists.
-        ConversationListBuilder.build(conversationSummaries, contacts, presence, 0L)
+        LiveConversationListBuilder.build(conversationSummaries, contacts, livePresence, nowMs)
             .none { it.conversationId != MESH_CONVERSATION_ID }
     }
     val homeBanner = homeBannerText(
@@ -357,7 +365,7 @@ fun MeshScreen(
                                 conversationId = chatConversationId,
                                 name = chatTitle,
                                 colorIndex = chatColorIndex,
-                                presence = chatPresenceDot,
+                                livePresence = chatPresenceDot,
                             )
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
@@ -370,7 +378,7 @@ fun MeshScreen(
                                     Text(
                                         chatSubtitle,
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = chatSubtitleColor,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -497,7 +505,7 @@ fun MeshScreen(
                     ChatsHomeContent(
                         summaries = conversationSummaries,
                         contacts = contacts,
-                        presence = presence,
+                        livePresence = livePresence,
                         nowMs = nowMs,
                         onOpenConversation = { navController.navigate(chatRoute(it)) },
                         homeEmptyState = homeEmptyState,
@@ -529,11 +537,12 @@ fun MeshScreen(
                         myLastFix = myLastFix,
                         contactById = remember(contacts) { contacts.associateBy { it.nodeId } },
                         profiles = profiles,
-                        bannerText = chatBannerText(
-                            conversationId,
-                            presence[conversationId],
-                            ChatsStatus.from(autoMeshState, neighbors.size).connected,
-                        ),
+                        // Room keeps the connection banner; direct chats warn by truthful state (TASK U5 part 2).
+                        bannerText = if (conversationId == MESH_CONVERSATION_ID) {
+                            chatBannerText(conversationId, null, ChatsStatus.from(autoMeshState, neighbors.size).connected)
+                        } else {
+                            liveChatBannerText(livePresence[conversationId])
+                        },
                         showEncryptionNote = showEncryptionNote,
                         onDismissEncryptionNote = onDismissEncryptionNote,
                         // Already routed by the caller: broadcast in the room, direct otherwise.
@@ -615,7 +624,7 @@ fun MeshScreen(
     if (showContactPicker) {
         ContactPickerSheet(
             contacts = contacts,
-            presence = presence,
+            livePresence = livePresence,
             nowMs = nowMs,
             onOpenConversation = { id ->
                 showContactPicker = false
@@ -686,7 +695,7 @@ internal fun ChatHeaderAvatar(
     conversationId: Int,
     name: String,
     colorIndex: Int,
-    presence: PresenceState?,
+    livePresence: LivePresenceState?,
 ) {
     if (conversationId == MESH_CONVERSATION_ID) {
         Box(
@@ -699,7 +708,7 @@ internal fun ChatHeaderAvatar(
             Icon(imageVector = MeshNetworkIcon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(18.dp))
         }
     } else {
-        Avatar(name = name, colorIndex = colorIndex, size = 32.dp, presence = presence)
+        Avatar(name = name, colorIndex = colorIndex, size = 32.dp, livePresence = livePresence)
     }
 }
 
@@ -792,7 +801,7 @@ private fun TrackUiEmissions(
     autoMeshEnabled: Boolean,
     discoveryStrategy: Int,
     rawCallbackCount: Int,
-    presence: Map<Int, NodePresence>,
+    livePresence: Map<Int, LivePresenceState>,
     conversationSummaries: List<ConversationSummary>,
     contacts: List<Contact>,
 ) {

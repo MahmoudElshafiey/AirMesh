@@ -86,6 +86,17 @@ class PresenceResolverTest {
     }
 
     @Test
+    fun aDirectNeighborThatNeverSentAFramesIsOutOfRangeAfterTheDrop() {
+        // We held the socket, then lost it; they never sent anything. That is "out of range",
+        // not "unknown" — we know the link went away.
+        val lostAt = now - 2_000L
+        assertEquals(
+            PresenceState.OUT_OF_RANGE,
+            resolver.resolve(connected, ContactEvidence(directLostAt = lostAt)),
+        )
+    }
+
+    @Test
     fun aDirectDropWithLaterRelayedActivityFallsBackToTheAgeBuckets() {
         // The drop is older than every frame below, so each one counts as relayed-after-drop.
         val lostAt = now - 5 * 60_000L
