@@ -1,5 +1,6 @@
 package com.airmesh.ui
 
+import android.content.pm.ApplicationInfo
 import android.net.wifi.p2p.WifiP2pDevice
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -253,11 +255,17 @@ fun MeshScreen(
     }
 
     // While searching, a long wait with only non-AirMesh devices visible gets the
-    // hint banner; otherwise the state banner applies.
-    val autoBannerText = noAirMeshPeersBannerText(
+    // hint banner; otherwise the state banner applies. The hint's second line (discovery
+    // strategy / raw callback count) is developer diagnostics: release builds keep just the
+    // first sentence. BuildConfig is not generated for this module, so the debuggable flag
+    // comes from applicationInfo — the same check MeshActivity uses.
+    val context = LocalContext.current
+    val isDebugBuild = remember(context) { context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 }
+    val autoBannerText = (noAirMeshPeersBannerText(
         autoMeshState, nowMs, airMeshPeers.size, connectorState.peers.size,
         strategy = discoveryStrategy, rawCallbacks = rawCallbackCount,
-    ) ?: autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs)
+    ) ?: autoMeshBannerText(autoMeshState, neighbors.size, autoIdleReason, nowMs))
+        ?.let { if (isDebugBuild) it else it.substringBefore('\n') }
 
     // Chats empty state (TASK U3 part 2): kind from the controller state; NO_AIRMESH_NEARBY
     // reuses the banner's own wording (computed without the diagnostics args so it stays a

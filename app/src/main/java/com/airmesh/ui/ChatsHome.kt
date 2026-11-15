@@ -1,5 +1,6 @@
 package com.airmesh.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -28,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,6 +47,7 @@ import com.airmesh.ui.components.EmptyMeshIllustration
 import com.airmesh.ui.components.PresenceText
 import com.airmesh.ui.components.RadarSearchIndicator
 import com.airmesh.ui.components.SectionHeader
+import com.airmesh.ui.components.UnreadBadge
 import com.airmesh.ui.theme.AirMeshSpacing
 import com.airmesh.ui.theme.LocalAirMeshColors
 
@@ -81,18 +85,7 @@ fun ChatsHomeContent(
     if (chatRows.isEmpty() && peopleRows.isEmpty()) {
         // Nothing to list yet: keep the pinned room tappable and show the searching state.
         Column(modifier = Modifier.fillMaxSize()) {
-            roomRow?.let { row ->
-                ConversationRow(
-                    title = row.title,
-                    colorIndex = row.colorIndex,
-                    preview = row.preview,
-                    timeText = formatListTime(row.timeMs, nowMs),
-                    unreadCount = row.unreadCount,
-                    // The mesh room is not a node; it never gets a presence dot.
-                    presence = null,
-                    onClick = { onOpenConversation(MESH_CONVERSATION_ID) },
-                )
-            }
+            roomRow?.let { row -> MeshRoomRow(row = row, nowMs = nowMs) { onOpenConversation(MESH_CONVERSATION_ID) } }
             // The box must span the full width (weight alone only sizes the height in a
             // Column) or contentAlignment=Center has no room to center anything. The 96dp
             // bottom padding keeps the block clear of the "New message" FAB; at 320dp max
@@ -117,17 +110,7 @@ fun ChatsHomeContent(
     } else {
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             roomRow?.let { row ->
-                item(key = "room") {
-                    ConversationRow(
-                        title = row.title,
-                        colorIndex = row.colorIndex,
-                        preview = row.preview,
-                        timeText = formatListTime(row.timeMs, nowMs),
-                        unreadCount = row.unreadCount,
-                        presence = null,
-                        onClick = { onOpenConversation(MESH_CONVERSATION_ID) },
-                    )
-                }
+                item(key = "room") { MeshRoomRow(row = row, nowMs = nowMs) { onOpenConversation(MESH_CONVERSATION_ID) } }
             }
             if (chatRows.isNotEmpty()) {
                 item(key = "chatsHeader") { SectionHeader("Chats") }
@@ -148,6 +131,70 @@ fun ChatsHomeContent(
                 item(key = "peopleHeader") { SectionHeader("People in your network") }
                 items(peopleRows, key = { it.conversationId }) { row ->
                     PersonRow(item = row, nowMs = nowMs) { onOpenConversation(row.conversationId) }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The pinned "Everyone nearby" room row (TASK U3 part 4). It is not a node, so instead of an
+ * initials avatar it shows the mesh glyph in brand color — the same icon the chat header uses
+ * for the room. Until the first message arrives the subtitle says "No messages yet"; after
+ * that it carries the last-message preview, and time/unread badge appear when present.
+ */
+@Composable
+private fun MeshRoomRow(row: ConversationItem, nowMs: Long, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = AirMeshSpacing.md, vertical = AirMeshSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .background(colors.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(imageVector = MeshNetworkIcon, contentDescription = null, tint = colors.onPrimary, modifier = Modifier.size(26.dp))
+        }
+        Spacer(modifier = Modifier.width(AirMeshSpacing.md))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = row.title,
+                    color = colors.onSurface,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                val timeText = formatListTime(row.timeMs, nowMs)
+                if (timeText.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(AirMeshSpacing.sm))
+                    Text(
+                        text = timeText,
+                        color = if (row.unreadCount > 0) colors.primary else colors.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = row.preview.ifEmpty { "No messages yet" },
+                    color = colors.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (row.unreadCount > 0) {
+                    Spacer(modifier = Modifier.width(AirMeshSpacing.sm))
+                    UnreadBadge(count = row.unreadCount)
                 }
             }
         }
