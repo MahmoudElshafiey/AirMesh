@@ -162,8 +162,12 @@ private fun rememberReducedMotion(): Boolean {
     }
 }
 
-/** Draws one expanding ring per [rings] entry, then the center node with its wifi-ish glyph. */
-private fun DrawScope.drawRadar(
+/**
+ * Draws one expanding ring per [rings] entry, then the center node with its wifi-ish glyph.
+ * Internal (not private) so the design-time previews can render fixed phases with the exact
+ * same drawing code as the live indicator.
+ */
+internal fun DrawScope.drawRadar(
     color: Color,
     glyphColor: Color,
     rings: List<RingState>,

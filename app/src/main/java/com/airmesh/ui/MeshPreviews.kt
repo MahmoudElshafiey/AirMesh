@@ -1,17 +1,25 @@
 package com.airmesh.ui
 
 import android.net.wifi.p2p.WifiP2pDevice
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -30,8 +38,11 @@ import com.airmesh.node.MyProfile
 import com.airmesh.profile.ProfileInfo
 import com.airmesh.routing.Router
 import com.airmesh.transport.AirMeshPeer
+import com.airmesh.transport.AutoMeshState
 import com.airmesh.transport.ConnectorState
 import com.airmesh.transport.P2pRole
+import com.airmesh.transport.noAirMeshPeersBannerText
+import com.airmesh.ui.components.drawRadar
 import com.airmesh.ui.theme.AirMeshTheme
 
 /**
@@ -649,4 +660,217 @@ private fun ProfileScreenDarkPreview() = ThemedTabPreview(darkTheme = true) {
 @Composable
 private fun ProfileScreenEmojiLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
     ProfileScreenPreviewContent(initialName = PREVIEW_EMOJI_NAME, initialColorIndex = 2)
+}
+
+// --- Chats empty state + radar indicator (TASK U3 part 3) ---------------------
+// The canvas is deliberately shorter than the phone height: a cramped free area is the worst
+// case for text wrapping and FAB clearance, which is what these previews verify.
+private const val EMPTY_STATE_PREVIEW_HEIGHT_DP = 480
+
+/** The real banner hint for NO_AIRMESH_NEARBY (transport function used read-only). */
+private val previewNoAirMeshHint: String? = noAirMeshPeersBannerText(
+    state = AutoMeshState.Searching(sinceMs = 0L),
+    nowMs = Long.MAX_VALUE / 2, // far past the "no peers" threshold
+    airMeshPeerCount = 0,
+    classicDeviceCount = 2,
+)
+
+/** The empty-state block exactly as ChatsHomeContent lays it out (centered + FAB clearance). */
+@Composable
+private fun EmptyStateKindPreviewContent(kind: EmptyStateKind, withFab: Boolean = false) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            ChatsEmptyState(
+                kind = kind,
+                connectingTargetId = if (kind == EmptyStateKind.CONNECTING) 42 else null,
+                noAirMeshPeersHint = if (kind == EmptyStateKind.NO_AIRMESH_NEARBY) previewNoAirMeshHint else null,
+                modifier = Modifier
+                    .padding(horizontal = 32.dp)
+                    .padding(bottom = 96.dp)
+                    .widthIn(max = 320.dp),
+            )
+        }
+        if (withFab) {
+            // The real "New message" FAB from MeshScreen, to verify the 96dp clearance.
+            ExtendedFloatingActionButton(
+                icon = { Icon(imageVector = MeshNewMessageIcon, contentDescription = null) },
+                text = { Text("New message") },
+                onClick = {},
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            )
+        }
+    }
+}
+
+/** One radar at a fixed phase — the same drawRadar code as the live indicator. */
+@Composable
+private fun RadarAtPhase(phase: Float) {
+    val color = MaterialTheme.colorScheme.primary
+    val glyphColor = MaterialTheme.colorScheme.onPrimary
+    Canvas(modifier = Modifier.size(120.dp)) {
+        drawRadar(color, glyphColor, List(3) { ring(phase, it, 3) })
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 240, name = "Empty state · radar phases 0 / 0.33 / 0.66 · light")
+@Composable
+private fun RadarPhasesLightPreview() = ThemedTabPreview(darkTheme = false) {
+    Row(
+        modifier = Modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadarAtPhase(0f)
+        RadarAtPhase(0.33f)
+        RadarAtPhase(0.66f)
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 240, name = "Empty state · radar phases 0 / 0.33 / 0.66 · dark")
+@Composable
+private fun RadarPhasesDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    Row(
+        modifier = Modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadarAtPhase(0f)
+        RadarAtPhase(0.33f)
+        RadarAtPhase(0.66f)
+    }
+}
+
+/** The static frame drawn when the system animation scale is off (rings at 0.15 / 0.5 / 0.85). */
+@Composable
+private fun RadarReducedMotionFrame() {
+    val color = MaterialTheme.colorScheme.primary
+    val glyphColor = MaterialTheme.colorScheme.onPrimary
+    Canvas(modifier = Modifier.size(160.dp)) {
+        drawRadar(color, glyphColor, REDUCED_MOTION_RING_PHASES.map(::ringAt))
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 240, name = "Empty state · radar reduced-motion frame · light")
+@Composable
+private fun RadarReducedMotionLightPreview() = ThemedTabPreview(darkTheme = false) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        RadarReducedMotionFrame()
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = 240, name = "Empty state · radar reduced-motion frame · dark")
+@Composable
+private fun RadarReducedMotionDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        RadarReducedMotionFrame()
+    }
+}
+
+// Every kind in both themes. SEARCHING/CONNECTING run the live frame clock, as on device.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching · light")
+@Composable
+private fun EmptyStateSearchingLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching · dark")
+@Composable
+private fun EmptyStateSearchingDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connecting · light")
+@Composable
+private fun EmptyStateConnectingLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTING)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connecting · dark")
+@Composable
+private fun EmptyStateConnectingDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTING)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · permission missing · light")
+@Composable
+private fun EmptyStatePermissionMissingLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.PERMISSION_MISSING)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · permission missing · dark")
+@Composable
+private fun EmptyStatePermissionMissingDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EmptyStateKindPreviewContent(EmptyStateKind.PERMISSION_MISSING)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · idle backoff · light")
+@Composable
+private fun EmptyStateIdleBackoffLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.IDLE_BACKOFF)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · idle backoff · dark")
+@Composable
+private fun EmptyStateIdleBackoffDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EmptyStateKindPreviewContent(EmptyStateKind.IDLE_BACKOFF)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · no airmesh nearby · light")
+@Composable
+private fun EmptyStateNoAirMeshNearbyLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.NO_AIRMESH_NEARBY)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · no airmesh nearby · dark")
+@Composable
+private fun EmptyStateNoAirMeshNearbyDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EmptyStateKindPreviewContent(EmptyStateKind.NO_AIRMESH_NEARBY)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connected no contacts · light")
+@Composable
+private fun EmptyStateConnectedNoContactsLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTED_NO_CONTACTS)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · connected no contacts · dark")
+@Composable
+private fun EmptyStateConnectedNoContactsDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTED_NO_CONTACTS)
+}
+
+// fontScale 1.5: the longest titles must wrap cleanly inside the 320dp cap.
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP,
+    fontScale = 1.5f,
+    name = "Empty state · searching · large text",
+)
+@Composable
+private fun EmptyStateSearchingLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING)
+}
+
+@Preview(
+    widthDp = PREVIEW_WIDTH_DP,
+    heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP,
+    fontScale = 1.5f,
+    name = "Empty state · connected no contacts · large text",
+)
+@Composable
+private fun EmptyStateConnectedNoContactsLargeTextPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.CONNECTED_NO_CONTACTS)
+}
+
+// The real FAB over the corner: the 96dp bottom padding must keep the text clear of it.
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching + FAB · light")
+@Composable
+private fun EmptyStateWithFabLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING, withFab = true)
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = EMPTY_STATE_PREVIEW_HEIGHT_DP, name = "Empty state · searching + FAB · dark")
+@Composable
+private fun EmptyStateWithFabDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EmptyStateKindPreviewContent(EmptyStateKind.SEARCHING, withFab = true)
 }
