@@ -13,11 +13,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -334,6 +338,38 @@ private fun LogTabLightPreview() = ThemedTabPreview(darkTheme = false) {
 @Composable
 private fun LogTabDarkPreview() = ThemedTabPreview(darkTheme = true) {
     MeshLogTab(events = previewEvents, onClearLog = {})
+}
+
+/** The full-screen event log route (TASK R1 part 3): its own top bar with a back arrow, no bottom bar. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EventLogScreenContent() {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Event log") },
+                navigationIcon = {
+                    IconButton(onClick = {}) { Icon(imageVector = MeshBackIcon, contentDescription = "Back") }
+                },
+            )
+        },
+    ) { innerPadding ->
+        Box(modifier = Modifier.padding(innerPadding)) {
+            MeshLogTab(events = previewEvents, onClearLog = {})
+        }
+    }
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Event log · full screen · light")
+@Composable
+private fun EventLogFullScreenLightPreview() = ThemedTabPreview(darkTheme = false) {
+    EventLogScreenContent()
+}
+
+@Preview(widthDp = PREVIEW_WIDTH_DP, heightDp = PREVIEW_HEIGHT_DP, name = "Event log · full screen · dark")
+@Composable
+private fun EventLogFullScreenDarkPreview() = ThemedTabPreview(darkTheme = true) {
+    EventLogScreenContent()
 }
 
 /** The manual card expanded: Discover / Create group / Retry TCP + tagged peer list. */

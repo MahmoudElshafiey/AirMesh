@@ -118,3 +118,16 @@ fun isTopLevelRoute(route: String?): Boolean {
     val base = baseRoute(route)
     return base == null || base == ROUTE_CHATS || base == ROUTE_NETWORK || base == ROUTE_LOG
 }
+
+/**
+ * Which bottom-bar tab [route] selects (TASK R1 part 3), or null when the bar is hidden: only
+ * Chats and Network keep the two-tab bar. The event log became a full-screen route reached from
+ * the top bars' overflow menu, and chat/{id} / profile never had it. Before the first entry
+ * settles there is no route yet; the start destination is Chats, so that tab counts as selected.
+ */
+fun bottomBarRoutes(route: String?): NavTab? = when (baseRoute(route)) {
+    null -> NavTab.CHAT
+    ROUTE_CHATS -> NavTab.CHAT
+    ROUTE_NETWORK -> NavTab.NETWORK
+    else -> null
+}

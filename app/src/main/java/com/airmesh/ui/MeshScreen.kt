@@ -82,14 +82,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 
-/** Bottom tabs. The selection is a navigation route now (TASK U1 part 2), so it survives rotation via the nav back stack. */
-enum class MeshTab(val label: String) { CHAT("Chat"), NETWORK("Network"), LOG("Log") }
+/** Bottom tabs (TASK R1 part 3): only Chats and Network — the event log is a full-screen route now. The selection is a navigation route (TASK U1 part 2), so it survives rotation via the nav back stack. */
+enum class MeshTab(val label: String) { CHAT("Chat"), NETWORK("Network") }
 
 private val MeshTab.icon: ImageVector
     get() = when (this) {
         MeshTab.CHAT -> MeshChatIcon
         MeshTab.NETWORK -> MeshNetworkIcon
-        MeshTab.LOG -> MeshLogIcon
     }
 
 /** The top-level route each bottom-bar tab navigates to. */
@@ -97,15 +96,15 @@ private val MeshTab.route: String
     get() = when (this) {
         MeshTab.CHAT -> ROUTE_CHATS
         MeshTab.NETWORK -> ROUTE_NETWORK
-        MeshTab.LOG -> ROUTE_LOG
     }
 
 /**
  * Main AirMesh screen. A Scaffold provides edge-to-edge insets for the system
  * bars (the top bar sits below the status bar, content above the navigation
- * bar), a compact top bar with title + status chip, and three bottom tabs:
- * chat, network controls, and the event log. imePadding keeps the keyboard
- * from covering the compose bar.
+ * bar), a compact top bar with title + status chip, and two bottom tabs:
+ * chats and network controls. The event log is a full-screen route reached
+ * from the overflow menu of both top bars (TASK R1 part 3). imePadding keeps
+ * the keyboard from covering the compose bar.
  */
 @OptIn(ExperimentalMaterial3Api::class) // TopAppBar is experimental in this M3 version
 @Composable
@@ -398,18 +397,19 @@ fun MeshScreen(
                         Text(topBarTitle(currentRoute))
                     }
                 },
-                // Detail screens (chat/{id}, profile) get a back arrow; the
-                // bottom-bar routes do not.
+                // Detail screens (chat/{id}, profile) and the full-screen event log get a back
+                // arrow; only the two bottom-bar routes do not (TASK R1 part 3).
                 navigationIcon = {
-                    if (!isTopLevelRoute(currentRoute)) {
+                    if (currentRoute != null && bottomBarRoutes(currentRoute) == null) {
                         IconButton(onClick = { navController.popBackStack() }) {
                             Icon(imageVector = MeshBackIcon, contentDescription = "Back")
                         }
                     }
                 },
                 actions = {
-                    // The chats home owns the status chip and overflow menu (TASK U1 part 3);
-                    // the other tabs keep a plain title bar.
+                    // The chats home owns the status chip (TASK U1 part 3); Chats and Network share
+                    // one overflow menu — My profile / Event log / About. Log left the bottom bar in
+                    // TASK R1 part 3, so it is reached from here; items that duplicate a tab are gone.
                     if (baseRoute(currentRoute) == ROUTE_CHATS) {
                         val status = ChatsStatus.from(autoMeshState, neighbors.size)
                         StatusChip(
@@ -417,30 +417,17 @@ fun MeshScreen(
                             tone = if (status.connected) ChipTone.Active else ChipTone.Neutral,
                             modifier = Modifier.padding(end = AirMeshSpacing.xs),
                         )
-                        Box {
-                            var menuOpen by rememberSaveable { mutableStateOf(false) }
-                            IconButton(onClick = { menuOpen = true }) {
-                                Icon(imageVector = MeshMoreIcon, contentDescription = "Menu")
-                            }
-                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("My profile") },
-                                    onClick = { menuOpen = false; navController.navigate(ROUTE_PROFILE) },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Network") },
-                                    onClick = { menuOpen = false; navController.navigateToTopLevel(ROUTE_NETWORK) },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Event log") },
-                                    onClick = { menuOpen = false; navController.navigateToTopLevel(ROUTE_LOG) },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("About") },
-                                    onClick = { menuOpen = false; showAbout = true },
-                                )
-                            }
-                        }
+                        TopBarOverflowMenu(
+                            onMyProfile = { navController.navigate(ROUTE_PROFILE) },
+                            onEventLog = { navController.navigateToTopLevel(ROUTE_LOG) },
+                            onAbout = { showAbout = true },
+                        )
+                    } else if (baseRoute(currentRoute) == ROUTE_NETWORK) {
+                        TopBarOverflowMenu(
+                            onMyProfile = { navController.navigate(ROUTE_PROFILE) },
+                            onEventLog = { navController.navigateToTopLevel(ROUTE_LOG) },
+                            onAbout = { showAbout = true },
+                        )
                     }
                     // The conversation screen owns Contact info / Clear chat (TASK U2 part 1).
                     else if (baseRoute(currentRoute) == ROUTE_CHAT && chatConversationId != null) {
@@ -465,8 +452,9 @@ fun MeshScreen(
             )
         },
         bottomBar = {
-            // The bar only exists on top-level routes (TASK U1 part 2).
-            if (isTopLevelRoute(currentRoute)) {
+            // The two-tab bar only exists on Chats and Network (TASK R1 part 3): the event log is a
+            // full-screen route reached from the overflow menu, and chat/{id} / profile never had it.
+            if (bottomBarRoutes(currentRoute) != null) {
                 NavigationBar {
                     MeshTab.values().forEach { t ->
                         NavigationBarItem(
@@ -781,6 +769,39 @@ private fun NavController.navigateToTopLevel(route: String) {
     navigate(route) {
         popUpTo(ROUTE_CHATS) { inclusive = false }
         launchSingleTop = true
+    }
+}
+
+/**
+ * Three-dot overflow shared by the Chats and Network top bars (TASK R1 part 3). The event log is
+ * reached from here now that it left the bottom bar; "Network" no longer appears on the chats
+ * menu because it duplicates a tab.
+ */
+@Composable
+private fun TopBarOverflowMenu(
+    onMyProfile: () -> Unit,
+    onEventLog: () -> Unit,
+    onAbout: () -> Unit,
+) {
+    Box {
+        var menuOpen by rememberSaveable { mutableStateOf(false) }
+        IconButton(onClick = { menuOpen = true }) {
+            Icon(imageVector = MeshMoreIcon, contentDescription = "Menu")
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("My profile") },
+                onClick = { menuOpen = false; onMyProfile() },
+            )
+            DropdownMenuItem(
+                text = { Text("Event log") },
+                onClick = { menuOpen = false; onEventLog() },
+            )
+            DropdownMenuItem(
+                text = { Text("About") },
+                onClick = { menuOpen = false; onAbout() },
+            )
+        }
     }
 }
 
