@@ -135,6 +135,9 @@ class WifiDirectConnector(
     /** Owner address the current [connectJob] targets, if any. */
     private var connectTarget: String? = null
 
+    /** True while the client's TCP retry loop coroutine is alive; recovery diagnostics (TASK R3 part 1). */
+    val tcpConnectLoopRunning: Boolean get() = connectJob?.isActive == true
+
     /** Should-retry / should-stop rules for the client's TCP connect loop. */
     private val connectDecider = ClientConnectDecider()
 

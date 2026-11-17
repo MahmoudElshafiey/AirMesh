@@ -59,6 +59,12 @@ class WifiP2pPeerDirectory(
     private var advertisedClients = 0
     /** When the last client-count re-registration happened; 0 = never. */
     private var lastClientReRegisterAtMs = 0L
+
+    /** Owner flag of the ad currently registered (false when not advertising); recovery diagnostics (TASK R3 part 1). */
+    val currentAdvertOwner: Boolean get() = advertisedOwnerFlag == true
+
+    /** Client count in the instance name currently registered; recovery diagnostics (TASK R3 part 1). */
+    val currentAdvertClients: Int get() = advertisedClients
     /** The request registered most recently; strategy 2 swaps in an unfiltered one. */
     private var serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
 

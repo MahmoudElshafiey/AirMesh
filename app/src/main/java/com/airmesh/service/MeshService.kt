@@ -38,6 +38,7 @@ import com.airmesh.profile.ProfileInfo
 import com.airmesh.protocol.FrameType
 import com.airmesh.storage.ChatDatabase
 import com.airmesh.storage.RoomChatStore
+import com.airmesh.transport.AUTO_JOIN_TIMEOUT_MS
 import com.airmesh.transport.AirMeshPeer
 import com.airmesh.transport.AutoFailureReason
 import com.airmesh.transport.AutoMeshAction
@@ -54,6 +55,9 @@ import com.airmesh.transport.DiscoveryStrategyStore
 import com.airmesh.transport.OwnerScanPolicy
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
+import com.airmesh.transport.RecoveryPeerInfo
+import com.airmesh.transport.RecoveryRecorder
+import com.airmesh.transport.RecoverySnapshot
 import com.airmesh.transport.StaleGroupGuardState
 import com.airmesh.transport.TieBreakToken
 import com.airmesh.transport.TimelineRecorder
@@ -140,6 +144,9 @@ class MeshService : Service() {
 
     /** Monotonic startup-to-neighbor-up timeline recorder. */
     private val timelineRecorder = TimelineRecorder(SystemClock::elapsedRealtime)
+
+    /** Forensic recorder for reconnection episodes (TASK R3 part 1): logs the "recovery:" lines. */
+    private val recoveryRecorder = RecoveryRecorder(clock = System::currentTimeMillis) { line -> _eventLog.log(line) }
 
     /** This device's mesh id; set in [onCreate]. */
     val nodeId: Int get() = node.localNodeId
@@ -387,6 +394,7 @@ class MeshService : Service() {
         startForeground(RUNNING_NOTIFICATION_ID, buildRunningNotification(0))
 
         serviceScope.launch {
+            var previousNeighbors: Set<Int> = emptySet() // TASK R3 part 1: episode edge detection
             node.neighbors.collect { neighbors ->
                 if (neighbors.isNotEmpty()) {
                     timelineRecorder.onNeighborUp()?.let { line -> _eventLog.log(line) }
@@ -408,6 +416,23 @@ class MeshService : Service() {
                 if (runningThrottle.shouldPost(System.currentTimeMillis())) {
                     notificationManager.notify(RUNNING_NOTIFICATION_ID, buildRunningNotification(neighbors.size))
                 }
+                // TASK R3 part 1: track reconnection episodes for the "recovery:" forensic lines.
+                if (_autoMeshEnabled.value) {
+                    val cs = connector.state.value
+                    when {
+                        neighbors.isEmpty() && previousNeighbors.isNotEmpty() -> {
+                            val cause = when {
+                                cs.p2pEnabled == false -> RecoveryRecorder.CAUSE_P2P_DISABLED
+                                cs.groupFormed -> RecoveryRecorder.CAUSE_OWN_LINK_LOST // e.g. keepalive close
+                                else -> RecoveryRecorder.CAUSE_GROUP_GONE
+                            }
+                            recoveryRecorder.onRecoveryStarted(cause, autoController?.let { describeState(it) } ?: "Idle", cs.groupFormed, cs.role)
+                        }
+                        neighbors.isNotEmpty() && previousNeighbors.isEmpty() ->
+                            recoveryRecorder.onNeighborUp(cs.role)
+                    }
+                }
+                previousNeighbors = neighbors
                 // Truthful presence reacts to every neighbor up/down immediately (TASK U5 part 2).
                 presenceBookkeeping.noteNeighbors(neighbors)
                 presenceNeighborSet = neighbors // reason context for the next log lines (part 4)
@@ -570,6 +595,8 @@ class MeshService : Service() {
                     hint == null -> noAirMeshHintShown = false
                 }
                 autoEvent(AutoMeshEvent.Tick, "tick")
+                // TASK R3 part 1: periodic "STILL NOT CONNECTED" diagnostic while an episode is active.
+                recoveryRecorder.tick(buildRecoverySnapshot())
             }
         }
 
@@ -605,7 +632,19 @@ class MeshService : Service() {
                         // A role change while still formed (owner <-> client) re-forms too.
                         cs.groupFormed && newRole != P2pRole.NONE ->
                             autoEvent(AutoMeshEvent.GroupFormed(autoRoleOf(newRole)), "group formed as ${newRole.name.lowercase()}")
-                        wasInGroup -> autoEvent(AutoMeshEvent.GroupGone, "group gone")
+                        wasInGroup -> {
+                            // TASK R3 part 1: the group loss starts (or extends) a recovery episode.
+                            if (_autoMeshEnabled.value) {
+                                recoveryRecorder.onRecoveryStarted(
+                                    RecoveryRecorder.CAUSE_GROUP_GONE,
+                                    autoController?.let { describeState(it) } ?: "Idle",
+                                    false,
+                                    P2pRole.NONE,
+                                )
+                            }
+                            recoveryRecorder.noteGroupLost()
+                            autoEvent(AutoMeshEvent.GroupGone, "group gone")
+                        }
                     }
                 }
 
@@ -753,6 +792,10 @@ class MeshService : Service() {
 
     private fun applyAutoMeshEnabled(enabled: Boolean, persist: Boolean) {
         _autoMeshEnabled.value = enabled
+        if (!enabled) {
+            // TASK R3 part 1: manual mode owns reconnection now; stop tracking the episode.
+            recoveryRecorder.onRecoveryAborted()
+        }
         if (persist) {
             getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                 .putBoolean(KEY_AUTO_MESH_ENABLED, enabled)
@@ -802,6 +845,24 @@ class MeshService : Service() {
         val actions = controller.onEvent(event)
         // The controller queues at most one "merge ..." line per outcome change (TASK M1 part 4).
         controller.takeMergeLogLine()?.let { _eventLog.log("auto: $it") }
+        // TASK R3 part 1: record every transition and pending timer for recovery forensics.
+        if (controller.state != previousState) {
+            recoveryRecorder.noteControllerTransition(recoveryStateLine(previousState), describeState(controller))
+            when (val s = controller.state) {
+                is AutoMeshState.Backoff -> recoveryRecorder.noteTimers(mapOf("backoff" to s.untilMs))
+                is AutoMeshState.Joining -> recoveryRecorder.noteTimers(mapOf("joinTimeout" to (s.sinceMs + AUTO_JOIN_TIMEOUT_MS)))
+                is AutoMeshState.Yielding -> {
+                    recoveryRecorder.noteTimers(mapOf("mergeJoinTimeout" to (s.sinceMs + AUTO_JOIN_TIMEOUT_MS)))
+                    recoveryRecorder.noteMergeAttempted()
+                }
+                else -> recoveryRecorder.noteTimers(emptyMap())
+            }
+            if (previousState is AutoMeshState.Yielding &&
+                controller.state !is AutoMeshState.Client && controller.state !is AutoMeshState.Owner
+            ) {
+                recoveryRecorder.noteMergeAbandoned()
+            }
+        }
         syncAutoUi(controller)
         if (actions.isNotEmpty() || event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.PeersChanged) {
             _eventLog.log(
@@ -884,6 +945,36 @@ class MeshService : Service() {
         is AutoMeshAction.CreateGroup -> "CreateGroup"
         is AutoMeshAction.ConnectTo -> "ConnectTo(${action.deviceAddress})"
         is AutoMeshAction.RemoveGroup -> "RemoveGroup"
+    }
+
+    /** Live context for the recovery recorder's diagnostic line (TASK R3 part 1). */
+    private fun buildRecoverySnapshot(): RecoverySnapshot {
+        val cs = connector.state.value
+        val nowMs = System.currentTimeMillis()
+        return RecoverySnapshot(
+            stateLine = autoController?.let(::describeState) ?: "Idle",
+            peers = peerDirectory.peers.value.map { p ->
+                RecoveryPeerInfo(p.nodeId, p.isGroupOwner, p.clients, (nowMs - p.lastSeenMs).coerceAtLeast(0L))
+            },
+            discoveryActive = discoveryCoordinator.serviceDiscoveryActive,
+            lastScanAgoMs = discoveryCoordinator.lastCycleAtMs?.let { (nowMs - it).coerceAtLeast(0L) },
+            serviceAdvertOwner = peerDirectory.currentAdvertOwner,
+            serviceAdvertClients = peerDirectory.currentAdvertClients,
+            groupFormed = cs.groupFormed,
+            tcpRetryRunning = connector.tcpConnectLoopRunning,
+        )
+    }
+
+    /** One-line form of a controller state for recovery forensics (TASK R3 part 1); no idle reason. */
+    private fun recoveryStateLine(s: AutoMeshState): String = when (s) {
+        is AutoMeshState.Idle -> "Idle"
+        is AutoMeshState.Searching -> "Searching"
+        is AutoMeshState.Creating -> "Creating"
+        is AutoMeshState.Joining -> "Joining(#${s.targetNodeId} ${s.targetAddress})"
+        is AutoMeshState.Yielding -> "Yielding(#${s.targetNodeId} ${s.targetAddress}, ${s.targetPhones} phones)"
+        is AutoMeshState.Owner -> "Owner"
+        is AutoMeshState.Client -> "Client"
+        is AutoMeshState.Backoff -> "Backoff(${s.reason})"
     }
 
     /** Maps the connector's role to the controller's (the service is the boundary). */
