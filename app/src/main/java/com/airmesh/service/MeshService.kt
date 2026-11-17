@@ -56,9 +56,11 @@ import com.airmesh.transport.FreshnessRules
 import com.airmesh.transport.OwnerScanPolicy
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
+import com.airmesh.transport.RecoveryAction
 import com.airmesh.transport.RecoveryPeerInfo
 import com.airmesh.transport.RecoveryRecorder
 import com.airmesh.transport.RecoverySnapshot
+import com.airmesh.transport.RecoverySupervisor
 import com.airmesh.transport.StaleGroupGuardState
 import com.airmesh.transport.TieBreakToken
 import com.airmesh.transport.TimelineRecorder
@@ -69,6 +71,7 @@ import com.airmesh.ui.EXTRA_MESSAGE_KEY
 import com.airmesh.ui.EXTRA_TAB
 import com.airmesh.ui.MeshActivity
 import com.airmesh.ui.TAB_CHAT
+import java.util.Random
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -148,6 +151,14 @@ class MeshService : Service() {
 
     /** Forensic recorder for reconnection episodes (TASK R3 part 1): logs the "recovery:" lines. */
     private val recoveryRecorder = RecoveryRecorder(clock = System::currentTimeMillis) { line -> _eventLog.log(line) }
+
+    /**
+     * Escalating recovery supervisor (TASK R3 part 3); seeded with our node id so phones do not
+     * run their level-3 cycles in lockstep. Lazy because the seed needs [node], set in onCreate.
+     */
+    private val recoverySupervisor by lazy {
+        RecoverySupervisor({ System.currentTimeMillis() }, Random(node.localNodeId.toLong()))
+    }
 
     /** This device's mesh id; set in [onCreate]. */
     val nodeId: Int get() = node.localNodeId
@@ -428,9 +439,12 @@ class MeshService : Service() {
                                 else -> RecoveryRecorder.CAUSE_GROUP_GONE
                             }
                             recoveryRecorder.onRecoveryStarted(cause, autoController?.let { describeState(it) } ?: "Idle", cs.groupFormed, cs.role)
+                            // TASK R3 part 3 (b): a keepalive closed our link but the group is still formed and we are a
+                            // client — restart the TCP retry loop immediately with a fresh backoff.
+                            if (cs.groupFormed && cs.role == P2pRole.CLIENT) connector.forceRestartConnectLoop()
                         }
                         neighbors.isNotEmpty() && previousNeighbors.isEmpty() ->
-                            recoveryRecorder.onNeighborUp(cs.role)
+                            recoveryRecorder.onNeighborUp(cs.role, if (recoverySupervisor.didAct) RecoveryRecorder.PATH_SUPERVISOR else null)
                     }
                 }
                 previousNeighbors = neighbors
@@ -598,6 +612,23 @@ class MeshService : Service() {
                 autoEvent(AutoMeshEvent.Tick, "tick")
                 // TASK R3 part 1: periodic "STILL NOT CONNECTED" diagnostic while an episode is active.
                 recoveryRecorder.tick(buildRecoverySnapshot())
+                // TASK R3 part 3: escalating recovery while auto-mesh is on, Wi-Fi Direct is up and no
+                // live neighbor exists; each returned action maps to an existing call site (the
+                // supervisor never creates a group itself).
+                val cs = connector.state.value
+                for (action in recoverySupervisor.tick(
+                    RecoverySupervisor.Snapshot(
+                        autoMeshOn = _autoMeshEnabled.value,
+                        p2pEnabled = cs.p2pEnabled != false,
+                        liveNeighborCount = liveNeighborCount,
+                        state = controller?.state ?: AutoMeshState.Idle,
+                        groupFormed = cs.groupFormed,
+                        myClients = if (cs.role == P2pRole.GROUP_OWNER) liveNeighborCount else 0,
+                    ),
+                )) {
+                    _eventLog.log("recovery: supervisor ${describeRecoveryAction(action)}")
+                    executeRecoveryAction(action)
+                }
             }
         }
 
@@ -614,16 +645,31 @@ class MeshService : Service() {
         serviceScope.launch {
             var lastRole = connector.state.value.role
             var lastPermReason: String? = "unset" // sentinel: the first emission always feeds the controller
+            var lastP2pEnabled: Boolean? = null // TASK R3 part 3 (a): detects Wi-Fi Direct coming back
             connector.state.collect { cs ->
                 val permReason = autoMeshPermissionReason(
                     cs.wifiDirectPermissionGranted,
                     cs.localNetworkRequired,
                     cs.localNetworkGranted,
-                )
+                ) ?: if (cs.p2pEnabled == false) "Wi-Fi Direct is off" else null
                 if (permReason != lastPermReason) {
                     lastPermReason = permReason
-                    autoEvent(AutoMeshEvent.PermissionsChanged(permReason == null, permReason), "permissions changed")
+                    // While paused the controller makes no decisions anyway; feeding it would only
+                    // clear idle reasons or start discovery behind the pause.
+                    if (_autoMeshEnabled.value) {
+                        autoEvent(AutoMeshEvent.PermissionsChanged(permReason == null, permReason), "permissions changed")
+                    }
                 }
+
+                // TASK R3 part 3 (a): Wi-Fi Direct came back — fresh start: wipe the peer table
+                // (everything in it predates the radio), re-register our service, and re-arm the
+                // startup burst so a scan starts within 500 ms.
+                if (cs.p2pEnabled == true && lastP2pEnabled == false) {
+                    peerDirectory.clearPeerTable()
+                    peerDirectory.reRegisterLocalServiceRaw { _, _ -> }
+                    if (_autoMeshEnabled.value) discoveryCoordinator.onEnterSearching(System.currentTimeMillis())
+                }
+                lastP2pEnabled = cs.p2pEnabled
 
                 val newRole = cs.role
                 if (newRole != lastRole) {
@@ -911,6 +957,38 @@ class MeshService : Service() {
                 connector.removeGroup("auto-mesh: clearing a stale group before retry")
             }
         }
+    }
+
+    /** Executes one supervisor action against the same call sites the controller uses (TASK R3 part 3). */
+    private fun executeRecoveryAction(action: RecoveryAction) {
+        val cs = connector.state.value
+        when (action) {
+            is RecoveryAction.ClearStalePeers -> peerDirectory.clearStalePeersNow()
+            is RecoveryAction.ReRegisterService ->
+                peerDirectory.startAdvertising(FreshnessRules.desiredOwnerFlag(cs.groupFormed, cs.role))
+            is RecoveryAction.FreshScanBurst -> discoveryCoordinator.onEnterSearching(System.currentTimeMillis())
+            is RecoveryAction.ResetTcpRetry -> connector.forceRestartConnectLoop()
+            is RecoveryAction.ResetGroupPresence -> connector.resetGroupPresenceTracker()
+            is RecoveryAction.RemoveOwnGroup -> {
+                autoController?.markIntentionalGroupRemoval()
+                connector.removeGroup("recovery: level 2 — own group has no clients")
+            }
+            is RecoveryAction.FullCycle -> {
+                peerDirectory.reRegisterLocalServiceRaw { _, _ -> }
+                discoveryCoordinator.fullCycleRestart()
+            }
+        }
+    }
+
+    /** One-line form of a supervisor action for the "recovery: supervisor ..." log line. */
+    private fun describeRecoveryAction(action: RecoveryAction): String = when (action) {
+        is RecoveryAction.ClearStalePeers -> "ClearStalePeers"
+        is RecoveryAction.ReRegisterService -> "ReRegisterService"
+        is RecoveryAction.FreshScanBurst -> "FreshScanBurst"
+        is RecoveryAction.ResetTcpRetry -> "ResetTcpRetry"
+        is RecoveryAction.ResetGroupPresence -> "ResetGroupPresence"
+        is RecoveryAction.RemoveOwnGroup -> "RemoveOwnGroup"
+        is RecoveryAction.FullCycle -> "FullCycle"
     }
 
     /**

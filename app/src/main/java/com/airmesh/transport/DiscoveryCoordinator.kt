@@ -71,8 +71,8 @@ class DiscoveryCoordinator(
     /** Runs [block] after the given delay. Default executes immediately (JVM tests). */
     private val schedule: (Long, () -> Unit) -> Unit = { _, block -> block() },
     private val log: (String) -> Unit = {},
-    /** Picks the scan variant and remembers the one that worked. */
-    private val strategySelector: DiscoveryStrategySelector =
+    /** Picks the scan variant and remembers the one that worked; [fullCycleRestart] replaces it. */
+    private var strategySelector: DiscoveryStrategySelector =
         DiscoveryStrategySelector(NoDiscoveryStrategyStore),
     /** Offsets from entering Searching for the initial scan burst (+0.5 s, +6 s, +14 s). */
     private val burstOffsetsMs: List<Long> = DEFAULT_BURST_OFFSETS_MS,
@@ -341,6 +341,16 @@ class DiscoveryCoordinator(
         burstIndex = 0
         peerScanStartedAtMs = null
         ownerScanGate = null // leaving merge-scan mode; the next start re-arms it
+    }
+
+    /**
+     * TASK R3 part 3 level 3: abandon everything (in-flight chained cycle, startup burst, manual
+     * scan window) and restart discovery from the production default strategy plan — the same one
+     * used at service startup. The directory's loop issues the first fresh cycle on its next slice.
+     */
+    fun fullCycleRestart() {
+        stopService()
+        strategySelector = DiscoveryStrategySelector.forService()
     }
 
     companion object {

@@ -868,6 +868,32 @@ class WifiDirectConnector(
         startClient(address)
     }
 
+    /**
+     * TASK R3 part 3: force the client's TCP retry loop to restart with a fresh backoff — used
+     * when a keepalive closed our link (or the loop stopped on its own) while the group is still
+     * formed and we are a client. Unlike [retryConnect] it cancels any running loop first, so
+     * [startClient] starts clean instead of ignoring the duplicate call; no-op in every other
+     * situation.
+     */
+    fun forceRestartConnectLoop() {
+        val snapshot = state.value
+        if (snapshot.role != P2pRole.CLIENT || !snapshot.groupFormed) {
+            log("tcp: forced restart ignored — role=${snapshot.role} groupFormed=${snapshot.groupFormed}")
+            return
+        }
+        val address = snapshot.groupOwnerAddress ?: run {
+            log("tcp: forced restart impossible — no group owner address")
+            return
+        }
+        connectJob?.cancel() // startClient would ignore a duplicate call while the loop is active
+        startClient(address)
+    }
+
+    /** TASK R3 part 3 level 2: drop the group-presence debounce so the next report re-arms it. */
+    fun resetGroupPresenceTracker() {
+        presenceTracker.reset()
+    }
+
     /** True when a live TCP link exists that a false report must not tear down. */
     private fun hasLiveLink(): Boolean = listening || transport.neighbors.value.isNotEmpty()
 

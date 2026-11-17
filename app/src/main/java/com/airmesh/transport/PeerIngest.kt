@@ -44,6 +44,11 @@ class PeerIngest(
     private val _peers = mutableMapOf<String, Peer>()
     val peers: Map<String, Peer> get() = _peers.toMap()
 
+    /** TASK R3 part 3: drop every learned peer (Wi-Fi Direct came back from off). */
+    fun clear() {
+        _peers.clear()
+    }
+
     /** Set of addresses already counted as "accepted". */
     private val acceptedAddresses = mutableSetOf<String>()
 

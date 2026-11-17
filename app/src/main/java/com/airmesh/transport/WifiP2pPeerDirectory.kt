@@ -453,6 +453,17 @@ class WifiP2pPeerDirectory(
         publishPeers(nowMs)
     }
 
+    /** TASK R3 part 3 level 1: force an immediate sweep so stale entries drop now, not at the next slice. */
+    fun clearStalePeersNow() {
+        publishPeers(System.currentTimeMillis())
+    }
+
+    /** TASK R3 part 3 (Wi-Fi Direct re-enabled): wipe the whole table — everything in it predates the radio coming back. */
+    fun clearPeerTable() {
+        ingest.clear()
+        publishPeers(System.currentTimeMillis())
+    }
+
     override fun stop() {
         discovering = false
         coordinator.stopService()
