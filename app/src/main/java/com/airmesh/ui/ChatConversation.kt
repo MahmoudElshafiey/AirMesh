@@ -66,6 +66,12 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 /** Debounce for marking read (TASK R1 part 1): coalesces bursts of IN arrivals into one update. */
 private const val MARK_READ_DEBOUNCE_MS = 300L
 
+/** One item in the chat column: a timeline row, or the "N unread" divider (TASK R1 part 2). */
+private sealed interface TimelineDisplayItem {
+    data class Row(val row: ChatTimelineRow) : TimelineDisplayItem
+    data class UnreadDivider(val count: Int) : TimelineDisplayItem
+}
+
 /**
  * Redesigned conversation screen (TASK U2 part 1): WhatsApp-style bubbles with tails,
  * sender names in the avatar color inside the mesh room, sticky date separators, delivery
@@ -118,6 +124,29 @@ fun ChatConversationContent(
         buildChatTimelineRows(messages, presenceEvents, peerDisplayName, nowMs)
     }
 
+    // "N unread messages" divider (TASK R1 part 2): the unread set is captured ONCE when this
+    // chat's rows first load — it neither grows with arrivals while open nor shrinks when
+    // markRead flips them, so the divider stays until the user leaves (a new composition for the
+    // conversation re-captures). The guard makes the write-during-composition a one-shot.
+    var unreadAtOpen by remember(conversationId) { mutableStateOf<Set<Long>?>(null) }
+    if (unreadAtOpen == null && messages.isNotEmpty()) {
+        unreadAtOpen = messages.filter { it.direction == ChatDirection.IN && !it.isRead }.mapTo(mutableSetOf()) { it.id }
+    }
+    val unreadDividerInfo = remember(rows, unreadAtOpen) {
+        unreadDivider(rows, unreadAtOpen ?: emptySet())
+    }
+
+    // One flat list for the column: the timeline rows plus — when there were unreads at open
+    // time — the divider inserted right before the first of them. Its index in this list is
+    // exactly [unreadDividerInfo.position], which is what the initial scroll targets.
+    val displayItems = remember(rows, unreadDividerInfo) {
+        val cut = unreadDividerInfo.position
+        if (cut == null) rows.map { TimelineDisplayItem.Row(it) }
+        else rows.take(cut).map { TimelineDisplayItem.Row(it) } +
+            TimelineDisplayItem.UnreadDivider(unreadDividerInfo.count) +
+            rows.drop(cut).map { TimelineDisplayItem.Row(it) }
+    }
+
     // Transient "Back online" chip (TASK U5 part 3): shown for BACK_ONLINE_CHIP_MS after a
     // confirmed BACK_ONLINE arrives while this chat is open. The event's atMs is when they came
     // back, which precedes the debounce confirmation, so "just arrived" means atMs is within
@@ -138,10 +167,18 @@ fun ChatConversationContent(
         }
     }
 
+    var didInitialScroll by remember(conversationId) { mutableStateOf(false) }
     LaunchedEffect(rows.size, follow) {
         val delta = rows.size - lastRowsSize
-        if (follow && rows.isNotEmpty()) {
-            listState.animateScrollToItem(rows.lastIndex)
+        if (follow && displayItems.isNotEmpty()) {
+            if (!didInitialScroll) {
+                // First load of this chat: land on the unread divider when there is one, else at
+                // the bottom exactly as before (TASK R1 part 2).
+                listState.animateScrollToItem(unreadDividerInfo.position ?: displayItems.lastIndex)
+                didInitialScroll = true
+            } else {
+                listState.animateScrollToItem(displayItems.lastIndex)
+            }
             unseenCount = 0
         } else if (!follow && delta > 0) {
             // New messages arrived while the user was reading history: count them.
@@ -154,7 +191,7 @@ fun ChatConversationContent(
             .distinctUntilChanged()
             .collect { first ->
                 // Within two items of the end counts as "at the bottom".
-                follow = rows.isNotEmpty() && first >= rows.size - 2
+                follow = displayItems.isNotEmpty() && first >= displayItems.size - 2
             }
     }
 
@@ -182,6 +219,30 @@ fun ChatConversationContent(
 
     var notDeliveredMessage by remember { mutableStateOf<ChatMessage?>(null) }
 
+    // Renders one timeline row. A composable-lambda val (Compose forbids local @Composable
+    // functions inside lambdas) so the LazyColumn's items() run below can call it inline.
+    val renderTimelineRow: @Composable (ChatTimelineRow) -> Unit = { row ->
+        when (row) {
+            is ChatTimelineRow.Day -> DaySeparator(row.label)
+            is ChatTimelineRow.Message -> {
+                val contact = contactById[row.message.originNode]
+                ChatMessageRow(
+                    message = row.message,
+                    newGroup = row.newGroup,
+                    isMeshRoom = isMeshRoom,
+                    senderName = senderNameFor(row.message.originNode, contact, profiles),
+                    senderColorIndex = senderColorIndexFor(row.message.originNode, contact, profiles),
+                    nowMs = nowMs,
+                    myLastFix = myLastFix,
+                    onOpenInMaps = onOpenInMaps,
+                    onNotDeliveredTap = { notDeliveredMessage = it },
+                )
+            }
+            // Centered system row for a confirmed presence transition (TASK U5 part 3).
+            is ChatTimelineRow.PresenceNote -> PresenceSystemRow(row.text)
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         bannerText?.let { ConversationBanner(it) }
         if (showEncryptionNote) EncryptionNote(onDismiss = onDismissEncryptionNote)
@@ -191,43 +252,36 @@ fun ChatConversationContent(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            if (rows.isEmpty()) {
+            if (displayItems.isEmpty()) {
                 item(key = "empty") { EmptyConversation(isMeshRoom) }
             } else {
                 // Stable keys (TASK U4 part 4): messages carry the store-assigned id, and a day
-                // separator's label is unique within one conversation. Content types keep the
-                // light separators out of the heavy message-row reuse pool.
+                // separator's label is unique within one conversation; the divider has its own.
+                // Content types keep the light separators out of the heavy message-row reuse pool.
                 items(
-                    rows,
-                    key = { row -> when (row) {
-                        is ChatTimelineRow.Day -> "day:${row.label}"
-                        is ChatTimelineRow.Message -> row.message.id
-                        is ChatTimelineRow.PresenceNote -> "presence:${row.event.atMs}:${row.event.transition}"
-                    } },
-                    contentType = { row -> when (row) {
-                        is ChatTimelineRow.Day -> "day"
-                        is ChatTimelineRow.PresenceNote -> "presence"
-                        else -> "message"
-                    } },
-                ) { row ->
-                    when (row) {
-                        is ChatTimelineRow.Day -> DaySeparator(row.label)
-                        is ChatTimelineRow.Message -> {
-                            val contact = contactById[row.message.originNode]
-                            ChatMessageRow(
-                                message = row.message,
-                                newGroup = row.newGroup,
-                                isMeshRoom = isMeshRoom,
-                                senderName = senderNameFor(row.message.originNode, contact, profiles),
-                                senderColorIndex = senderColorIndexFor(row.message.originNode, contact, profiles),
-                                nowMs = nowMs,
-                                myLastFix = myLastFix,
-                                onOpenInMaps = onOpenInMaps,
-                                onNotDeliveredTap = { notDeliveredMessage = it },
-                            )
+                    displayItems,
+                    key = { item -> when (item) {
+                        is TimelineDisplayItem.Row -> when (val row = item.row) {
+                            is ChatTimelineRow.Day -> "day:${row.label}"
+                            is ChatTimelineRow.Message -> row.message.id
+                            is ChatTimelineRow.PresenceNote -> "presence:${row.event.atMs}:${row.event.transition}"
                         }
-                        // Centered system row for a confirmed presence transition (TASK U5 part 3).
-                        is ChatTimelineRow.PresenceNote -> PresenceSystemRow(row.text)
+                        is TimelineDisplayItem.UnreadDivider -> "unread-divider"
+                    } },
+                    contentType = { item -> when (item) {
+                        is TimelineDisplayItem.Row -> when (val row = item.row) {
+                            is ChatTimelineRow.Day -> "day"
+                            is ChatTimelineRow.PresenceNote -> "presence"
+                            else -> "message"
+                        }
+                        is TimelineDisplayItem.UnreadDivider -> "unread-divider"
+                    } },
+                ) { item ->
+                    when (item) {
+                        is TimelineDisplayItem.Row -> renderTimelineRow(item.row)
+                        // The "N unread messages" divider (TASK R1 part 2): it stays until the
+                        // user leaves this chat because its position comes from the open-time set.
+                        is TimelineDisplayItem.UnreadDivider -> UnreadDividerRow(item.count)
                     }
                 }
             }
@@ -496,6 +550,32 @@ private fun PresenceSystemRow(text: String) {
         contentAlignment = Alignment.Center,
     ) {
         Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * Centered "N unread messages" divider shown before the first row that was unread when this chat
+ * was opened (TASK R1 part 2); styled like [DaySeparator] but in the accent color so it reads as
+ * an action marker, not a date.
+ */
+@Composable
+private fun UnreadDividerRow(count: Int) {
+    Box(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(MaterialTheme.colorScheme.primaryContainer)
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+        ) {
+            Text(
+                "$count unread message" + if (count > 1) "s" else "",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        }
     }
 }
 

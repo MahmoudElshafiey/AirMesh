@@ -95,5 +95,28 @@ fun buildChatTimelineRows(
     return rows
 }
 
+/** Where the "N unread" divider goes: [position] is the index in the row list to insert it before. */
+data class UnreadDividerInfo(val position: Int?, val count: Int)
+
+/**
+ * Position and count for the "N unread messages" divider (TASK R1 part 2). [unreadMessageIds] is
+ * the set of IN rows that were UNREAD WHEN THIS CHAT WAS OPENED — captured once, so it neither
+ * grows with arrivals while open nor shrinks when markRead flips them. The divider goes right
+ * before the first such row still visible in [rows]; [count] is how many of the captured ids are
+ * visible (older ones may have been pruned away). Position is null when none is visible.
+ */
+fun unreadDivider(rows: List<ChatTimelineRow>, unreadMessageIds: Set<Long>): UnreadDividerInfo {
+    if (unreadMessageIds.isEmpty()) return UnreadDividerInfo(null, 0)
+    var firstUnreadIndex = -1
+    var visible = 0
+    rows.forEachIndexed { index, row ->
+        if (row is ChatTimelineRow.Message && row.message.id in unreadMessageIds) {
+            visible++
+            if (firstUnreadIndex < 0) firstUnreadIndex = index
+        }
+    }
+    return UnreadDividerInfo(if (visible > 0) firstUnreadIndex else null, visible)
+}
+
 private fun sameDay(aMs: Long, bMs: Long, zone: ZoneId): Boolean =
     LocalDate.ofInstant(Instant.ofEpochMilli(aMs), zone) == LocalDate.ofInstant(Instant.ofEpochMilli(bMs), zone)
