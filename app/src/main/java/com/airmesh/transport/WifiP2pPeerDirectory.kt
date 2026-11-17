@@ -65,6 +65,15 @@ class WifiP2pPeerDirectory(
 
     /** Client count in the instance name currently registered; recovery diagnostics (TASK R3 part 1). */
     val currentAdvertClients: Int get() = advertisedClients
+
+    /** Whether we own a live group right now; controls peer-table ageing speed (TASK R3 part 2). */
+    var ourGroupPresent: Boolean = false
+        private set
+
+    /** The service reports our group reality so the table ages out at the right speed. */
+    fun noteOurGroup(present: Boolean) {
+        if (present != ourGroupPresent) ourGroupPresent = present
+    }
     /** The request registered most recently; strategy 2 swaps in an unfiltered one. */
     private var serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(AirMeshAdCodec.SERVICE_TYPE)
 
@@ -397,16 +406,16 @@ class WifiP2pPeerDirectory(
     }
 
     /**
-     * Mirror the ingest table into [peers], applying peer expiry exactly as before
-     * (same [shouldExpirePeer] predicate on the last callback time). Emission and
-     * the accepted log happen only when the set of
+     * Mirror the ingest table into [peers], applying group-aware peer expiry (TASK R3 part 2):
+     * [FreshnessRules.shouldExpirePeerNow] — 120 s while we own a group, 60 s otherwise. Emission
+     * and the accepted log happen only when the set of
      * (address, nodeId, tieBreak, owner, clients) really changes — lastSeenMs is
      * excluded from that comparison so repeated identical adverts just refresh
      * lastSeen inside [PeerIngest] without re-publishing.
      */
     private fun publishPeers(nowMs: Long) {
         val live = ingest.peers.values
-            .filterNot { shouldExpirePeer(it.lastSeenMs, nowMs) }
+            .filterNot { FreshnessRules.shouldExpirePeerNow(it.lastSeenMs, nowMs, ourGroupPresent) }
             .map { AirMeshPeer(it.deviceAddress, it.nodeId, it.owner, it.tieBreak.toInt(), it.clients, it.lastSeenMs) }
             .sortedBy { it.nodeId }
         if (live.map(::peerChangeKey).toSet() == publishedPeers.map(::peerChangeKey).toSet()) return
@@ -439,8 +448,8 @@ class WifiP2pPeerDirectory(
 
     private fun sweepStalePeers(nowMs: Long) {
         // The NSD-style API has no "service removed" callback, so a phone that
-        // left range simply stops being re-seen; [publishPeers] drops it after
-        // [PEER_STALE_MS] using the same predicate as before.
+        // left range simply stops being re-seen; [publishPeers] drops it once it is
+        // stale by the group-aware threshold (120 s with a group, 60 s without).
         publishPeers(nowMs)
     }
 

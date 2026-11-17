@@ -52,6 +52,7 @@ import com.airmesh.transport.DiscoveryBackend
 import com.airmesh.transport.DiscoveryCoordinator
 import com.airmesh.transport.DiscoveryStrategySelector
 import com.airmesh.transport.DiscoveryStrategyStore
+import com.airmesh.transport.FreshnessRules
 import com.airmesh.transport.OwnerScanPolicy
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
@@ -648,8 +649,11 @@ class MeshService : Service() {
                     }
                 }
 
-                // Keep our ad's owner flag current; advertising needs no own MAC.
-                peerDirectory.startAdvertising(cs.groupFormed && newRole == P2pRole.GROUP_OWNER)
+                // Keep our ad's owner flag current (TASK R3 part 2): o1 only while we own a live
+                // group, so a phone whose group just died re-registers as o0 with clients=0 on this
+                // very next state change; the directory also switches to faster peer ageing.
+                peerDirectory.noteOurGroup(cs.groupFormed)
+                peerDirectory.startAdvertising(FreshnessRules.desiredOwnerFlag(cs.groupFormed, newRole))
             }
         }
     }

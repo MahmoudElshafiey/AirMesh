@@ -276,6 +276,9 @@ class AutoMeshController(
     private var lostGroupUnexpectedly = false
     /** While now < this, [decide] joins visible owners but never creates. */
     private var creationGraceUntilMs = 0L
+    /** When our group was unexpectedly lost; owner adverts seen before this are not trusted for
+     * joining until a new scan re-confirms them (TASK R3 part 2). Null = never lost one. */
+    private var unexpectedLossAtMs: Long? = null
 
     /** The service calls this after each event to drain a queued merge log line. */
     fun takeMergeLogLine(): String? {
@@ -396,7 +399,13 @@ class AutoMeshController(
     /** The Searching decision: join an owner, create if elected, or wait for takeover. */
     private fun decide(peers: List<AirMeshPeer>, now: Long): List<AutoMeshAction> {
         if (state !is AutoMeshState.Searching) return emptyList()
-        val owner = chooseAutoMeshOwner(peers)
+        // TASK R3 part 2: after an unexpected loss only owners whose advert was re-confirmed by a
+        // new scan since the loss are joinable; untrusted ones fall through to grace/takeover. The
+        // filter applies to owner selection ONLY — rule (c) below still elects on the full list, so
+        // the election among non-owner peers is unchanged.
+        val owner = chooseAutoMeshOwner(
+            peers.filter { FreshnessRules.ownerAdvertTrustedForJoin(it, now, unexpectedLossAtMs) },
+        )
         if (owner != null) {
             // Rule (b): a visible owner is joined; the target stays fixed until it
             // fails, times out, or vanishes — no mid-join switching.
@@ -470,6 +479,7 @@ class AutoMeshController(
         myClientsChangedAtMs = now
         lastLoggedMergeOutcome = null
         lostGroupUnexpectedly = false
+        unexpectedLossAtMs = null // a live group means the pre-loss adverts are history again
         state = if (role == AutoMeshRole.OWNER) AutoMeshState.Owner else AutoMeshState.Client
         // Rule (a): in a group we do nothing; stop discovering to save battery —
         // other phones find us through our advertisement, not our discovery. The
@@ -486,17 +496,21 @@ class AutoMeshController(
         return when (state) {
             is AutoMeshState.Owner, is AutoMeshState.Client -> {
                 // Rule (f): wait 1–3 s with jitter, then search again. An unexpected
-                // loss also arms the post-loss creation grace (TASK M1 part 4).
+                // loss also arms the post-loss creation grace (TASK M1 part 4) and records
+                // the loss time for the advert-freshness gate (TASK R3 part 2).
                 lostGroupUnexpectedly = true
+                unexpectedLossAtMs = now
                 val until = now + AUTO_GROUP_GONE_WAIT_BASE_MS + random.nextInt(AUTO_GROUP_GONE_WAIT_JITTER_MS.toInt() + 1)
                 state = AutoMeshState.Backoff(until, "group gone")
                 listOf(AutoMeshAction.StopDiscovery)
             }
             // A plain GroupGone while yielding means the group vanished on its own
             // (our own removal arrives as IntentionalGroupGone): note it for the
-            // post-loss grace, but keep the join toward the target running.
+            // post-loss grace and the advert-freshness gate, but keep the join toward
+            // the target running.
             is AutoMeshState.Yielding -> {
                 lostGroupUnexpectedly = true
+                unexpectedLossAtMs = now
                 emptyList()
             }
             // Join target vanished (or our own BUSY cleanup ran): re-search without
