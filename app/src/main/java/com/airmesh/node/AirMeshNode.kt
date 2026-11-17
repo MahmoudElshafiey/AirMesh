@@ -279,6 +279,13 @@ class AirMeshNode(
      */
     @Volatile private var profilePlanner: ProfileAnnouncePlanner? = null
 
+    /**
+     * First time we saw traffic from each origin (TASK R2 part 2), for the
+     * learned-name log. Confined to the incoming collector coroutine: delivery
+     * runs synchronously inside [onIncoming], so no other thread touches it.
+     */
+    private val firstSeenAt = HashMap<Int, Long>()
+
     /** Node ids with a live handshaken transport socket. */
     val neighbors: StateFlow<Set<Int>> = transport.neighbors
 
@@ -685,6 +692,10 @@ class AirMeshNode(
         if (frame.nodeId != localNodeId && !_profiles.value.containsKey(frame.nodeId)) {
             profilePlanner?.onNewOriginSeen(frame.nodeId)
         }
+        // First-sight time per origin for the learned-name log (TASK R2 part 2).
+        if (frame.nodeId != localNodeId) {
+            firstSeenAt.putIfAbsent(frame.nodeId, clock())
+        }
         router.onFrameReceived(frame, packet.senderId)
     }
 
@@ -760,8 +771,12 @@ class AirMeshNode(
      * Delivers a PROFILE frame to the directory. The payload is decoded and the
      * name re-sanitized (a hostile node could send bidi or control characters
      * that pass the size checks); malformed payloads are logged and dropped so
-     * one bad frame never crashes the node. Updates inside the directory's 10s
-     * window are ignored, which also absorbs duplicate announcements.
+     * one bad frame never crashes the node. A changed name or color is accepted
+     * immediately ([ProfileDirectory.upsertIfChanged], TASK R2 part 2), an
+     * unchanged duplicate only refreshes the entry's timestamp, and more than
+     * three changes from one node inside a 10 s window are ignored by the
+     * directory's flood guard. The first time we learn an origin's name we log
+     * how long after first sight it took.
      */
     private fun deliverProfile(frame: Frame) {
         ProfilePayload.decode(frame.payload).fold(
@@ -771,10 +786,12 @@ class AirMeshNode(
                     eventLog.log("PROFILE from ${frame.nodeId} dropped: empty name")
                     return@fold
                 }
-                val accepted = profileDirectory.acceptFromNetwork(
+                val knownBefore = _profiles.value.containsKey(frame.nodeId)
+                val accepted = profileDirectory.upsertIfChanged(
                     frame.nodeId,
                     name,
                     payload.avatarColorIndex,
+                    clock(),
                 )
                 _profiles.value = profileDirectory.snapshot()
                 // TASK R2 part 1: their PROFILE arrived, so our retry burst for them
@@ -782,8 +799,18 @@ class AirMeshNode(
                 profilePlanner?.onProfileReceivedFrom(frame.nodeId)
                 if (accepted) {
                     eventLog.log("delivered PROFILE node=${frame.nodeId} seq=${frame.seq}")
+                    if (!knownBefore) {
+                        // First time we know this origin's name: report the delay.
+                        val firstSeen = firstSeenAt[frame.nodeId]
+                        if (firstSeen != null) {
+                            eventLog.log(
+                                "profile: learned name for #${frame.nodeId} after " +
+                                    "${clock() - firstSeen}ms since first seen",
+                            )
+                        }
+                    }
                 } else {
-                    eventLog.log("PROFILE from ${frame.nodeId} ignored: update too soon")
+                    eventLog.log("PROFILE from ${frame.nodeId} ignored: unchanged or too many rapid changes")
                 }
             },
             onFailure = { error ->
@@ -862,7 +889,7 @@ class AirMeshNode(
             // TASK R2 part 1: instead of one immediate announce, the planner runs a
             // short retry burst — PROFILE frames are not stored, so a lost first
             // shot used to wait for the periodic re-announce. A no-op while no name
-            // is set; the directory's 10s window absorbs duplicates.
+            // is set; unchanged duplicates are absorbed by the directory.
             profilePlanner?.onNeighborUp(neighborId)
         }
     }

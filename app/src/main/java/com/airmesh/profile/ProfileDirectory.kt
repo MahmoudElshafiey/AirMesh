@@ -27,12 +27,22 @@ class ProfileDirectory(
         /** A node may push a new name at most once per this interval (ms). */
         const val MIN_UPDATE_INTERVAL_MS = 10_000L
 
+        /**
+         * Flood guard window for [upsertIfChanged] (TASK R2 part 2): at most this
+         * many CHANGES from one node inside a [MIN_UPDATE_INTERVAL_MS] window are
+         * accepted; anything beyond is ignored.
+         */
+        const val MAX_CHANGES_PER_WINDOW = 3
+
         /** Storage key under which the directory's JSON document is kept. */
         const val STORAGE_KEY = "profile_directory"
     }
 
     private val lock = Any()
     private val entries = LinkedHashMap<Int, ProfileInfo>()
+
+    /** Accepted-change timestamps per node; feeds the [upsertIfChanged] flood guard. */
+    private val changeTimes = HashMap<Int, ArrayDeque<Long>>()
 
     init {
         // Absent or corrupted stored data simply starts the directory empty.
@@ -60,6 +70,42 @@ class ProfileDirectory(
             return@synchronized false
         }
 
+        entries[nodeId] = ProfileInfo(name, colorIndex, now)
+        evictLocked()
+        persistLocked()
+        true
+    }
+
+    /**
+     * Accepts a network profile when it actually changes what we store (TASK R2
+     * part 2): a different name or color is applied immediately — no
+     * [MIN_UPDATE_INTERVAL_MS] wait — so a real rename never lags behind the
+     * fallback name. An unchanged duplicate only refreshes the entry's timestamp
+     * and returns false, which also absorbs repeated announcements. A flood guard
+     * ignores more than [MAX_CHANGES_PER_WINDOW] changes from one node inside the
+     * same 10 s window so a misbehaving peer cannot churn the directory; an
+     * ignored change consumes no budget. Returns true when the stored profile
+     * changed. The legacy [acceptFromNetwork] keeps its 10 s rule for other callers.
+     */
+    fun upsertIfChanged(nodeId: Int, name: String, colorIndex: Int, now: Long): Boolean = synchronized(lock) {
+        if (nodeId == localNodeId) return@synchronized false
+
+        val existing = entries[nodeId]
+        val changed = existing == null || existing.name != name || existing.colorIndex != colorIndex
+        if (!changed) {
+            // Duplicate announcement: keep the stored profile, only refresh recency.
+            entries[nodeId] = ProfileInfo(name, colorIndex, now)
+            persistLocked()
+            return@synchronized false
+        }
+
+        val times = changeTimes.getOrPut(nodeId) { ArrayDeque() }
+        while (times.isNotEmpty() && now - times.first() >= MIN_UPDATE_INTERVAL_MS) {
+            times.removeFirst() // left the 10 s window
+        }
+        if (times.size >= MAX_CHANGES_PER_WINDOW) return@synchronized false // flood guard
+
+        times.addLast(now)
         entries[nodeId] = ProfileInfo(name, colorIndex, now)
         evictLocked()
         persistLocked()

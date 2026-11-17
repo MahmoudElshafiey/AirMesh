@@ -24,9 +24,9 @@ import org.junit.Test
 /**
  * JVM tests for display names through the node: real localhost transports, same
  * harness as [AirMeshNodeLocationTest]. Covers exactly-once delivery, multi-hop
- * A-B-C propagation, name changes, the neighbor-up and 120s periodic
- * announcements (the latter on a virtual-time scheduler), the peer's 10s update
- * window, and malformed-payload drops.
+ * A-B-C propagation, immediate renames (TASK R2 part 2), the neighbor-up and
+ * 120s periodic announcements (the latter on a virtual-time scheduler), and
+ * malformed-payload drops.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class AirMeshNodeProfileTest {
@@ -234,7 +234,7 @@ class AirMeshNodeProfileTest {
     }
 
     @Test
-    fun secondProfileUpdateWithinTenSecondsIsIgnoredByThePeer() = runBlocking {
+    fun aChangedNameIsAcceptedImmediatelyWithoutWaitingTheWindow() = runBlocking {
         val a = newNode(1)
         val b = newNode(2)
 
@@ -251,15 +251,16 @@ class AirMeshNodeProfileTest {
             assertTrue(a.setMyProfile("Alice", 3))
             awaitUntil("B shows Alice") { b.profiles.value[1]?.name == "Alice" }
 
-            // Change the name again before B's 10s window has passed (the clock
-            // is not advanced), so B must keep showing the first name.
+            // TASK R2 part 2: change the name again before any window has passed
+            // (the clock is not advanced) — B must show the new name right away.
             assertTrue(a.setMyProfile("Alicia", 5))
             assertEquals(MyProfile("Alicia", 5), a.myProfile.value)
 
-            awaitUntil("B processes and ignores the second announcement") {
-                b.events.value.any { it.text.contains("PROFILE from 1 ignored") }
-            }
-            assertEquals("Alice", b.profiles.value[1]!!.name)
+            awaitUntil("B shows Alicia immediately") { b.profiles.value[1]?.name == "Alicia" }
+            assertEquals(5, b.profiles.value[1]!!.colorIndex)
+
+            // The first learning of A's name was logged with its delay.
+            assertTrue(b.events.value.any { it.text.contains("profile: learned name for #1 after") })
         } finally {
             a.stop()
             b.stop()
