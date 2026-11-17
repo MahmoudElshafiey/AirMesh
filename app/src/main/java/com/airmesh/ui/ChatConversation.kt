@@ -50,6 +50,7 @@ import com.airmesh.chat.ChatDirection
 import com.airmesh.chat.ChatKind
 import com.airmesh.chat.ChatMessage
 import com.airmesh.chat.Contact
+import com.airmesh.chat.ConversationListBuilder
 import com.airmesh.node.LOCATION_STALE_AFTER_MS
 import com.airmesh.node.LocationFix
 import com.airmesh.protocol.LocationPayload
@@ -119,7 +120,8 @@ fun ChatConversationContent(
 
     // Timeline rows: messages merged with the peer's confirmed presence transitions; day
     // separators and grouping are decided purely (JVM-tested, TASK U5 part 3).
-    val peerDisplayName = senderNameFor(conversationId, contactById[conversationId], profiles)
+    // TASK R2 part 3: the live profile wins over the stored contact name.
+    val peerDisplayName = ConversationListBuilder.displayNameFor(conversationId, contactById[conversationId], profiles)
     val rows = remember(messages, presenceEvents, nowMs) {
         buildChatTimelineRows(messages, presenceEvents, peerDisplayName, nowMs)
     }
@@ -230,7 +232,8 @@ fun ChatConversationContent(
                     message = row.message,
                     newGroup = row.newGroup,
                     isMeshRoom = isMeshRoom,
-                    senderName = senderNameFor(row.message.originNode, contact, profiles),
+                    // TASK R2 part 3: the live profile wins over the stored contact name.
+                    senderName = ConversationListBuilder.displayNameFor(row.message.originNode, contact, profiles),
                     senderColorIndex = senderColorIndexFor(row.message.originNode, contact, profiles),
                     nowMs = nowMs,
                     myLastFix = myLastFix,

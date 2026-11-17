@@ -284,7 +284,8 @@ fun MeshScreen(
     val chatContact = if (chatConversationId != null && chatConversationId != MESH_CONVERSATION_ID) {
         contacts.firstOrNull { it.nodeId == chatConversationId }
     } else null
-    val chatTitle = chatConversationId?.let { ConversationListBuilder.titleFor(it, chatContact) }.orEmpty()
+    // TASK R2 part 3: the live profile wins over the stored contact name.
+    val chatTitle = chatConversationId?.let { ConversationListBuilder.titleFor(it, chatContact, profiles) }.orEmpty()
     // Room: live group size; direct chat: the peer's truthful presence line ("Not nearby" when unknown).
     val chatSubtitle: String? = when (chatConversationId) {
         null -> null
@@ -517,6 +518,8 @@ fun MeshScreen(
                         contacts = contacts,
                         livePresence = livePresence,
                         nowMs = nowMs,
+                        // TASK R2 part 3: row titles follow names that arrive late.
+                        profiles = profiles,
                         onOpenConversation = { navController.navigate(chatRoute(it)) },
                         homeEmptyState = homeEmptyState,
                         onGrantPermission = onRequestPermissions,
@@ -640,6 +643,8 @@ fun MeshScreen(
             contacts = contacts,
             livePresence = livePresence,
             nowMs = nowMs,
+            // TASK R2 part 3: sheet rows follow names that arrive late.
+            profiles = profiles,
             onOpenConversation = { id ->
                 showContactPicker = false
                 navController.navigate(chatRoute(id))
@@ -675,7 +680,7 @@ fun MeshScreen(
     contactInfoConversation?.let { id ->
         ContactInfoDialog(
             conversationId = id,
-            title = ConversationListBuilder.titleFor(id, contacts.firstOrNull { it.nodeId == id }),
+            title = ConversationListBuilder.titleFor(id, contacts.firstOrNull { it.nodeId == id }, profiles),
             isMeshRoom = id == MESH_CONVERSATION_ID,
             onCopyNodeId = { clipboardManager.setText(AnnotatedString("$id")) },
             onDismiss = { contactInfoConversation = null },

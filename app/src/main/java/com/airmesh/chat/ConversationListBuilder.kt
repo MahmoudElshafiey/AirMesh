@@ -1,5 +1,7 @@
 package com.airmesh.chat
 
+import com.airmesh.profile.ProfileInfo
+
 /**
  * Renders the conversation list (TASK D2 part 1): the pinned mesh room, then
  * conversations by last message time (newest first), then live contacts that do
@@ -61,9 +63,23 @@ object ConversationListBuilder {
         return items
     }
 
-    /** Display name of a peer: the announced name or "User #id". */
-    fun titleFor(conversationId: Int, contact: Contact?): String =
-        if (conversationId == MESH_CONVERSATION_ID) MESH_ROOM_TITLE else contact?.displayName ?: "User #$conversationId"
+    /**
+     * Display name for [nodeId] combining the live profiles flow with the stored
+     * contact (TASK R2 part 3): a known profile always wins — it is the freshest
+     * source and arrives over the mesh within seconds — so a late or changed name
+     * replaces "User #id" (or an older saved name) immediately. Without a profile,
+     * fall back to the contact's saved name; without either, the stable fallback.
+     */
+    fun displayNameFor(nodeId: Int, contact: Contact?, profiles: Map<Int, ProfileInfo>): String {
+        val profileName = profiles[nodeId]?.name?.trim()
+        if (!profileName.isNullOrEmpty()) return profileName
+        contact?.displayName?.takeIf { it.isNotBlank() }?.let { return it }
+        return "User #$nodeId"
+    }
+
+    /** Display name of a peer: the live profile, else the announced name or "User #id". */
+    fun titleFor(conversationId: Int, contact: Contact?, profiles: Map<Int, ProfileInfo> = emptyMap()): String =
+        if (conversationId == MESH_CONVERSATION_ID) MESH_ROOM_TITLE else displayNameFor(conversationId, contact, profiles)
 
     /** Up to two leading letters of the title's words; "?" when it has none. */
     fun initialsOf(title: String): String {

@@ -1,6 +1,7 @@
 package com.airmesh.chat
 
 import androidx.compose.runtime.Immutable
+import com.airmesh.profile.ProfileInfo
 import com.airmesh.presence.PresenceState as LivePresenceState
 
 /** One rendered row of the truthful-presence conversation list (TASK U5 part 2). */
@@ -35,13 +36,15 @@ object LiveConversationListBuilder {
         contacts: List<Contact>,
         livePresence: Map<Int, LivePresenceState>,
         nowMs: Long,
+        // TASK R2 part 3: the live profiles flow; titles follow names that arrive late.
+        profiles: Map<Int, ProfileInfo> = emptyMap(),
     ): List<LiveConversationItem> {
         val contactByNode = contacts.associateBy { it.nodeId }
         val summaryByConv = summaries.associateBy { it.conversationId }
 
         // 1) The mesh room is always first, even before any message exists.
         val items = mutableListOf(
-            itemForConversation(MESH_CONVERSATION_ID, summaryByConv[MESH_CONVERSATION_ID], null, livePresence),
+            itemForConversation(MESH_CONVERSATION_ID, summaryByConv[MESH_CONVERSATION_ID], null, livePresence, profiles),
         )
 
         // 2) Conversations with messages, newest last-message first (ties: id).
@@ -49,7 +52,7 @@ object LiveConversationListBuilder {
             .filter { it.conversationId != MESH_CONVERSATION_ID }
             .sortedWith(compareByDescending<ConversationSummary> { it.lastMessageAt }.thenBy { it.conversationId })
             .forEach { summary ->
-                items += itemForConversation(summary.conversationId, summary, contactByNode[summary.conversationId], livePresence)
+                items += itemForConversation(summary.conversationId, summary, contactByNode[summary.conversationId], livePresence, profiles)
             }
 
         // 3) Contacts in the people section (see [isInPeopleSection]) without a conversation yet:
@@ -63,10 +66,10 @@ object LiveConversationListBuilder {
             }
             .sortedWith(
                 compareBy<Contact> { !isOnline(livePresence[it.nodeId]) }
-                    .thenBy { ConversationListBuilder.titleFor(it.nodeId, it) },
+                    .thenBy { ConversationListBuilder.titleFor(it.nodeId, it, profiles) },
             )
             .forEach { contact ->
-                items += itemForConversation(contact.nodeId, null, contact, livePresence)
+                items += itemForConversation(contact.nodeId, null, contact, livePresence, profiles)
             }
 
         return items
@@ -92,9 +95,10 @@ object LiveConversationListBuilder {
         summary: ConversationSummary?,
         contact: Contact?,
         livePresence: Map<Int, LivePresenceState>,
+        profiles: Map<Int, ProfileInfo>,
     ): LiveConversationItem {
         val isMeshRoom = conversationId == MESH_CONVERSATION_ID
-        val title = ConversationListBuilder.titleFor(conversationId, contact)
+        val title = ConversationListBuilder.titleFor(conversationId, contact, profiles)
         return LiveConversationItem(
             conversationId = conversationId,
             title = title,

@@ -41,6 +41,7 @@ import com.airmesh.chat.ConversationSummary
 import com.airmesh.chat.LiveConversationItem
 import com.airmesh.chat.LiveConversationListBuilder
 import com.airmesh.chat.MESH_CONVERSATION_ID
+import com.airmesh.profile.ProfileInfo
 import com.airmesh.presence.PresenceState as LivePresenceState
 import com.airmesh.presence.formatPresenceLabel
 import com.airmesh.presence.presenceLabel
@@ -66,6 +67,9 @@ fun ChatsHomeContent(
     contacts: List<Contact>,
     livePresence: Map<Int, LivePresenceState>,
     nowMs: Long,
+    // TASK R2 part 3: the live profiles flow; row titles follow names that arrive late.
+    // The default keeps previews compiling without a mesh connection.
+    profiles: Map<Int, ProfileInfo> = emptyMap(),
     onOpenConversation: (Int) -> Unit,
     // What the empty state below the pinned room should show (TASK U4 part 1): kind + headline
     // + optional caption + manual-connect button flag. Defaults keep previews compiling;
@@ -76,8 +80,9 @@ fun ChatsHomeContent(
     onManualConnect: () -> Unit = {},
     onUiEventLog: (String) -> Unit = {},
 ) {
-    val rows = remember(summaries, contacts, livePresence, nowMs) {
-        LiveConversationListBuilder.build(summaries, contacts, livePresence, nowMs)
+    // profiles in the key: a name arriving late must re-render the row titles.
+    val rows = remember(summaries, contacts, livePresence, nowMs, profiles) {
+        LiveConversationListBuilder.build(summaries, contacts, livePresence, nowMs, profiles)
     }
     // The builder's flat list splits into the three sections by construction: the room is
     // id 0, conversation rows carry a last-message time, people rows do not.
@@ -311,6 +316,9 @@ internal fun ContactPickerSheet(
     contacts: List<Contact>,
     livePresence: Map<Int, LivePresenceState>,
     nowMs: Long,
+    // TASK R2 part 3: the live profiles flow; sheet rows follow names that arrive late.
+    // The default keeps previews compiling without a mesh connection.
+    profiles: Map<Int, ProfileInfo> = emptyMap(),
     onOpenConversation: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -340,7 +348,7 @@ internal fun ContactPickerSheet(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Avatar(
-                                name = ConversationListBuilder.titleFor(contact.nodeId, contact),
+                                name = ConversationListBuilder.titleFor(contact.nodeId, contact, profiles),
                                 colorIndex = contact.colorIndex,
                                 size = 40.dp,
                                 livePresence = state.takeIf { it != LivePresenceState.UNKNOWN },
@@ -348,7 +356,7 @@ internal fun ContactPickerSheet(
                             Spacer(modifier = Modifier.width(AirMeshSpacing.md))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = ConversationListBuilder.titleFor(contact.nodeId, contact),
+                                    text = ConversationListBuilder.titleFor(contact.nodeId, contact, profiles),
                                     color = MaterialTheme.colorScheme.onSurface,
                                     style = MaterialTheme.typography.bodyLarge,
                                     maxLines = 1,
