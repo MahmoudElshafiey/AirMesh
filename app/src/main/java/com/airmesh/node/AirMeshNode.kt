@@ -188,6 +188,10 @@ class AirMeshNode(
     private val profileAnnounceIntervalMs: Long = DEFAULT_PROFILE_ANNOUNCE_INTERVAL_MS,
     /** When true and no name is set yet, announce "User #<localNodeId>" (TASK D2 part 3). */
     private val announceWithoutName: Boolean = false,
+    // TASK R2 part 1: PROFILE announcement timing knobs. Defaults keep the spec'd
+    // behavior; node tests shorten them to stay fast on real time.
+    private val profileBurstDelaysMs: List<Long> = ProfileAnnouncePlanner.DEFAULT_BURST_DELAYS_MS,
+    private val profileNewOriginJitterRangeMs: LongRange = ProfileAnnouncePlanner.DEFAULT_NEW_ORIGIN_JITTER_RANGE_MS,
 ) {
 
     companion object {
@@ -267,8 +271,13 @@ class AirMeshNode(
     private val _profiles = MutableStateFlow<Map<Int, ProfileInfo>>(profileDirectory.snapshot())
     val profiles: StateFlow<Map<Int, ProfileInfo>> = _profiles.asStateFlow()
 
-    /** Time (injected [clock]) at which we last originated a PROFILE frame. */
-    @Volatile private var lastProfileAnnounceAt = 0L
+    /**
+     * Owns the PROFILE announcement timing (TASK R2 part 1): created in [start] on
+     * a real-time scope that dies with the node, so burst retries run on wall clock
+     * even when tests drive the node's own dispatcher with virtual time. Null while
+     * stopped; callers fall back to a direct announce or skip.
+     */
+    @Volatile private var profilePlanner: ProfileAnnouncePlanner? = null
 
     /** Node ids with a live handshaken transport socket. */
     val neighbors: StateFlow<Set<Int>> = transport.neighbors
@@ -386,6 +395,16 @@ class AirMeshNode(
 
             val nodeScope = CoroutineScope(SupervisorJob() + dispatcher)
             scope = nodeScope
+            // The planner schedules on real time (Dispatchers.IO, like the announce
+            // itself used to run), but as a child of [nodeScope] so stop() cancels it.
+            profilePlanner = ProfileAnnouncePlanner(
+                scope = CoroutineScope(nodeScope.coroutineContext + Dispatchers.IO),
+                clock = clock,
+                onAnnounce = { announceProfile() },
+                burstDelaysMs = profileBurstDelaysMs,
+                newOriginJitterRangeMs = profileNewOriginJitterRangeMs,
+                periodicIntervalMs = profileAnnounceIntervalMs,
+            )
             nodeScope.launch {
                 transport.incoming.collect { packet -> onIncoming(packet) }
             }
@@ -407,6 +426,7 @@ class AirMeshNode(
             running = false
             oldScope = scope
             scope = null
+            profilePlanner = null
         }
 
         oldScope?.cancel()
@@ -495,7 +515,13 @@ class AirMeshNode(
         profileStorage.putString(PROFILE_COLOR_KEY, colorIndex.toString())
         _myProfile.value = MyProfile(sanitized, colorIndex)
         eventLog.log("profile set: name=$sanitized color=$colorIndex")
-        announceProfile()
+        val planner = profilePlanner
+        if (planner != null) {
+            planner.onProfileSetOrChanged()
+        } else {
+            // Node not started yet: keep the historical immediate announce.
+            announceProfile()
+        }
         true
     }
 
@@ -512,37 +538,38 @@ class AirMeshNode(
      * Floods our current profile as one PROFILE frame. No-op while neither a real
      * name nor the anonymous fallback is available. PROFILE frames are not stored
      * (see [directFramePolicy]), so with no neighbors nothing is queued; the
-     * neighbor-up trigger in [onNeighbors] announces as soon as a link appears.
+     * planner's neighbor-up burst in [onNeighbors] retries shortly after a link appears.
+     *
+     * @return true when a frame was actually originated, so the announcement cap
+     *   ([ProfileAnnouncePlanner]) only counts real floods and no-op announces
+     *   (no name yet) never consume budget or move the periodic gate.
      */
-    private suspend fun announceProfile() {
-        val displayName = displayNameForAnnounce() ?: return
+    private suspend fun announceProfile(): Boolean {
+        val displayName = displayNameForAnnounce() ?: return false
 
         try {
             val payload = ProfilePayload(displayName, _myProfile.value.colorIndex).encode()
             val frame = router.originate(FrameType.PROFILE, payload)
-            lastProfileAnnounceAt = clock()
             eventLog.log("originated PROFILE seq=${frame.seq} ttl=${frame.ttl}")
+            return true
         } catch (error: Exception) {
             eventLog.log("profile announce failed: ${error.javaClass.simpleName}: ${error.message}")
+            return false
         }
     }
 
     /**
-     * Re-announces our PROFILE at most once per [profileAnnounceIntervalMs]
-     * (measured with the injected [clock]) while at least one neighbor is live.
-     * Nodes that joined after the original flood — or whose directory evicted
-     * us — learn our name this way. Polls on the existing replay cadence so no
-     * new interval knob is needed.
+     * Re-announces our PROFILE at most once per [profileAnnounceIntervalMs] while
+     * at least one neighbor is live (TASK R2 part 1 moved the interval gate and
+     * the per-minute cap into [ProfileAnnouncePlanner]). Nodes that joined after
+     * the original flood — or whose directory evicted us — learn our name this
+     * way. Polls on the existing replay cadence so no new interval knob is needed.
      */
     private suspend fun periodicProfileAnnounce() {
         while (currentCoroutineContext().isActive) {
             delay(replayIntervalMs)
-            val now = clock()
-            if (displayNameForAnnounce() != null &&
-                transport.neighbors.value.isNotEmpty() &&
-                now - lastProfileAnnounceAt >= profileAnnounceIntervalMs
-            ) {
-                announceProfile()
+            if (displayNameForAnnounce() != null && transport.neighbors.value.isNotEmpty()) {
+                profilePlanner?.considerPeriodicAnnounce(true)
             }
         }
     }
@@ -651,6 +678,13 @@ class AirMeshNode(
         // Presence input (TASK D2 part 3): any decoded frame proves its ORIGIN is
         // alive, whether we deliver it or only relay it.
         _nodeActivity.tryEmit(NodeActivity(frame.nodeId, clock()))
+        // New-origin trigger (TASK R2 part 1): traffic from an origin whose profile
+        // we do not know yet means a newcomer is around; the planner re-announces
+        // our own name shortly so it learns us too. Checked BEFORE processing, so
+        // the first PROFILE from a stranger also counts as "new".
+        if (frame.nodeId != localNodeId && !_profiles.value.containsKey(frame.nodeId)) {
+            profilePlanner?.onNewOriginSeen(frame.nodeId)
+        }
         router.onFrameReceived(frame, packet.senderId)
     }
 
@@ -743,6 +777,9 @@ class AirMeshNode(
                     payload.avatarColorIndex,
                 )
                 _profiles.value = profileDirectory.snapshot()
+                // TASK R2 part 1: their PROFILE arrived, so our retry burst for them
+                // is done — cancel the rest of it (receipt counts, not acceptance).
+                profilePlanner?.onProfileReceivedFrom(frame.nodeId)
                 if (accepted) {
                     eventLog.log("delivered PROFILE node=${frame.nodeId} seq=${frame.seq}")
                 } else {
@@ -822,10 +859,11 @@ class AirMeshNode(
         for (neighborId in added.sorted()) {
             eventLog.log("neighbor up: $neighborId")
             replayFor(neighborId, ReplayTrigger.APPEARED)
-            // Let the newcomer know who we are right away; a no-op while no
-            // name is set. The directory's 10s window absorbs any overlap with
-            // a store-and-forward replay of an earlier PROFILE frame.
-            announceProfile()
+            // TASK R2 part 1: instead of one immediate announce, the planner runs a
+            // short retry burst — PROFILE frames are not stored, so a lost first
+            // shot used to wait for the periodic re-announce. A no-op while no name
+            // is set; the directory's 10s window absorbs duplicates.
+            profilePlanner?.onNeighborUp(neighborId)
         }
     }
 
