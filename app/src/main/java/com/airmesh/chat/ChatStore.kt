@@ -27,6 +27,13 @@ interface ChatStore {
     /** Marks every unread IN message of [conversationId] as read. */
     suspend fun markRead(conversationId: Int)
 
+    /**
+     * One-time startup repair (TASK R1 part 1): marks every OUT row read and returns how many
+     * rows changed. Outgoing rows are always inserted read by [ChatRepository]; this only fixes
+     * legacy rows written before that rule, so it is safe to run on every start.
+     */
+    suspend fun repairOutgoingRead(): Int
+
     /** One rollup per conversation that has at least one row. */
     val summaries: Flow<List<ConversationSummary>>
 

@@ -240,6 +240,10 @@ class MeshActivity : ComponentActivity() {
                         val conversationSummaries by service.chatStore.summaries.collectAsStateWithLifecycle(initialValue = emptyList())
                         val contacts by service.chatStore.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
 
+                        // One-time startup repair (TASK R1 part 1): legacy OUT rows may predate the
+                        // always-read rule; the update is idempotent, so re-creation is a no-op.
+                        LaunchedEffect(service) { service.chatRepository.repairOutgoingRead() }
+
                         MeshScreen(
                             nodeId = service.nodeId,
                             connectorState = connectorState,

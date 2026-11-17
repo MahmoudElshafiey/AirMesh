@@ -19,7 +19,7 @@ class ChatRepositoryTest {
         runBlocking { store.messages(conversationId).first() }
 
     @Test
-    fun incomingBroadcastLandsInTheMeshRoomReadAndSent() = runBlocking {
+    fun incomingBroadcastLandsInTheMeshRoomUnreadAndSent() = runBlocking {
         repo.onIncomingBroadcast(originNode = 7, text = "hello mesh", originSeq = 3)
 
         val row = rows(MESH_CONVERSATION_ID).single()
@@ -30,7 +30,8 @@ class ChatRepositoryTest {
         assertEquals(3, row.originSeq)
         assertEquals(now, row.createdAt)
         assertEquals(ChatStatus.SENT, row.status)
-        assertTrue(row.isRead)
+        // TASK R1 part 1: the room follows direct-chat rules — unread until opened.
+        assertFalse(row.isRead)
     }
 
     @Test

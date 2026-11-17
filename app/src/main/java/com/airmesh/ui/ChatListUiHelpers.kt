@@ -1,5 +1,6 @@
 package com.airmesh.ui
 
+import com.airmesh.chat.ConversationSummary
 import com.airmesh.chat.NodePresence
 import com.airmesh.chat.PresenceState
 import java.time.Instant
@@ -77,3 +78,9 @@ fun unreadBadgeText(count: Int): String = when {
     count > 99 -> "99+"
     else -> count.toString()
 }
+
+/**
+ * Bottom-bar Chats tab badge (TASK R1 part 1): the NUMBER OF CONVERSATIONS that have unread
+ * messages — never a message total, so one chat with five unreads still shows "1".
+ */
+fun chatsTabBadgeCount(summaries: List<ConversationSummary>): Int = summaries.count { it.unreadCount > 0 }

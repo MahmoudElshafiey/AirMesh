@@ -50,6 +50,8 @@ class RoomChatStore(private val database: ChatDatabase) : ChatStore {
         messageDao.markRead(conversationId)
     }
 
+    override suspend fun repairOutgoingRead(): Int = messageDao.repairOutgoingRead()
+
     /**
      * Derived from one newest-first query so every summary is built from a single
      * consistent snapshot; the table is capped by retention, so this stays cheap.

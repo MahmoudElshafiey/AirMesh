@@ -33,6 +33,10 @@ interface ChatMessageDao {
     )
     suspend fun markRead(conversationId: Int)
 
+    /** One-time startup repair (TASK R1 part 1): legacy OUT rows may predate the always-read rule. */
+    @Query("UPDATE chat_messages SET isRead = 1 WHERE direction = 'OUT' AND isRead = 0")
+    suspend fun repairOutgoingRead(): Int
+
     /** One conversation, oldest first (ties broken by row id). */
     @Query("SELECT * FROM chat_messages WHERE conversationId = :conversationId ORDER BY createdAt ASC, id ASC")
     fun messages(conversationId: Int): Flow<List<ChatMessageEntity>>

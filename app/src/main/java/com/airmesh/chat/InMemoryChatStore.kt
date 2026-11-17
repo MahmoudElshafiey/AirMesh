@@ -61,6 +61,17 @@ class InMemoryChatStore : ChatStore {
         }
     }
 
+    override suspend fun repairOutgoingRead(): Int = synchronized(lock) {
+        val changed = rows.count { it.direction == ChatDirection.OUT && !it.isRead }
+        if (changed > 0) {
+            rows = rows.map { row ->
+                if (row.direction == ChatDirection.OUT && !row.isRead) row.copy(isRead = true) else row
+            }
+            allRows.value = rows
+        }
+        changed
+    }
+
     override val summaries: Flow<List<ConversationSummary>> = allRows.map { all ->
         all.groupByTo(LinkedHashMap(), ChatMessage::conversationId).map { (id, msgs) ->
             // Ties on createdAt break by row id: the later insert is "last".

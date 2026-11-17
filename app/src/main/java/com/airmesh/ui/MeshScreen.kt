@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -75,6 +76,7 @@ import com.airmesh.transport.ConnectorState
 import com.airmesh.ui.components.Avatar
 import com.airmesh.ui.components.ChipTone
 import com.airmesh.ui.components.StatusChip
+import com.airmesh.ui.components.UnreadBadge
 import com.airmesh.ui.theme.AirMeshSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -335,6 +337,10 @@ fun MeshScreen(
         emptyStateVisible = homeEmptyStateVisible,
     )
 
+    // Chats tab badge (TASK R1 part 1): the NUMBER OF CONVERSATIONS with unread messages — never
+    // a message total. Pure helper so the rule is JVM-tested.
+    val chatsTabBadge = remember(conversationSummaries) { chatsTabBadgeCount(conversationSummaries) }
+
     // Chats empty state (TASK U4 part 1): pure mapping from the controller state, how long we
     // have been Searching, and the count of classic (non-AirMesh) Wi-Fi Direct devices. The timer
     // is fed on every nowMs tick so the 90 s manual-connect hint appears on time even though the
@@ -466,7 +472,20 @@ fun MeshScreen(
                         NavigationBarItem(
                             selected = baseRoute(currentRoute) == t.route,
                             onClick = { navController.navigateToTopLevel(t.route) },
-                            icon = { Icon(imageVector = t.icon, contentDescription = t.label) },
+                            icon = {
+                                // Unread badge on the Chats tab only (TASK R1 part 1).
+                                if (t == MeshTab.CHAT && chatsTabBadge > 0) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(imageVector = t.icon, contentDescription = t.label)
+                                        UnreadBadge(
+                                            count = chatsTabBadge,
+                                            modifier = Modifier.align(Alignment.TopEnd).offset(x = 14.dp, y = (-6).dp),
+                                        )
+                                    }
+                                } else {
+                                    Icon(imageVector = t.icon, contentDescription = t.label)
+                                }
+                            },
                             label = { Text(t.label) },
                         )
                     }

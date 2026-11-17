@@ -21,7 +21,10 @@ class ChatRepository(
         const val RETENTION_PER_CONVERSATION = 500
     }
 
-    /** A broadcast text message received from [originNode]. Mesh room, read, SENT. */
+    /**
+     * A broadcast text message received from [originNode]. Mesh room, unread until the room is
+     * opened (TASK R1 part 1: the room follows direct-chat rules), SENT.
+     */
     suspend fun onIncomingBroadcast(originNode: Int, text: String, originSeq: Int) {
         insertAndPrune(
             ChatMessage(
@@ -33,12 +36,12 @@ class ChatRepository(
                 originSeq = originSeq,
                 createdAt = clock(),
                 status = ChatStatus.SENT,
-                isRead = true,
+                isRead = false,
             ),
         )
     }
 
-    /** A location share received from [originNode]. Mesh room, read, SENT. */
+    /** A location share received from [originNode]. Mesh room, unread until opened, SENT. */
     suspend fun onIncomingLocation(
         originNode: Int,
         latitudeE6: Int,
@@ -58,7 +61,7 @@ class ChatRepository(
                 originSeq = originSeq,
                 createdAt = clock(),
                 status = ChatStatus.SENT,
-                isRead = true,
+                isRead = false,
             ),
         )
     }
@@ -143,6 +146,13 @@ class ChatRepository(
 
     /** The user opened a conversation: all its incoming rows become read. */
     suspend fun markRead(conversationId: Int) = store.markRead(conversationId)
+
+    /**
+     * One-time startup repair (TASK R1 part 1): marks every OUT row read. Current code always
+     * inserts outgoing rows read, so this only fixes legacy rows written by older versions; it is
+     * idempotent and returns the number of rows changed.
+     */
+    suspend fun repairOutgoingRead(): Int = store.repairOutgoingRead()
 
     private suspend fun recordOutgoing(
         conversationId: Int,

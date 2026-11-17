@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -42,6 +43,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.airmesh.chat.ChatDirection
 import com.airmesh.chat.ChatKind
 import com.airmesh.chat.ChatMessage
@@ -58,6 +62,9 @@ import com.airmesh.ui.components.Avatar
 import com.airmesh.ui.theme.LocalAirMeshColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+
+/** Debounce for marking read (TASK R1 part 1): coalesces bursts of IN arrivals into one update. */
+private const val MARK_READ_DEBOUNCE_MS = 300L
 
 /**
  * Redesigned conversation screen (TASK U2 part 1): WhatsApp-style bubbles with tails,
@@ -151,10 +158,26 @@ fun ChatConversationContent(
             }
     }
 
-    // Mark incoming messages read while this screen is visible (TASK U2 part 1). The store
+    // Mark incoming messages read ONLY while this screen is RESUMED (TASK R1 part 1): once after
+    // load, then debounced [MARK_READ_DEBOUNCE_MS] per new IN arrival so bursts coalesce into one
+    // update; re-runs when the app returns to foreground with unread rows. Arrivals while the
+    // screen is backgrounded (or another chat is open) stay unread until visible again. The store
     // re-emits with isRead=true, so the effect settles after one round trip.
-    LaunchedEffect(messages) {
-        if (messages.any { it.direction == ChatDirection.IN && !it.isRead }) onMarkRead(conversationId)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumed by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED)
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event -> resumed = event == Lifecycle.Event.ON_RESUME }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(resumed, messages) {
+        if (!resumed) return@LaunchedEffect
+        if (messages.any { it.direction == ChatDirection.IN && !it.isRead }) {
+            delay(MARK_READ_DEBOUNCE_MS)
+            onMarkRead(conversationId)
+        }
     }
 
     var notDeliveredMessage by remember { mutableStateOf<ChatMessage?>(null) }
