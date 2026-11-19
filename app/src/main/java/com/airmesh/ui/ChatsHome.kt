@@ -189,7 +189,8 @@ private fun MeshRoomRow(row: LiveConversationItem, nowMs: Long, onClick: () -> U
                     Spacer(modifier = Modifier.width(AirMeshSpacing.sm))
                     Text(
                         text = timeText,
-                        color = if (row.unreadCount > 0) colors.primary else colors.onSurfaceVariant,
+                        // TASK S3: the unread emphasis on the time label is gated by the flag.
+                        color = if (UiFlags.SHOW_UNREAD_UI && row.unreadCount > 0) colors.primary else colors.onSurfaceVariant,
                         style = MaterialTheme.typography.labelMedium,
                     )
                 }
@@ -203,7 +204,8 @@ private fun MeshRoomRow(row: LiveConversationItem, nowMs: Long, onClick: () -> U
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                if (row.unreadCount > 0) {
+                // TASK S3: the numeric badge is hidden while the flag is off.
+                if (unreadBadgeVisible(UiFlags.SHOW_UNREAD_UI, row.unreadCount)) {
                     Spacer(modifier = Modifier.width(AirMeshSpacing.sm))
                     UnreadBadge(count = row.unreadCount)
                 }

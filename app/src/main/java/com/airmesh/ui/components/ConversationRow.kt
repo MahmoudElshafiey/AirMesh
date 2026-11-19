@@ -18,8 +18,10 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.airmesh.chat.PresenceState
 import com.airmesh.presence.PresenceState as LivePresenceState
+import com.airmesh.ui.UiFlags
 import com.airmesh.ui.theme.AirMeshSpacing
 import com.airmesh.ui.theme.AirMeshTheme
+import com.airmesh.ui.unreadBadgeVisible
 
 /**
  * One row of the conversation list (TASK U1 part 1): avatar with presence, title and
@@ -63,7 +65,8 @@ fun ConversationRow(
                     Spacer(modifier = Modifier.width(AirMeshSpacing.sm))
                     Text(
                         text = timeText,
-                        color = if (unreadCount > 0) colors.primary else colors.onSurfaceVariant,
+                        // TASK S3: the unread emphasis on the time label is gated by the flag.
+                        color = if (UiFlags.SHOW_UNREAD_UI && unreadCount > 0) colors.primary else colors.onSurfaceVariant,
                         style = MaterialTheme.typography.labelMedium,
                     )
                 }
@@ -77,7 +80,8 @@ fun ConversationRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                if (unreadCount > 0) {
+                // TASK S3: the numeric badge is hidden while the flag is off.
+                if (unreadBadgeVisible(UiFlags.SHOW_UNREAD_UI, unreadCount)) {
                     Spacer(modifier = Modifier.width(AirMeshSpacing.sm))
                     UnreadBadge(count = unreadCount)
                 }

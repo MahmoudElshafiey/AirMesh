@@ -468,8 +468,9 @@ fun MeshScreen(
                             selected = baseRoute(currentRoute) == t.route,
                             onClick = { navController.navigateToTopLevel(t.route) },
                             icon = {
-                                // Unread badge on the Chats tab only (TASK R1 part 1).
-                                if (t == MeshTab.CHAT && chatsTabBadge > 0) {
+                                // Unread badge on the Chats tab only (TASK R1 part 1); hidden while
+                                // UiFlags.SHOW_UNREAD_UI is off (TASK S3).
+                                if (t == MeshTab.CHAT && chatsTabBadgeVisible(UiFlags.SHOW_UNREAD_UI, conversationSummaries)) {
                                     Box(contentAlignment = Alignment.Center) {
                                         Icon(imageVector = t.icon, contentDescription = t.label)
                                         UnreadBadge(

@@ -135,17 +135,19 @@ fun ChatConversationContent(
         unreadAtOpen = messages.filter { it.direction == ChatDirection.IN && !it.isRead }.mapTo(mutableSetOf()) { it.id }
     }
     val unreadDividerInfo = remember(rows, unreadAtOpen) {
-        unreadDivider(rows, unreadAtOpen ?: emptySet())
+        // TASK S3: flag off → no divider model at all; the initial scroll lands at the bottom.
+        unreadDividerModel(UiFlags.SHOW_UNREAD_UI, rows, unreadAtOpen ?: emptySet())
     }
 
     // One flat list for the column: the timeline rows plus — when there were unreads at open
-    // time — the divider inserted right before the first of them. Its index in this list is
-    // exactly [unreadDividerInfo.position], which is what the initial scroll targets.
+    // time and the flag is on — the divider inserted right before the first of them. Its index in
+    // this list is exactly [unreadDividerInfo.position], which is what the initial scroll targets.
     val displayItems = remember(rows, unreadDividerInfo) {
-        val cut = unreadDividerInfo.position
-        if (cut == null) rows.map { TimelineDisplayItem.Row(it) }
+        val info = unreadDividerInfo
+        val cut = info?.position
+        if (info == null || cut == null) rows.map { TimelineDisplayItem.Row(it) }
         else rows.take(cut).map { TimelineDisplayItem.Row(it) } +
-            TimelineDisplayItem.UnreadDivider(unreadDividerInfo.count) +
+            TimelineDisplayItem.UnreadDivider(info.count) +
             rows.drop(cut).map { TimelineDisplayItem.Row(it) }
     }
 
@@ -176,7 +178,7 @@ fun ChatConversationContent(
             if (!didInitialScroll) {
                 // First load of this chat: land on the unread divider when there is one, else at
                 // the bottom exactly as before (TASK R1 part 2).
-                listState.animateScrollToItem(unreadDividerInfo.position ?: displayItems.lastIndex)
+                listState.animateScrollToItem(unreadDividerInfo?.position ?: displayItems.lastIndex)
                 didInitialScroll = true
             } else {
                 listState.animateScrollToItem(displayItems.lastIndex)
@@ -289,8 +291,9 @@ fun ChatConversationContent(
                 }
             }
         }
-        // "New messages" chip: shown while the user reads history and something arrived.
-        if (!follow && unseenCount > 0) {
+        // "New messages" chip: shown while the user reads history and something arrived; hidden
+        // while UiFlags.SHOW_UNREAD_UI is off (TASK S3).
+        if (newMessagesChipVisible(UiFlags.SHOW_UNREAD_UI, follow, unseenCount)) {
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterHorizontally)
