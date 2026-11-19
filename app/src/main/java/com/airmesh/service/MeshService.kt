@@ -66,6 +66,7 @@ import com.airmesh.transport.RecoveryPeerInfo
 import com.airmesh.transport.RecoveryRecorder
 import com.airmesh.transport.RecoverySnapshot
 import com.airmesh.transport.RecoverySupervisor
+import com.airmesh.transport.RememberedOwnerStore
 import com.airmesh.transport.StaleGroupGuardState
 import com.airmesh.transport.TieBreakToken
 import com.airmesh.transport.TimelineRecorder
@@ -170,6 +171,9 @@ class MeshService : Service() {
 
     /** Persistence behind [recoverySupervisorEnabled]; created in [onCreate]. */
     private lateinit var recoverySupervisorFlagStore: RecoverySupervisorFlagStore
+
+    /** TASK T1 part C1: remembers the owner we last joined, for reconnection when DNS-SD is silent. */
+    private lateinit var rememberedOwnerStore: RememberedOwnerStore
 
     /** When we became owner of the current group (TASK S1 part 1); null when not owning one. */
     private var ownGroupFormedAtMs: Long? = null
@@ -453,6 +457,8 @@ class MeshService : Service() {
         // The recovery supervisor stays off until the user opts in from the Debug card (TASK S1 part 1).
         recoverySupervisorFlagStore = SharedPreferencesRecoverySupervisorFlagStore(this)
         _recoverySupervisorEnabled.value = recoverySupervisorFlagStore.load()
+        // TASK T1 part C1: the remembered-owner record survives restarts (SharedPreferences).
+        rememberedOwnerStore = RememberedOwnerStore(SharedPreferencesRememberedOwnerStorage(this))
 
         // The election ranks by (node id, tie-break token); our own Wi-Fi Direct
         // address is not used at all — on many devices it stays a placeholder that
@@ -810,6 +816,9 @@ class MeshService : Service() {
                             autoEvent(AutoMeshEvent.GroupGone, "group gone")
                         }
                     }
+                    // TASK T1 part C1: we just joined someone — remember that owner so auto-mesh
+                    // can re-join it after a restart even when DNS-SD stays silent.
+                    if (cs.groupFormed && newRole == P2pRole.CLIENT) rememberOwnerIfClient()
                 }
 
                 // Keep our ad's owner flag current (TASK R3 part 2): o1 only while we own a live
@@ -832,6 +841,31 @@ class MeshService : Service() {
         // If the system restarts us after process death, resume the mesh; the
         // connector's stale-group cleanup handles any leftover P2P group.
         return START_STICKY
+    }
+
+    /**
+     * TASK T1 part C1: remembers the owner we just joined. The CONNECTED radio peer's device
+     * address is what manager.connect() needs later (the connection info's groupOwnerAddress is
+     * an IP, not a MAC), and our only live neighbor as a client is the owner itself (hub
+     * topology). Both may arrive slightly after the role change, so poll briefly instead of
+     * reading once.
+     */
+    private fun rememberOwnerIfClient() {
+        serviceScope.launch {
+            val deadline = System.currentTimeMillis() + REMEMBER_OWNER_WAIT_MS
+            while (System.currentTimeMillis() < deadline) {
+                val cs = connector.state.value
+                if (!cs.groupFormed || cs.role != P2pRole.CLIENT) return@launch // left the group: forget it
+                val ownerAddress = cs.peers.firstOrNull { it.status == WifiP2pDevice.CONNECTED }?.deviceAddress
+                val ownerId = node.neighbors.value.firstOrNull()
+                if (ownerAddress != null && ownerId != null) {
+                    rememberedOwnerStore.record(ownerAddress, ownerId)
+                    _eventLog.log("auto: remembered owner #$ownerId at $ownerAddress")
+                    return@launch
+                }
+                delay(REMEMBER_OWNER_POLL_MS)
+            }
+        }
     }
 
     /** Starts the mesh once; a second start while running is a no-op. */
@@ -1359,6 +1393,10 @@ class MeshService : Service() {
         private const val KEY_AUTO_MESH_ENABLED = "auto_mesh_enabled"
         /** TASK S1 part 1: no supervisor action while we own a group younger than this. */
         private const val RECOVERY_OWNER_GRACE_MS = 600_000L
+        /** TASK T1 part C1: how long to wait for the owner's address + node id after joining. */
+        private const val REMEMBER_OWNER_WAIT_MS = 15_000L
+        /** TASK T1 part C1: poll interval while waiting for both pieces of the record. */
+        private const val REMEMBER_OWNER_POLL_MS = 500L
         /** Ensures the initial DNS-SD strategy configuration is logged once per process. */
         private val loggedStartupStrategy = java.util.concurrent.atomic.AtomicBoolean(false)
     }

@@ -66,7 +66,23 @@ Status per part is updated as work progresses; final state in Part E.
     AirMeshNodeSequenceRestartTest 1/1; :app:compileDebugKotlin clean.
 
 ## Part C — remembered-owner reconnection
-- C1 RememberedOwnerStore: PENDING
+- C1 RememberedOwnerStore: DONE (commit hash filled in Part E)
+  - transport/RememberedOwnerStore.kt (pure): Record(deviceAddress, nodeId, recordedAtMs,
+    failedAttempts, nextAllowedAttemptAtMs); one pipe-separated string on disk so ANY corruption
+    reads as "no record"; cleared after MAX_FAILED_ATTEMPTS=3 failures or once older than
+    MAX_RECORD_AGE_MS=24 h (expiry clears the storage on read).
+  - service/SharedPreferencesRememberedOwnerStorage.kt: adapter in the same "airmesh_node" prefs
+    file as the sequence mark; commit() so the record is on disk before a crash can lose it.
+  - MeshService: on a role transition into CLIENT while formed, rememberOwnerIfClient() polls up
+    to 15 s (500 ms) for BOTH the CONNECTED radio peer's deviceAddress — a MAC, which is what
+    manager.connect() needs later; the connection info's groupOwnerAddress is an IP and unusable —
+    AND our only live neighbor (the owner itself in hub topology), then records and logs
+    "auto: remembered owner #id at address". Not gated on the auto switch: remembering is inert
+    unless the C2 policy acts, so manual mode is unaffected.
+  - Tests: RememberedOwnerStoreTest 7/7 green (round-trip incl. restart from the same storage;
+    expiry boundary exactly at 24 h + self-clearing; 3-failure clear; refreshSuccess reset of
+    count/pacing/timestamp; noteAttempt stamp; corrupt inputs -> null; mutating methods are no-ops
+    without a record). :app:compileDebugKotlin clean.
 - C2 RememberedOwnerPolicy in AutoMeshController: PENDING
 - C3 ownerProbe experiment + 25 s watchdog: PENDING
 
