@@ -40,6 +40,12 @@ import com.airmesh.protocol.FrameType
  *   default so pure-Kotlin callers (simulator) stay quiet.
  * @property policy optional per-frame veto hooks (TASK D1 part 2); the
  *   [FramePolicy.Default] keeps the historical forward-and-store behavior.
+ * @property initialSeq last sequence number used before this process started
+ *   (TASK T1 part B1). The next frame is `initialSeq + 1` (mod 65536), so a node
+ *   that restarts never reuses a number the dedup window may still remember.
+ *   Default 0 reproduces the historical start-at-1 behavior.
+ * @property onSeqAllocated called with every allocated sequence number, in order
+ *   (TASK T1 part B1). Lets the node persist a high-water mark; no-op by default.
  */
 class Router(
     private val localNodeId: Int,
@@ -53,6 +59,9 @@ class Router(
     private val log: (String) -> Unit = {},
     // Last on purpose: every existing Router(...) call compiles unchanged.
     private val policy: FramePolicy = FramePolicy.Default,
+    // TASK T1 part B1 — appended after [policy] so positional calls still compile.
+    private val initialSeq: Int = 0,
+    private val onSeqAllocated: (Int) -> Unit = {},
 ) {
 
     companion object {
@@ -68,14 +77,15 @@ class Router(
         private const val MAX_SEQ = 0xFFFF
     }
 
-    /** Sequence number of the last frame this node originated. */
-    private var lastSeq = 0
+    /** Sequence number of the last frame this node originated (TASK T1 part B1: may resume). */
+    private var lastSeq = initialSeq and MAX_SEQ
 
     init {
         require(localNodeId in 0..MAX_SEQ) {
             "localNodeId must fit in 16 bits: $localNodeId"
         }
         require(initialTtl in 1..0xFF) { "initialTtl must be in 1..255: $initialTtl" }
+        require(initialSeq in 0..MAX_SEQ) { "initialSeq must fit in 16 bits: $initialSeq" }
     }
 
     /**
@@ -188,10 +198,13 @@ class Router(
     /**
      * Allocates the next 16-bit sequence number, wrapping 65535 -> 0.
      * Synchronized so concurrent [originate] calls cannot share a sequence.
+     * TASK T1 part B1: every allocation is reported to [onSeqAllocated] so the
+     * node can persist a high-water mark across restarts.
      */
     @Synchronized
     private fun nextSeq(): Int {
         lastSeq = (lastSeq + 1) and MAX_SEQ
+        onSeqAllocated(lastSeq)
         return lastSeq
     }
 }
