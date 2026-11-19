@@ -275,6 +275,7 @@ class DiscoveryCoordinator(
             return
         }
         if (!peerScanActive) {
+            releaseStuckCycleIfAny(nowMs) // a cycle that never completes must not hold the radio forever
             val gate = ownerScanGate
             if (gate != null) {
                 // Owner merge-scan mode: the gate paces every scan — no startup
@@ -331,6 +332,24 @@ class DiscoveryCoordinator(
         issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
     }
 
+    /**
+     * Watchdog (TASK S1 part 3): a service cycle whose steps never complete — a lost framework
+     * callback, or a step failing on every retry — would otherwise hold [serviceDiscoveryActive]
+     * forever. In owner merge-scan mode the gate path then issues no further scans at all, which
+     * is why an empty owner stopped scanning after its first scan. After [STUCK_CYCLE_MS] we
+     * abandon the cycle; the rest of this same tick re-issues a fresh one (the 60 s refresh or
+     * the next gate firing paces it). Healthy cycles complete within seconds, so this only ever
+     * touches genuinely stuck ones.
+     */
+    private fun releaseStuckCycleIfAny(nowMs: Long) {
+        val last = lastCycleAtMs ?: return
+        if (!serviceDiscoveryActive || nowMs - last < STUCK_CYCLE_MS) return
+        log("dnssd: service cycle stuck for ${nowMs - last}ms — releasing the radio")
+        sequencer.reset() // abandon in-flight steps and their retries, like a manual scan does
+        serviceDiscoveryActive = false
+        lastCycleAtMs = null
+    }
+
     /** Stop the service scan entirely (auto-mesh paused, or the directory stopped). */
     fun stopService() {
         sequencer.reset()
@@ -359,6 +378,9 @@ class DiscoveryCoordinator(
 
         /** Startup scan burst offsets after entering Searching: +0.5 s, +6 s, +14 s. */
         val DEFAULT_BURST_OFFSETS_MS: List<Long> = listOf(500L, 6_000L, 14_000L)
+
+        /** A service cycle not complete after this long is stuck and gets released (TASK S1 part 3). */
+        const val STUCK_CYCLE_MS = 90_000L
 
         /** Burst scans use only strategy 1 or 2 (no discoverPeers and no service re-registration). */
         fun burstStrategy(strategy: Int): Int = if (strategy == 1) 1 else 2
