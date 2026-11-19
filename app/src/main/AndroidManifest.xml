@@ -83,6 +83,17 @@
             android:name=".service.MeshService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- TASK S2 item 5: shares the debug log file; paths are restricted to the logs folder. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.logfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

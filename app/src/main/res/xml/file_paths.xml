@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TASK S2 item 5: the only paths the log FileProvider may expose — the app's logs folder. -->
+<paths>
+    <external-files-path name="logs" path="logs/" />
+</paths>

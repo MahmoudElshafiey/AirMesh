@@ -207,6 +207,9 @@ class AirMeshNode(
         /** How often our PROFILE is re-announced while at least one neighbor lives. */
         const val DEFAULT_PROFILE_ANNOUNCE_INTERVAL_MS = 120_000L
 
+        /** How often the "PROFILE ignored" line may repeat for one node (TASK S2 item 3). */
+        private const val PROFILE_IGNORE_REPORT_INTERVAL_MS = 60_000L
+
         /** Storage key for this node's own display name (sanitized). */
         const val PROFILE_NAME_KEY = "profile_name"
 
@@ -285,6 +288,13 @@ class AirMeshNode(
      * runs synchronously inside [onIncoming], so no other thread touches it.
      */
     private val firstSeenAt = HashMap<Int, Long>()
+
+    /**
+     * Throttle for the "PROFILE ignored" line (TASK S2 item 3): last report time and suppressed
+     * count per node. Same confinement as [firstSeenAt] — only the incoming collector touches it.
+     */
+    private val profileIgnoreLastReportMs = HashMap<Int, Long>()
+    private val profileIgnoreSuppressedCount = HashMap<Int, Int>()
 
     /** Node ids with a live handshaken transport socket. */
     val neighbors: StateFlow<Set<Int>> = transport.neighbors
@@ -810,13 +820,33 @@ class AirMeshNode(
                         }
                     }
                 } else {
-                    eventLog.log("PROFILE from ${frame.nodeId} ignored: unchanged or too many rapid changes")
+                    noteProfileIgnored(frame.nodeId)
                 }
             },
             onFailure = { error ->
                 val reason = (error as? ProfileDecodeException)?.failure?.name ?: error.message.orEmpty()
                 eventLog.log("PROFILE from ${frame.nodeId} dropped: $reason")
             },
+        )
+    }
+
+    /**
+     * TASK S2 item 3: the ignore line used to fire on every duplicate PROFILE frame (each node
+     * re-announces every ~45 s), so it is reported once per node per 60 s with a count of the
+     * suppressed lines instead.
+     */
+    private fun noteProfileIgnored(nodeId: Int) {
+        val now = clock()
+        val lastReport = profileIgnoreLastReportMs[nodeId]
+        if (lastReport != null && now - lastReport < PROFILE_IGNORE_REPORT_INTERVAL_MS) {
+            profileIgnoreSuppressedCount[nodeId] = (profileIgnoreSuppressedCount[nodeId] ?: 0) + 1
+            return
+        }
+        val suppressed = profileIgnoreSuppressedCount.remove(nodeId) ?: 0
+        profileIgnoreLastReportMs[nodeId] = now
+        eventLog.log(
+            "PROFILE from $nodeId ignored: unchanged or too many rapid changes" +
+                if (suppressed > 0) " (+$suppressed similar lines suppressed)" else "",
         )
     }
 

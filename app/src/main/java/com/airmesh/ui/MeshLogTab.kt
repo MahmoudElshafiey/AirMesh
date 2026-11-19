@@ -3,7 +3,9 @@ package com.airmesh.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -28,6 +30,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -37,9 +40,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import com.airmesh.node.DebugLogFileWriter
 import com.airmesh.node.LogEntry
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Filter order for the chips: index 0 is "All" (no filter), then one per [LogCategory]. */
@@ -64,6 +70,9 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
     val context = LocalContext.current
     var filterIndex by rememberSaveable { mutableIntStateOf(0) }
     val selected = filterFromIndex(filterIndex)
+    // TASK S2 item 5: "Previous session" swaps the live log for the last process's file.
+    var showPrevious by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     // Filtering runs off the main thread (TASK U4 part 4): with up to 2000 lines a burst of log
     // updates must not block composition. The unfiltered list seeds the first frame so an empty
@@ -71,6 +80,12 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
     // it within one frame.
     val visible by produceState<List<LogEntry>>(initialValue = events, events, selected) {
         value = withContext(Dispatchers.Default) { events.filter { matchesFilter(it.text, selected) } }
+    }
+
+    // The previous process's rolling file is read on demand off the main thread; null while
+    // the toggle is off or the read is in flight.
+    val previousLines by produceState<List<String>?>(initialValue = null, showPrevious) {
+        value = if (showPrevious) withContext(Dispatchers.IO) { readPreviousSession(context) } else null
     }
 
     val listState = rememberLazyListState()
@@ -121,21 +136,60 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
             TextButton(onClick = onClearLog, enabled = events.isNotEmpty()) { Text("Clear") }
         }
 
+        // TASK S2 item 5: share the rolling log files and inspect the previous session's lines.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            TextButton(onClick = { scope.launch { shareLog(context) } }) { Text("Share log") }
+            FilterChip(
+                selected = showPrevious,
+                onClick = { showPrevious = !showPrevious },
+                label = { Text("Previous session") },
+            )
+        }
+
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 12.dp),
         ) {
-            if (visible.isEmpty()) {
-                item(key = "empty") {
-                    Text(
-                        if (events.isEmpty()) "Log is empty." else "No lines match this filter.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 24.dp),
-                    )
+            if (showPrevious) {
+                // The previous session's file replaces the live log; filters do not apply to it.
+                when (val lines = previousLines) {
+                    null -> item(key = "previous-loading") {
+                        Text(
+                            "Loading previous session…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 24.dp),
+                        )
+                    }
+
+                    else -> if (lines.isEmpty()) {
+                        item(key = "no-previous") {
+                            Text(
+                                "No previous session log.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 24.dp),
+                            )
+                        }
+                    } else {
+                        items(lines) { line ->
+                            Text(
+                                line,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(vertical = 1.dp),
+                            )
+                        }
+                    }
                 }
-            } else {
+            } else if (visible.isEmpty()) {
                 // Stable keys (TASK U4 part 4): EventLog assigns each line a monotonic seq, so
                 // appended lines never shift the identity of the rows already on screen.
                 items(visible, key = { it.seq }) { entry ->
@@ -157,4 +211,41 @@ private fun copyVisible(visible: List<LogEntry>, context: Context) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("AirMesh log", text))
     Toast.makeText(context, "Copied ${visible.size} lines", Toast.LENGTH_SHORT).show()
+}
+
+// TASK S2 item 5: the rolling debug files live in the app's external logs folder.
+private const val MAX_PREVIOUS_SESSION_LINES = 2000
+private const val SHARE_FILE_NAME = "airmesh-log-share.txt"
+
+private fun logsDir(context: Context): File? = context.getExternalFilesDir("logs")
+
+/** Last [MAX_PREVIOUS_SESSION_LINES] lines of the previous process's log file (empty if none). */
+private fun readPreviousSession(context: Context): List<String> {
+    val dir = logsDir(context) ?: return emptyList()
+    val file = File(dir, DebugLogFileWriter.PREVIOUS_DEBUG_LOG_FILE)
+    return runCatching {
+        file.readLines().filter { it.isNotBlank() }.takeLast(MAX_PREVIOUS_SESSION_LINES)
+    }.getOrDefault(emptyList())
+}
+
+/** Merges previous + current log files in time order and shares them via an ACTION_SEND intent. */
+private suspend fun shareLog(context: Context) {
+    val dir = logsDir(context) ?: run { toast(context, "No log folder available"); return }
+    val mergedFile = withContext(Dispatchers.IO) {
+        // The previous file holds the older lines, so it comes first in the merge.
+        val parts = listOf(DebugLogFileWriter.PREVIOUS_DEBUG_LOG_FILE, DebugLogFileWriter.DEBUG_LOG_FILE)
+            .mapNotNull { name -> runCatching { File(dir, name).readText() }.getOrNull()?.trimEnd('\n') }
+        if (parts.isEmpty()) null else File(dir, SHARE_FILE_NAME).apply { writeText(parts.joinToString("\n")) }
+    } ?: return toast(context, "No log file to share")
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.logfiles", mergedFile)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share AirMesh log"))
+}
+
+private fun toast(context: Context, message: String) {
+    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
 }

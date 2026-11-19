@@ -175,6 +175,14 @@ class TcpMeshTransport(
     val droppedCorruptFrames: Int
         get() = corruptFrames.get()
 
+    // TASK S2 item 1: post-handshake keepalive HELLOs are expected every 8 s, so they are
+    // counted silently instead of logged; the service reports them in its "tcp: stats" line.
+    private val keepAliveReceived = AtomicLong(0)
+
+    /** Keepalive HELLO frames received since start (they still count as link liveness). */
+    val keepAliveCount: Long
+        get() = keepAliveReceived.get()
+
     private val helloBytes: ByteArray = FrameCodec.encode(
         Frame(
             version = PROTOCOL_VERSION,
@@ -591,12 +599,11 @@ class TcpMeshTransport(
                 log("dropped frame from $remoteId: corrupt (CRC or decode failed)")
                 continue
             }
-            // Handshake traffic is transport-internal and never routed.
+            // Handshake traffic is transport-internal and never routed. A post-handshake HELLO is
+            // the 8 s keepalive probe: any received byte resets the read deadline, so it counts as
+            // link liveness — expected and silent, only counted (TASK S2 item 1).
             if (frame.type == FrameType.HELLO) {
-                log(
-                    "dropped frame type=HELLO len=${bytes.size} from $remoteId: " +
-                        "handshake already complete",
-                )
+                keepAliveReceived.incrementAndGet()
                 continue
             }
             log("recv frame type=${frame.type} len=${bytes.size} from $remoteId")

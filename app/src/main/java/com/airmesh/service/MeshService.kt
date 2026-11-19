@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.net.wifi.p2p.WifiP2pDevice
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
@@ -18,7 +19,9 @@ import com.airmesh.chat.ChatRepository
 import com.airmesh.chat.ChatStore
 import com.airmesh.chat.MESH_CONVERSATION_ID
 import com.airmesh.node.AirMeshNode
+import com.airmesh.node.DebugLogFileWriter
 import com.airmesh.node.DirectSendResult
+import com.airmesh.node.FileLogFileSystem
 import com.airmesh.node.EventLog
 import com.airmesh.node.LogEntry
 import com.airmesh.node.LogUiBatcher
@@ -73,6 +76,9 @@ import com.airmesh.ui.EXTRA_MESSAGE_KEY
 import com.airmesh.ui.EXTRA_TAB
 import com.airmesh.ui.MeshActivity
 import com.airmesh.ui.TAB_CHAT
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Random
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +91,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+
+/** Date format for debug log file lines (TASK S2 item 4). */
+private val LOG_FILE_STAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
+/** Wall-clock [timeMs] as "yyyy-MM-dd HH:mm:ss" in the device's time zone. */
+private fun stamp(timeMs: Long): String =
+    LOG_FILE_STAMP.format(Instant.ofEpochMilli(timeMs).atZone(ZoneId.systemDefault()))
 
 /**
  * Foreground service that owns the mesh: [AirMeshNode], [WifiDirectConnector] and
@@ -166,6 +179,9 @@ class MeshService : Service() {
 
     /** Forensic recorder for reconnection episodes (TASK R3 part 1): logs the "recovery:" lines. */
     private val recoveryRecorder = RecoveryRecorder(clock = System::currentTimeMillis) { line -> _eventLog.log(line) }
+
+    /** Rolling debug log file writer (TASK S2 item 4); null in non-debuggable builds. */
+    private var debugLogFileWriter: DebugLogFileWriter? = null
 
     /**
      * Escalating recovery supervisor (TASK R3 part 3); seeded with our node id so phones do not
@@ -335,6 +351,23 @@ class MeshService : Service() {
         )
         connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
 
+        // TASK S2 item 4: rolling debug log file in the app's logs folder, debuggable builds only —
+        // the same flag that enables verbose event-log lines above. The header marks this process;
+        // on the next start the live file rotates into the previous-session slot.
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            val logsDir = getExternalFilesDir("logs")
+            if (logsDir != null && (logsDir.exists() || logsDir.mkdirs())) {
+                val versionName = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }
+                    .getOrNull() ?: "?"
+                debugLogFileWriter = DebugLogFileWriter(FileLogFileSystem(logsDir)).also { writer ->
+                    writer.start(
+                        "=== process start ${stamp(System.currentTimeMillis())} build $versionName " +
+                            "node #${node.localNodeId} device ${Build.MODEL} SDK ${Build.VERSION.SDK_INT} ===",
+                    )
+                }
+            }
+        }
+
         // Chat history (TASK D2 part 4): separate Room DB so chat rows survive the
         // packet store's lifecycle; presence ages out on the wall clock.
         _chatStore = RoomChatStore(ChatDatabase.build(applicationContext))
@@ -471,7 +504,11 @@ class MeshService : Service() {
                                 cs.groupFormed -> RecoveryRecorder.CAUSE_OWN_LINK_LOST // e.g. keepalive close
                                 else -> RecoveryRecorder.CAUSE_GROUP_GONE
                             }
-                            recoveryRecorder.onRecoveryStarted(cause, autoController?.let { describeState(it) } ?: "Idle", cs.groupFormed, cs.role)
+                            // TASK S2 item 2: a fresh episode re-anchors the timeline so its phases
+                            // never show old totals; an extended one keeps its original start.
+                            if (recoveryRecorder.onRecoveryStarted(cause, autoController?.let { describeState(it) } ?: "Idle", cs.groupFormed, cs.role)) {
+                                timelineRecorder.onStart()
+                            }
                             // TASK R3 part 3 (b): a keepalive closed our link but the group is still formed and we are a
                             // client — restart the TCP retry loop immediately with a fresh backoff.
                             if (cs.groupFormed && cs.role == P2pRole.CLIENT) connector.forceRestartConnectLoop()
@@ -610,10 +647,33 @@ class MeshService : Service() {
             }
         }
 
+        // TASK S2 item 4: mirror every event-log line into the rolling debug file (debuggable
+        // builds), timestamped with the date; a second coroutine flushes at most every 2 s.
+        val logFileWriter = debugLogFileWriter
+        if (logFileWriter != null) {
+            serviceScope.launch(Dispatchers.Default) {
+                var lastSeq = 0L
+                _eventLog.entries.collect { entries ->
+                    for (entry in entries) {
+                        if (entry.seq > lastSeq) logFileWriter.append("${stamp(entry.timeMs)} ${entry.text}")
+                    }
+                    if (entries.isNotEmpty()) lastSeq = entries.last().seq
+                }
+            }
+            serviceScope.launch(Dispatchers.Default) {
+                while (isActive) {
+                    delay(DebugLogFileWriter.FLUSH_INTERVAL_MS)
+                    logFileWriter.flush()
+                }
+            }
+        }
+
         // --- Auto-mesh wiring ---------------------------------------------------
         // One tick per second drives backoff expiry, join timeouts and the takeover deadline.
         serviceScope.launch {
             var noAirMeshHintShown = false
+            // TASK S2 item 1: the silent keepalive counter is reported once per minute.
+            var lastTcpStatsAtMs = System.currentTimeMillis()
             while (isActive) {
                 delay(1_000L)
                 // Log once when the "no AirMesh peers" hint appears on screen; reset so a
@@ -647,6 +707,13 @@ class MeshService : Service() {
                 _manualPauseRemainingMs.value = manualPausePolicy.pauseRemainingMs(System.currentTimeMillis())
                 // TASK R3 part 1: periodic "STILL NOT CONNECTED" diagnostic while an episode is active.
                 recoveryRecorder.tick(buildRecoverySnapshot())
+                // TASK S2 item 1: keepalive HELLOs are silent in the transport; report their count
+                // once per minute, like the directory's "dnssd: stats" line.
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - lastTcpStatsAtMs >= 60_000L) {
+                    lastTcpStatsAtMs = nowMs
+                    _eventLog.log("tcp: stats keepAlive=${node.transport.keepAliveCount}")
+                }
                 // TASK R3 part 3: escalating recovery while auto-mesh is on, Wi-Fi Direct is up and no
                 // live neighbor exists; each returned action maps to an existing call site (the
                 // supervisor never creates a group itself).
@@ -729,13 +796,15 @@ class MeshService : Service() {
                             autoEvent(AutoMeshEvent.GroupFormed(autoRoleOf(newRole)), "group formed as ${newRole.name.lowercase()}")
                         wasInGroup -> {
                             // TASK R3 part 1: the group loss starts (or extends) a recovery episode.
-                            if (_autoMeshEnabled.value) {
+                            if (_autoMeshEnabled.value &&
                                 recoveryRecorder.onRecoveryStarted(
                                     RecoveryRecorder.CAUSE_GROUP_GONE,
                                     autoController?.let { describeState(it) } ?: "Idle",
                                     false,
                                     P2pRole.NONE,
                                 )
+                            ) {
+                                timelineRecorder.onStart() // TASK S2 item 2: fresh episode start re-anchors the timeline
                             }
                             recoveryRecorder.noteGroupLost()
                             autoEvent(AutoMeshEvent.GroupGone, "group gone")
@@ -930,10 +999,11 @@ class MeshService : Service() {
         _eventLog.log("auto: ${if (enabled) "resumed" else "paused"} => ${actions.joinToString(", ") { describeAction(it) }}")
         // TASK S1 part 2: turning the switch back on may also clear a running manual pause.
         controller?.takePauseLogLine()?.let { _eventLog.log("auto: $it") }
+        // TASK S2 item 2: milestones are still recorded, but the timeline line is no longer logged
+        // on every state change (it was printed with stale numbers). It appears only at the first
+        // neighbor up of a process and when a recovery episode completes.
         if (previousState != null) {
-            timelineRecorder.onAutoStateChanged(previousState, controller.state)?.let { line ->
-                _eventLog.log(line)
-            }
+            timelineRecorder.onAutoStateChanged(previousState, controller.state)
         }
         actions.forEach(::executeAutoAction)
     }
@@ -998,13 +1068,12 @@ class MeshService : Service() {
         }
         val isStaleGroupEvent = event is AutoMeshEvent.GroupFormed &&
             connector.staleGroupGuard.state is StaleGroupGuardState.Removing
+        // TASK S2 item 2: record milestones only — see applyAutoMeshEnabled for why this no longer logs.
         timelineRecorder.onAutoStateChanged(
             previous = previousState,
             current = controller.state,
             stale = isStaleGroupEvent,
-        )?.let { line ->
-            _eventLog.log(line)
-        }
+        )
         actions.forEach(::executeAutoAction)
     }
 
