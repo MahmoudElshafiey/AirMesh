@@ -37,6 +37,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
+    // Three-dot overflow icon for the log toolbar (TASK T1 part A); version from the BOM.
+    implementation("androidx.compose.material:material-icons-core")
     implementation(libs.androidx.navigation.compose)
 
     // @Preview support for the tab previews (debug builds only).

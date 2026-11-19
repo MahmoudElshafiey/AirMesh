@@ -1,5 +1,6 @@
 package com.airmesh.ui
 
+import com.airmesh.node.LogEntry
 import com.airmesh.protocol.FrameCodec
 import com.airmesh.routing.Router
 import com.airmesh.routing.StoreAndForward
@@ -144,6 +145,19 @@ fun classifyLogLine(line: String): Set<LogCategory> {
 /** True when [line] is visible under the selected filter; null shows everything. */
 fun matchesFilter(line: String, category: LogCategory?): Boolean =
     category == null || category in classifyLogLine(line)
+
+// --- Log rendering cap --------------------------------------------------------
+
+/** The log list renders at most this many matching lines — the newest ones (TASK T1 part A). */
+const val MAX_RENDERED_LOG_LINES = 500
+
+/**
+ * The rows the log screen actually composes: the last [MAX_RENDERED_LOG_LINES] of the matched
+ * lines. Capping keeps a full 2000-line log cheap to render; Copy still copies everything that
+ * matches, and the toolbar count still shows the full match total.
+ */
+fun renderedLogLines(matched: List<LogEntry>): List<LogEntry> =
+    if (matched.size <= MAX_RENDERED_LOG_LINES) matched else matched.takeLast(MAX_RENDERED_LOG_LINES)
 
 // --- Status chip --------------------------------------------------------------
 

@@ -630,7 +630,12 @@ fun MeshScreen(
                 }
                 composable(ROUTE_LOG) {
                     perf?.logTab?.record() // debug-only recomposition probe (TASK U4 part 3)
-                    MeshLogTab(events = events, onClearLog = onClearLog)
+                    // TASK T1 part A: once-per-open debug line "ui: log screen lines=N rendered=M".
+                    MeshLogTab(
+                        events = events,
+                        onClearLog = onClearLog,
+                        onUiEventLog = onUiEventLog,
+                    )
                 }
                 composable(ROUTE_PROFILE) {
                     // Full-screen profile editor (TASK U1 part 4): the same content as the old

@@ -6,9 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,7 +19,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -40,6 +48,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import com.airmesh.node.DebugLogFileWriter
 import com.airmesh.node.LogEntry
 import java.io.File
@@ -60,13 +69,24 @@ private fun filterFromIndex(index: Int): LogCategory? = when (index) {
 }
 
 /**
- * Log tab: the full event log in a monospace list, newest at the bottom.
+ * Log tab: the event log in a monospace list, newest at the bottom.
  * Filter chips select which lines are visible; "Follow" keeps the view pinned
  * to the newest line and switches off when the user scrolls up (scrolling back
  * to the bottom resumes it). Copy copies exactly what is currently filtered.
+ *
+ * TASK T1 part A: the list takes all remaining height (weight 1f), the chips sit in one
+ * horizontally scrollable row, the toolbar is a single compact row with an overflow menu,
+ * and at most the last [MAX_RENDERED_LOG_LINES] matching lines are composed. The old code
+ * only rendered rows when the filtered list was EMPTY — that is why the screen showed
+ * "613 lines" but no rows.
  */
 @Composable
-fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
+fun MeshLogTab(
+    events: List<LogEntry>,
+    onClearLog: () -> Unit,
+    // TASK T1 part A: emits the once-per-open debug line "ui: log screen lines=N rendered=M".
+    onUiEventLog: (String) -> Unit = {},
+) {
     val context = LocalContext.current
     var filterIndex by rememberSaveable { mutableIntStateOf(0) }
     val selected = filterFromIndex(filterIndex)
@@ -82,6 +102,9 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
         value = withContext(Dispatchers.Default) { events.filter { matchesFilter(it.text, selected) } }
     }
 
+    // TASK T1 part A: only the newest matching lines are composed; count and Copy use [visible].
+    val rendered = remember(visible) { renderedLogLines(visible) }
+
     // The previous process's rolling file is read on demand off the main thread; null while
     // the toggle is off or the read is in flight.
     val previousLines by produceState<List<String>?>(initialValue = null, showPrevious) {
@@ -91,21 +114,30 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
     val listState = rememberLazyListState()
     var follow by rememberSaveable { mutableStateOf(true) }
 
-    LaunchedEffect(visible.size, follow) {
-        if (follow && visible.isNotEmpty()) listState.animateScrollToItem(visible.lastIndex)
+    // Debug-only line once per open: what the toolbar reports vs. what is actually composed.
+    LaunchedEffect(Unit) {
+        onUiEventLog("ui: log screen lines=${events.size} rendered=${rendered.size}")
+    }
+
+    LaunchedEffect(rendered.size, follow) {
+        if (follow && rendered.isNotEmpty()) listState.animateScrollToItem(rendered.lastIndex)
     }
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex }
             .distinctUntilChanged()
             .collect { first ->
                 // Within two items of the end counts as "at the bottom".
-                follow = visible.isNotEmpty() && first >= visible.size - 2
+                follow = rendered.isNotEmpty() && first >= rendered.size - 2
             }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        FlowRow(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        // One horizontally scrollable row of chips (TASK T1 part A) instead of a wrapping FlowRow.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             FILTER_LABELS.forEachIndexed { index, label ->
@@ -117,6 +149,7 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
             }
         }
 
+        // Compact toolbar: Follow switch, line count, Copy, Clear and a three-dot menu.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -134,27 +167,36 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
             )
             TextButton(onClick = { copyVisible(visible, context) }) { Text("Copy") }
             TextButton(onClick = onClearLog, enabled = events.isNotEmpty()) { Text("Clear") }
+            Box {
+                var menuOpen by remember { mutableStateOf(false) }
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "More log actions")
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    // TASK S2 item 5: share the rolling log files.
+                    DropdownMenuItem(
+                        text = { Text("Share log") },
+                        onClick = {
+                            menuOpen = false
+                            scope.launch { shareLog(context) }
+                        },
+                    )
+                    // TASK S2 item 5: inspect the previous session's lines (toggle).
+                    DropdownMenuItem(
+                        text = { Text(if (showPrevious) "Exit previous session" else "Previous session") },
+                        onClick = {
+                            menuOpen = false
+                            showPrevious = !showPrevious
+                        },
+                    )
+                }
+            }
         }
 
-        // TASK S2 item 5: share the rolling log files and inspect the previous session's lines.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            TextButton(onClick = { scope.launch { shareLog(context) } }) { Text("Share log") }
-            FilterChip(
-                selected = showPrevious,
-                onClick = { showPrevious = !showPrevious },
-                label = { Text("Previous session") },
-            )
-        }
-
+        // TASK T1 part A: the list takes all remaining height.
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.weight(1f).testTag("logList"),
             contentPadding = PaddingValues(horizontal = 12.dp),
         ) {
             if (showPrevious) {
@@ -189,15 +231,25 @@ fun MeshLogTab(events: List<LogEntry>, onClearLog: () -> Unit) {
                         }
                     }
                 }
-            } else if (visible.isEmpty()) {
+            } else if (rendered.isEmpty()) {
+                // TASK T1 part A: explicit empty state when the filter hides everything.
+                item(key = "empty") {
+                    Text(
+                        if (events.isEmpty()) "No log lines yet." else "No lines match this filter",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 24.dp),
+                    )
+                }
+            } else {
                 // Stable keys (TASK U4 part 4): EventLog assigns each line a monotonic seq, so
                 // appended lines never shift the identity of the rows already on screen.
-                items(visible, key = { it.seq }) { entry ->
+                items(rendered, key = { it.seq }) { entry ->
                     Text(
                         "${formatLogTime(entry.timeMs)}  ${entry.text}",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
-                        modifier = Modifier.padding(vertical = 1.dp),
+                        modifier = Modifier.padding(vertical = 1.dp).testTag("logRow"),
                     )
                 }
             }
