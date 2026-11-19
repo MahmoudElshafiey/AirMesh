@@ -228,6 +228,8 @@ class MeshActivity : ComponentActivity() {
                         val recoverySupervisorEnabled by service.recoverySupervisorEnabled.collectAsStateWithLifecycle()
                         val autoMeshState by service.autoMeshState.collectAsStateWithLifecycle()
                         val autoIdleReason by service.autoIdleReason.collectAsStateWithLifecycle()
+                        // TASK S1 part 2: countdown for the "Auto connect paused" banner.
+                        val manualPauseRemainingMs by service.manualPauseRemainingMs.collectAsStateWithLifecycle()
                         val airMeshPeers by service.airMeshPeers.collectAsStateWithLifecycle()
                         val autoMeshEnabled by service.autoMeshEnabled.collectAsStateWithLifecycle()
                         val discoveryStrategy by service.discoveryStrategy.collectAsStateWithLifecycle()
@@ -299,6 +301,8 @@ class MeshActivity : ComponentActivity() {
                             airMeshPeers = airMeshPeers,
                             autoMeshEnabled = autoMeshEnabled,
                             onSetAutoMeshEnabled = service::setAutoMeshEnabled,
+                            manualPauseRemainingMs = manualPauseRemainingMs,
+                            onResumeManualPause = service::resumeManualPause,
                             discoveryStrategy = discoveryStrategy,
                             rawCallbackCount = rawCallbackCount,
                             recoverySupervisorEnabled = recoverySupervisorEnabled,

@@ -233,6 +233,8 @@ class AutoMeshController(
     private val intentionalRemovalDelayMs: Long = 0L,
     /** Whether a group owner keeps scanning for other groups to merge with (TASK M1). */
     mergeEnabled: Boolean = false,
+    /** Temporary manual-action pauses (TASK S1 part 2); null keeps today's behavior. */
+    private val manualPausePolicy: ManualPausePolicy? = null,
 ) {
 
     var state: AutoMeshState = AutoMeshState.Idle
@@ -280,6 +282,13 @@ class AutoMeshController(
      * joining until a new scan re-confirms them (TASK R3 part 2). Null = never lost one. */
     private var unexpectedLossAtMs: Long? = null
 
+    // --- temporary manual pauses (TASK S1 part 2) ----------------------------------
+
+    /** One-shot "manual pause ..." / "resumed ..." line the service prints via [takePauseLogLine]. */
+    private var pendingPauseLogLine: String? = null
+    /** Whether the previous tick saw a manual pause active; detects the moment it ends. */
+    private var manualPauseWasActive = false
+
     /** The service calls this after each event to drain a queued merge log line. */
     fun takeMergeLogLine(): String? {
         val line = pendingMergeLogLine
@@ -287,9 +296,67 @@ class AutoMeshController(
         return line
     }
 
+    /** Drains the queued manual-pause log line ("manual pause until +Ns" / "resumed (reason=...)"). */
+    fun takePauseLogLine(): String? {
+        val line = pendingPauseLogLine
+        pendingPauseLogLine = null
+        return line
+    }
+
+    /** True while a temporary manual-action pause holds (TASK S1 part 2). */
+    private fun isManuallyPaused(nowMs: Long): Boolean = manualPausePolicy?.isPaused(nowMs) == true
+
     /** Marks the next [AutoMeshEvent.GroupGone] as intentional (skips group-gone backoff). */
     fun markIntentionalGroupRemoval() {
         intentionalRemovalPending = true
+    }
+
+    /**
+     * A manual Wi-Fi Direct action pauses auto-connect TEMPORARILY instead of until the user
+     * turns the switch back on (TASK S1 part 2). With [manualPausePolicy] null this is a no-op,
+     * keeping today's behavior for existing tests. The state unwind mirrors what pausing used to
+     * do: stop deciding and discovering; group reality keeps being tracked by events.
+     */
+    fun onManualAction(action: ManualPauseAction): List<AutoMeshAction> {
+        val policy = manualPausePolicy ?: return emptyList()
+        if (!autoEnabled) return emptyList() // the switch off already pauses; it stays authoritative
+        val now = clock()
+        if (policy.noteManualAction(action, now)) {
+            pendingPauseLogLine = "manual pause until +${policy.pauseRemainingMs(now) / 1000}s (action=${action.name.lowercase()})"
+        }
+        if (action == ManualPauseAction.CONNECT) policy.noteConnectRequested(now)
+        return when (state) {
+            is AutoMeshState.Searching, is AutoMeshState.Creating,
+            is AutoMeshState.Joining, is AutoMeshState.Yielding -> {
+                enterIdle()
+                listOf(AutoMeshAction.StopDiscovery)
+            }
+            is AutoMeshState.Backoff -> {
+                enterIdle()
+                emptyList()
+            }
+            // An owner with merge on may be scanning for other groups; stop it.
+            is AutoMeshState.Owner -> if (mergeEnabled) listOf(AutoMeshAction.StopDiscovery) else emptyList()
+            else -> emptyList() // Idle / Client: nothing to unwind
+        }
+    }
+
+    /**
+     * Ends a temporary manual pause immediately — the banner's Resume button (TASK S1 part 2).
+     * Returns the actions to execute; empty when there was no active pause.
+     */
+    fun resumeManualPause(): List<AutoMeshAction> {
+        val policy = manualPausePolicy ?: return emptyList()
+        if (!policy.resumeByUser(clock())) return emptyList()
+        pendingPauseLogLine = "resumed (reason=userToggle)"
+        manualPauseWasActive = false
+        return when (state) {
+            is AutoMeshState.Idle, is AutoMeshState.Backoff -> {
+                enterSearching(clock())
+                listOf(AutoMeshAction.StartDiscovery)
+            }
+            else -> emptyList() // Owner / Client: in a group; nothing to restart
+        }
     }
 
     fun onEvent(event: AutoMeshEvent): List<AutoMeshAction> {
@@ -298,11 +365,15 @@ class AutoMeshController(
             is AutoMeshEvent.PermissionsChanged -> onPermissionsChanged(event, now)
             is AutoMeshEvent.PeersChanged -> {
                 lastPeers = event.peers // kept even while paused so resume starts fresh
-                if (!autoEnabled) emptyList() else decide(event.peers, now) + runMergeDecision(now)
+                if (!autoEnabled || isManuallyPaused(now)) emptyList() else decide(event.peers, now) + runMergeDecision(now)
             }
             // Group reality is tracked even while paused: a manual connect that
-            // succeeds must still land us in Owner/Client.
-            is AutoMeshEvent.GroupFormed -> onGroupFormed(event.role, now)
+            // succeeds must still land us in Owner/Client. Settling the pause first
+            // means "auto resumes 10 s later" counts from this moment (TASK S1 part 2).
+            is AutoMeshEvent.GroupFormed -> {
+                manualPausePolicy?.noteConnectSettled(now, connected = true)
+                onGroupFormed(event.role, now)
+            }
             is AutoMeshEvent.MyClientsChanged -> {
                 if (event.clients != myClients) {
                     myClients = event.clients
@@ -322,7 +393,12 @@ class AutoMeshController(
                 // Our own merge removal: the join toward the target keeps running.
                 if (state is AutoMeshState.Yielding) emptyList() else onIntentionalGroupGone(now)
             }
-            is AutoMeshEvent.ConnectFailed -> if (autoEnabled) onConnectFailed(event.reason, now) else emptyList()
+            is AutoMeshEvent.ConnectFailed -> {
+                // A failed manual connect settles its pause even while paused (TASK S1 part 2);
+                // the state machine below stays gated as before.
+                manualPausePolicy?.noteConnectSettled(now, connected = false)
+                if (autoEnabled) onConnectFailed(event.reason, now) else emptyList()
+            }
             AutoMeshEvent.Tick -> if (autoEnabled) onTick(now) else emptyList()
         }
     }
@@ -349,6 +425,12 @@ class AutoMeshController(
                 is AutoMeshState.Owner -> if (mergeEnabled) listOf(AutoMeshAction.StopDiscovery) else emptyList()
                 else -> emptyList() // Idle / Client: nothing to unwind
             }
+        }
+        // The switch back on overrides any temporary manual pause still running.
+        val policy = manualPausePolicy
+        if (policy != null && policy.resumeByUser(now)) {
+            pendingPauseLogLine = "resumed (reason=userToggle)"
+            manualPauseWasActive = false
         }
         return when (state) {
             is AutoMeshState.Idle, is AutoMeshState.Backoff -> {
@@ -388,7 +470,9 @@ class AutoMeshController(
         }
         idleReason = null
         return when (state) {
-            is AutoMeshState.Idle, is AutoMeshState.Backoff -> {
+            is AutoMeshState.Idle, is AutoMeshState.Backoff -> if (isManuallyPaused(now)) {
+                emptyList() // a temporary manual pause holds; the next tick resumes it
+            } else {
                 enterSearching(now)
                 listOf(AutoMeshAction.StartDiscovery)
             }
@@ -443,6 +527,25 @@ class AutoMeshController(
     }
 
     private fun onTick(now: Long): List<AutoMeshAction> {
+        // A temporary manual pause holds every auto decision until it ends (TASK S1 part 2).
+        val policy = manualPausePolicy
+        if (policy != null) {
+            val pausedNow = policy.isPaused(now)
+            if (manualPauseWasActive && !pausedNow) {
+                // The pause just ended by itself: log why, then resume searching.
+                manualPauseWasActive = false
+                pendingPauseLogLine = "resumed (reason=${policy.takeResumeReason()})"
+                return when (state) {
+                    is AutoMeshState.Idle, is AutoMeshState.Backoff -> {
+                        enterSearching(now)
+                        listOf(AutoMeshAction.StartDiscovery)
+                    }
+                    else -> emptyList() // Owner / Client: in a group; nothing to restart
+                }
+            }
+            manualPauseWasActive = pausedNow
+            if (pausedNow) return emptyList()
+        }
         return when (val s = state) {
             is AutoMeshState.Backoff -> if (now >= s.untilMs) {
                 enterSearching(now)
@@ -484,8 +587,8 @@ class AutoMeshController(
         // Rule (a): in a group we do nothing; stop discovering to save battery —
         // other phones find us through our advertisement, not our discovery. The
         // one exception is an unpaused owner with merge enabled: it keeps scanning
-        // for other groups to join (TASK M1).
-        return if (state is AutoMeshState.Owner && autoEnabled && mergeEnabled) {
+        // for other groups to join (TASK M1). A temporary manual pause also holds it.
+        return if (state is AutoMeshState.Owner && autoEnabled && mergeEnabled && !isManuallyPaused(now)) {
             listOf(AutoMeshAction.StartDiscovery)
         } else {
             listOf(AutoMeshAction.StopDiscovery)
@@ -528,7 +631,9 @@ class AutoMeshController(
      * skip the 1–3 s group-gone backoff and enter Searching within at most 500 ms.
      */
     private fun onIntentionalGroupGone(now: Long): List<AutoMeshAction> {
-        if (!autoEnabled || idleReason != null) {
+        // A temporary manual pause holds the re-search too (TASK S1 part 2); the GroupGone that
+        // follows a real removal still lands us in Backoff, and the next tick resumes.
+        if (!autoEnabled || idleReason != null || isManuallyPaused(now)) {
             if (state is AutoMeshState.Owner || state is AutoMeshState.Client) {
                 enterIdle()
             }
@@ -565,6 +670,8 @@ class AutoMeshController(
     private fun failAttempt(reason: String, now: Long): List<AutoMeshAction> {
         consecutiveFailures += 1
         state = AutoMeshState.Backoff(now + autoMeshFailureDelayMs(consecutiveFailures, random), reason)
+        // A timed-out or failed manual connect settles its pause (TASK S1 part 2); no-op otherwise.
+        manualPausePolicy?.noteConnectSettled(now, connected = false)
         return listOf(AutoMeshAction.StopDiscovery)
     }
 

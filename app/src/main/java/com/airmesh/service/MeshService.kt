@@ -53,6 +53,8 @@ import com.airmesh.transport.DiscoveryCoordinator
 import com.airmesh.transport.DiscoveryStrategySelector
 import com.airmesh.transport.DiscoveryStrategyStore
 import com.airmesh.transport.FreshnessRules
+import com.airmesh.transport.ManualPauseAction
+import com.airmesh.transport.ManualPausePolicy
 import com.airmesh.transport.OwnerScanPolicy
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
@@ -135,6 +137,9 @@ class MeshService : Service() {
 
     /** Paces an owner's merge scans (TASK M1): 15 s empty, one 8 s window per 90 s with clients. */
     private val ownerScanPolicy = OwnerScanPolicy()
+
+    /** Temporary manual-action pauses for auto-connect (TASK S1 part 2); pure, no Android deps. */
+    private val manualPausePolicy = ManualPausePolicy()
 
     /** Live neighbor count; feeds the scan policy and the advertised client count. */
     private var liveNeighborCount = 0
@@ -278,6 +283,10 @@ class MeshService : Service() {
     private val _autoIdleReason = MutableStateFlow<String?>(null)
     val autoIdleReason: StateFlow<String?> = _autoIdleReason.asStateFlow()
 
+    /** Milliseconds left in the temporary manual pause; > 0 shows the Network tab banner (TASK S1 part 2). */
+    private val _manualPauseRemainingMs = MutableStateFlow(0L)
+    val manualPauseRemainingMs: StateFlow<Long> = _manualPauseRemainingMs.asStateFlow()
+
     /** AirMesh-tagged peers from the DNS-SD directory; the Network tab lists them first. */
     val airMeshPeers: StateFlow<List<AirMeshPeer>> get() = peerDirectory.peers
 
@@ -420,6 +429,8 @@ class MeshService : Service() {
             tieBreakToken = tieBreakToken,
             autoEnabled = _autoMeshEnabled.value,
             mergeEnabled = _mergeGroupsEnabled.value,
+            // TASK S1 part 2: manual actions pause auto-connect temporarily instead of forever.
+            manualPausePolicy = manualPausePolicy,
         )
         _eventLog.log("auto: controller ready (node #${node.localNodeId}, tie-break=${tieBreakToken.toUInt().toString(16)})")
 
@@ -632,6 +643,8 @@ class MeshService : Service() {
                     hint == null -> noAirMeshHintShown = false
                 }
                 autoEvent(AutoMeshEvent.Tick, "tick")
+                // TASK S1 part 2: feed the banner countdown; the tick above may have resumed auto.
+                _manualPauseRemainingMs.value = manualPausePolicy.pauseRemainingMs(System.currentTimeMillis())
                 // TASK R3 part 1: periodic "STILL NOT CONNECTED" diagnostic while an episode is active.
                 recoveryRecorder.tick(buildRecoverySnapshot())
                 // TASK R3 part 3: escalating recovery while auto-mesh is on, Wi-Fi Direct is up and no
@@ -655,8 +668,8 @@ class MeshService : Service() {
                             state = controller?.state ?: AutoMeshState.Idle,
                             groupFormed = cs.groupFormed,
                             myClients = if (cs.role == P2pRole.GROUP_OWNER) liveNeighborCount else 0,
-                            // TASK S1 part 2 will pass the manual pause policy's state here.
-                            paused = false,
+                            // TASK S1 part 2: a temporary manual pause holds the supervisor too.
+                            paused = manualPausePolicy.isPaused(nowMs),
                             ownerGroupAgeMs = ownGroupFormedAtMs?.let { nowMs - it },
                         ),
                     )) {
@@ -812,27 +825,29 @@ class MeshService : Service() {
         node.setMyProfile(name, colorIndex)
 
     // Every manual Wi-Fi Direct action pauses auto-mesh first, so the two do not
-    // fight over the radio (rule: manual control wins until auto is re-enabled).
+    // fight over the radio. Since TASK S1 part 2 the pause is TEMPORARY: the policy
+    // resumes auto after its window (45 s; Disconnect 120 s), and the Auto switch —
+    // which stays on during the pause — remains the persistent control.
 
     fun discover() {
-        pauseAutoForManualUse()
+        pauseAutoTemporarily(ManualPauseAction.DISCOVER)
         // Through the coordinator: it clears any active DNS-SD scan first and holds
         // the radio for a 30 s window before the service cycle resumes.
         discoveryCoordinator.requestPeerScan()
     }
 
     fun createGroup() {
-        pauseAutoForManualUse()
+        pauseAutoTemporarily(ManualPauseAction.CREATE_GROUP)
         connector.createGroup()
     }
 
     fun retryConnect() {
-        pauseAutoForManualUse()
+        pauseAutoTemporarily(ManualPauseAction.RETRY_TCP)
         connector.retryConnect()
     }
 
     fun connect(device: WifiP2pDevice) {
-        pauseAutoForManualUse()
+        pauseAutoTemporarily(ManualPauseAction.CONNECT)
         connector.connect(device)
     }
 
@@ -842,19 +857,32 @@ class MeshService : Service() {
      * without restarting anything.
      */
     fun disconnectFromGroup() {
-        pauseAutoForManualUse()
+        pauseAutoTemporarily(ManualPauseAction.DISCONNECT)
         connector.disconnect()
     }
 
     /**
-     * A manual action pauses auto-mesh for the rest of this session. Deliberately
-     * NOT persisted: one tap on Discover must not kill auto-mesh across app
-     * restarts — the Network tab switch is the persistent control.
+     * A manual action pauses auto-mesh temporarily (TASK S1 part 2): the controller unwinds its
+     * current attempt and [manualPausePolicy] decides when it resumes. The Auto switch itself is
+     * untouched, so the Network tab keeps showing what the user chose.
      */
-    private fun pauseAutoForManualUse() {
-        if (!_autoMeshEnabled.value) return
-        _eventLog.log("auto: paused by a manual action (turn Auto connect back on to resume)")
-        applyAutoMeshEnabled(false, persist = false)
+    private fun pauseAutoTemporarily(action: ManualPauseAction) {
+        val controller = autoController ?: return
+        val actions = controller.onManualAction(action)
+        syncAutoUi(controller)
+        _manualPauseRemainingMs.value = manualPausePolicy.pauseRemainingMs(System.currentTimeMillis())
+        controller.takePauseLogLine()?.let { _eventLog.log("auto: $it") }
+        actions.forEach(::executeAutoAction)
+    }
+
+    /** The Network tab banner's Resume button: end the temporary manual pause now (TASK S1 part 2). */
+    fun resumeManualPause() {
+        val controller = autoController ?: return
+        val actions = controller.resumeManualPause()
+        syncAutoUi(controller)
+        _manualPauseRemainingMs.value = manualPausePolicy.pauseRemainingMs(System.currentTimeMillis())
+        controller.takePauseLogLine()?.let { _eventLog.log("auto: $it") }
+        actions.forEach(::executeAutoAction)
     }
 
     /** Network tab switch: persist the choice and pause/resume the controller. */
@@ -900,6 +928,8 @@ class MeshService : Service() {
         val actions = controller?.setAutoEnabled(enabled) ?: emptyList()
         if (controller != null) syncAutoUi(controller)
         _eventLog.log("auto: ${if (enabled) "resumed" else "paused"} => ${actions.joinToString(", ") { describeAction(it) }}")
+        // TASK S1 part 2: turning the switch back on may also clear a running manual pause.
+        controller?.takePauseLogLine()?.let { _eventLog.log("auto: $it") }
         if (previousState != null) {
             timelineRecorder.onAutoStateChanged(previousState, controller.state)?.let { line ->
                 _eventLog.log(line)
@@ -939,6 +969,8 @@ class MeshService : Service() {
         val actions = controller.onEvent(event)
         // The controller queues at most one "merge ..." line per outcome change (TASK M1 part 4).
         controller.takeMergeLogLine()?.let { _eventLog.log("auto: $it") }
+        // TASK S1 part 2: the manual-pause lines ("manual pause until +Ns" / "resumed (reason=...)").
+        controller.takePauseLogLine()?.let { _eventLog.log("auto: $it") }
         // TASK R3 part 1: record every transition and pending timer for recovery forensics.
         if (controller.state != previousState) {
             recoveryRecorder.noteControllerTransition(recoveryStateLine(previousState), describeState(controller))

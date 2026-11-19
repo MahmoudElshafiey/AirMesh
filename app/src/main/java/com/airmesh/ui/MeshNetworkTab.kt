@@ -82,6 +82,10 @@ fun MeshNetworkTab(
     // so storage and behavior are unchanged.
     autoMeshEnabled: Boolean = true,
     onSetAutoMeshEnabled: (Boolean) -> Unit = {},
+    // TASK S1 part 2: > 0 while a manual action temporarily pauses auto-connect; shows the
+    // "Resumes in Ns" banner with a Resume button.
+    manualPauseRemainingMs: Long = 0L,
+    onResumeManualPause: () -> Unit = {},
     // Discovery diagnostics for the Debug card; that card only exists in debuggable builds.
     discoveryStrategy: Int = 1,
     rawCallbackCount: Int = 0,
@@ -110,6 +114,10 @@ fun MeshNetworkTab(
         StatusCard(nodeId, state)
 
         AutoConnectCard(enabled = autoMeshEnabled, onSetEnabled = onSetAutoMeshEnabled)
+
+        if (manualPauseRemainingMs > 0L) {
+            ManualPauseBanner(remainingMs = manualPauseRemainingMs, onResume = onResumeManualPause)
+        }
 
         // The common path is automatic; only the always-useful actions stay out.
         FlowRow(
@@ -340,6 +348,30 @@ internal fun AutoConnectCard(enabled: Boolean, onSetEnabled: (Boolean) -> Unit) 
                 )
             }
             Switch(checked = enabled, onCheckedChange = onSetEnabled)
+        }
+    }
+}
+
+/**
+ * Shown while a manual action temporarily pauses auto-connect (TASK S1 part 2): the countdown
+ * comes from the service's per-second tick, and Resume ends the pause immediately.
+ */
+@Composable
+private fun ManualPauseBanner(remainingMs: Long, onResume: () -> Unit) {
+    val seconds = ((remainingMs + 999L) / 1000L).coerceAtLeast(1L)
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Auto connect paused. Resumes in ${seconds}s",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(onClick = onResume) {
+                Text("Resume")
+            }
         }
     }
 }

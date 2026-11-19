@@ -162,6 +162,9 @@ fun MeshScreen(
     airMeshPeers: List<AirMeshPeer> = emptyList(),
     autoMeshEnabled: Boolean = true,
     onSetAutoMeshEnabled: (Boolean) -> Unit = {},
+    // TASK S1 part 2: > 0 while a manual action temporarily pauses auto-connect (Network tab banner).
+    manualPauseRemainingMs: Long = 0L,
+    onResumeManualPause: () -> Unit = {},
     // Discovery diagnostics shown as the banner's small second line.
     discoveryStrategy: Int = 1,
     rawCallbackCount: Int = 0,
@@ -612,6 +615,8 @@ fun MeshScreen(
                         // same flows, so storage and behavior are unchanged.
                         autoMeshEnabled = autoMeshEnabled,
                         onSetAutoMeshEnabled = onSetAutoMeshEnabled,
+                        manualPauseRemainingMs = manualPauseRemainingMs,
+                        onResumeManualPause = onResumeManualPause,
                         // Discovery diagnostics for the Debug card (debuggable builds only).
                         discoveryStrategy = discoveryStrategy,
                         rawCallbackCount = rawCallbackCount,
