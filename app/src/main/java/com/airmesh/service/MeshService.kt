@@ -61,11 +61,13 @@ import com.airmesh.transport.ManualPausePolicy
 import com.airmesh.transport.OwnerScanPolicy
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
+import com.airmesh.transport.RadioPeer
 import com.airmesh.transport.RecoveryAction
 import com.airmesh.transport.RecoveryPeerInfo
 import com.airmesh.transport.RecoveryRecorder
 import com.airmesh.transport.RecoverySnapshot
 import com.airmesh.transport.RecoverySupervisor
+import com.airmesh.transport.RememberedOwnerPolicy
 import com.airmesh.transport.RememberedOwnerStore
 import com.airmesh.transport.StaleGroupGuardState
 import com.airmesh.transport.TieBreakToken
@@ -470,6 +472,8 @@ class MeshService : Service() {
             mergeEnabled = _mergeGroupsEnabled.value,
             // TASK S1 part 2: manual actions pause auto-connect temporarily instead of forever.
             manualPausePolicy = manualPausePolicy,
+            // TASK T1 part C2: re-join a remembered owner when DNS-SD stays silent after a restart.
+            rememberedOwnerPolicy = RememberedOwnerPolicy(rememberedOwnerStore),
         )
         _eventLog.log("auto: controller ready (node #${node.localNodeId}, tie-break=${tieBreakToken.toUInt().toString(16)})")
 
@@ -767,6 +771,7 @@ class MeshService : Service() {
             var lastRole = connector.state.value.role
             var lastPermReason: String? = "unset" // sentinel: the first emission always feeds the controller
             var lastP2pEnabled: Boolean? = null // TASK R3 part 3 (a): detects Wi-Fi Direct coming back
+            var lastRadioPeers: List<Pair<String, Int>>? = null // TASK T1 part C2: change detection for the raw list
             connector.state.collect { cs ->
                 val permReason = autoMeshPermissionReason(
                     cs.wifiDirectPermissionGranted,
@@ -819,6 +824,18 @@ class MeshService : Service() {
                     // TASK T1 part C1: we just joined someone — remember that owner so auto-mesh
                     // can re-join it after a restart even when DNS-SD stays silent.
                     if (cs.groupFormed && newRole == P2pRole.CLIENT) rememberOwnerIfClient()
+                }
+
+                // TASK T1 part C2: the raw requestPeers list feeds the remembered-owner policy.
+                // Compared by content (WifiP2pDevice has no structural equality) and emitted only
+                // on change — requestPeers callbacks can be frequent while a group forms.
+                val radioSnapshot = cs.peers.map { it.deviceAddress to it.status }
+                if (radioSnapshot != lastRadioPeers) {
+                    lastRadioPeers = radioSnapshot
+                    autoEvent(
+                        AutoMeshEvent.RadioPeersChanged(cs.peers.map { RadioPeer(it.deviceAddress, it.status) }),
+                        "radio peers=${cs.peers.size}",
+                    )
                 }
 
                 // Keep our ad's owner flag current (TASK R3 part 2): o1 only while we own a live
@@ -1067,7 +1084,8 @@ class MeshService : Service() {
         if (event is AutoMeshEvent.PeersChanged && event.peers.isNotEmpty()) {
             timelineRecorder.onFirstPeer()
         }
-        if (event !is AutoMeshEvent.Tick) {
+        // Tick is not logged per second; RadioPeersChanged arrives on every requestPeers callback.
+        if (event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.RadioPeersChanged) {
             _eventLog.log("auto: event $describe peers=${describePeers(peerDirectory.peers.value)}")
         }
         val actions = controller.onEvent(event)
@@ -1075,6 +1093,8 @@ class MeshService : Service() {
         controller.takeMergeLogLine()?.let { _eventLog.log("auto: $it") }
         // TASK S1 part 2: the manual-pause lines ("manual pause until +Ns" / "resumed (reason=...)").
         controller.takePauseLogLine()?.let { _eventLog.log("auto: $it") }
+        // TASK T1 part C2: the one-shot "remembered-owner attempt #N to ..." line.
+        controller.takeRememberedOwnerLogLine()?.let { _eventLog.log("auto: $it") }
         // TASK R3 part 1: record every transition and pending timer for recovery forensics.
         if (controller.state != previousState) {
             recoveryRecorder.noteControllerTransition(recoveryStateLine(previousState), describeState(controller))
@@ -1094,7 +1114,9 @@ class MeshService : Service() {
             }
         }
         syncAutoUi(controller)
-        if (actions.isNotEmpty() || event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.PeersChanged) {
+        if (actions.isNotEmpty() || event !is AutoMeshEvent.Tick && event !is AutoMeshEvent.PeersChanged &&
+            event !is AutoMeshEvent.RadioPeersChanged
+        ) {
             _eventLog.log(
                 "auto: ${describeState(controller)} <- $describe => " +
                     "${actions.joinToString(", ") { describeAction(it) }}",

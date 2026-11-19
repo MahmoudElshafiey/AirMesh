@@ -83,7 +83,41 @@ Status per part is updated as work progresses; final state in Part E.
     expiry boundary exactly at 24 h + self-clearing; 3-failure clear; refreshSuccess reset of
     count/pacing/timestamp; noteAttempt stamp; corrupt inputs -> null; mutating methods are no-ops
     without a record). :app:compileDebugKotlin clean.
-- C2 RememberedOwnerPolicy in AutoMeshController: PENDING
+- C2 RememberedOwnerPolicy in AutoMeshController: DONE (commit hash filled in Part E)
+  - transport/RadioPeer.kt (pure): deviceAddress + raw WifiP2pDevice status; constants
+    AVAILABLE=1 / CONNECTED=3 mirroring the framework values.
+  - transport/RememberedOwnerPolicy.kt (pure, fake clock + seeded Random): consider() returns a
+    Target only when ALL hold — searching for >= MIN_SEARCHING_MS=12 s, a record exists, it is
+    younger than RECORD_MAX_AGE_MS=30 min, fewer than 3 failed attempts, the pacing stamp has
+    elapsed, and the remembered address appears in the latest requestPeers list with status
+    AVAILABLE. On success it stamps nextAllowedAttemptAtMs = now + ATTEMPT_SPACING_MS=45 s + up to
+    SPACING_JITTER_MAX_MS=2 s of jitter (so phones do not retry in lockstep) and returns the
+    1-based attempt number for logging. noteFailure/noteSuccess delegate to the store.
+  - AutoMeshController: new optional ctor param `rememberedOwnerPolicy: RememberedOwnerPolicy? =
+    null` (null = old behavior, all existing tests untouched); new event RadioPeersChanged(peers)
+    that only stores the latest raw list; decide() rule (d) — peers.isEmpty(), i.e. NO DNS-SD peer
+    is accepted — consults the policy before giving up, and on a Target reuses the EXISTING
+    Joining/ConnectTo flow (same 40 s timeout, same retries). The attempt is logged via a new
+    drain takeRememberedOwnerLogLine() as "auto: remembered-owner attempt #N to #<nodeId>
+    <address> reason=dnssd-silent". Outcome hooks: ConnectFailed / GroupGone while Joining count a
+    failure ONLY for remembered joins (a flag cleared in enterSearching/enterIdle so it can never
+    leak into a later normal join); GroupFormed refreshes the record. The policy is only reachable
+    from Searching with auto on and no manual pause, so those preconditions hold by construction;
+    it NEVER creates a group.
+  - MeshService: feeds RadioPeersChanged from the connector.state collector — WifiP2pDevice has no
+    structural equality, so the raw list is compared by content via (address to status) snapshots
+    and only changes are forwarded (no per-callback spam); both autoEvent log lines exclude
+    RadioPeersChanged for the same reason. The controller now gets rememberedOwnerPolicy =
+    RememberedOwnerPolicy(rememberedOwnerStore).
+  - Tests: RememberedOwnerPolicyTest 9/9 (every precondition incl. exact age boundary, pacing
+    stamp, 3-failure cap, seeded-jitter determinism with two policies on the same seed) and
+    AutoMeshControllerRememberedOwnerTest 8/8 — including the EXACT evidence-(1) scenario: record
+    at t=0, peer visible in requestPeers from +7 s, silent DNS-SD, no attempt before +12 s, one
+    ConnectTo with the spec log line at exactly +12 s; plus pause/resume (the 12 s minimum restarts
+    with the resume), a visible DNS-SD owner joins normally and does NOT touch the record (its
+    failure is not counted), 45 s+jitter pacing after a failure, the 3-attempt cap clearing the
+    store, success refreshing the record so numbering restarts at #1, auto-off gating, and a
+    non-AVAILABLE peer never triggering. Existing AutoMeshControllerTest stays green: 43/43.
 - C3 ownerProbe experiment + 25 s watchdog: PENDING
 
 ## Part D — keepalive and flapping

@@ -66,6 +66,9 @@ sealed interface AutoMeshEvent {
     /** The peer directory's visible-peer list changed. */
     data class PeersChanged(val peers: List<AirMeshPeer>) : AutoMeshEvent
 
+    /** The raw requestPeers list changed (TASK T1 part C2); feeds the remembered-owner policy. */
+    data class RadioPeersChanged(val peers: List<RadioPeer>) : AutoMeshEvent
+
     /** A group formed and we hold [role] in it (accepted even while paused). */
     data class GroupFormed(val role: AutoMeshRole) : AutoMeshEvent
 
@@ -235,6 +238,8 @@ class AutoMeshController(
     mergeEnabled: Boolean = false,
     /** Temporary manual-action pauses (TASK S1 part 2); null keeps today's behavior. */
     private val manualPausePolicy: ManualPausePolicy? = null,
+    /** TASK T1 part C2: re-join a remembered owner while DNS-SD is silent; null keeps today's behavior. */
+    private val rememberedOwnerPolicy: RememberedOwnerPolicy? = null,
 ) {
 
     var state: AutoMeshState = AutoMeshState.Idle
@@ -303,6 +308,22 @@ class AutoMeshController(
         return line
     }
 
+    // --- remembered-owner reconnection (TASK T1 part C2) ---------------------------
+
+    /** Latest raw requestPeers list; feeds [rememberedOwnerPolicy] on each Searching decision. */
+    private var lastRadioPeers: List<RadioPeer> = emptyList()
+    /** True while the current join targets a remembered owner, not a DNS-SD sighting. */
+    private var joiningViaRememberedOwner = false
+    /** One-shot "remembered-owner attempt ..." line the service prints via [takeRememberedOwnerLogLine]. */
+    private var pendingRememberedOwnerLogLine: String? = null
+
+    /** Drains the queued remembered-owner log line ("remembered-owner attempt #N to ..."). */
+    fun takeRememberedOwnerLogLine(): String? {
+        val line = pendingRememberedOwnerLogLine
+        pendingRememberedOwnerLogLine = null
+        return line
+    }
+
     /** True while a temporary manual-action pause holds (TASK S1 part 2). */
     private fun isManuallyPaused(nowMs: Long): Boolean = manualPausePolicy?.isPaused(nowMs) == true
 
@@ -366,6 +387,11 @@ class AutoMeshController(
             is AutoMeshEvent.PeersChanged -> {
                 lastPeers = event.peers // kept even while paused so resume starts fresh
                 if (!autoEnabled || isManuallyPaused(now)) emptyList() else decide(event.peers, now) + runMergeDecision(now)
+            }
+            // Kept even while paused: the policy only acts from decide(), which is gated.
+            is AutoMeshEvent.RadioPeersChanged -> {
+                lastRadioPeers = event.peers
+                emptyList()
             }
             // Group reality is tracked even while paused: a manual connect that
             // succeeds must still land us in Owner/Client. Settling the pause first
@@ -498,7 +524,23 @@ class AutoMeshController(
             return listOf(AutoMeshAction.ConnectTo(owner.deviceAddress))
         }
         if (peers.isEmpty()) {
-            // Rule (d): no AirMesh peer at all — keep searching, never create.
+            // Rule (d): no AirMesh peer at all — keep searching, never create... unless the
+            // remembered-owner policy says to re-join a known owner that the radio can see but
+            // DNS-SD has not advertised yet (TASK T1 part C2). The state is Searching here by
+            // the guard above, so the cast cannot fail.
+            val target = rememberedOwnerPolicy?.consider(
+                nowMs = now,
+                searchingSinceMs = (state as AutoMeshState.Searching).sinceMs,
+                radioPeers = lastRadioPeers,
+            )
+            if (target != null) {
+                joiningViaRememberedOwner = true
+                state = AutoMeshState.Joining(target.deviceAddress, target.nodeId, now)
+                busyRetryUsed = false
+                pendingRememberedOwnerLogLine =
+                    "remembered-owner attempt #${target.attemptNumber} to #${target.nodeId} ${target.deviceAddress} reason=dnssd-silent"
+                return listOf(AutoMeshAction.ConnectTo(target.deviceAddress))
+            }
             takeoverDeadlineMs = null
             return emptyList()
         }
@@ -571,6 +613,11 @@ class AutoMeshController(
     private fun onGroupFormed(role: AutoMeshRole, now: Long): List<AutoMeshAction> {
         consecutiveFailures = 0
         busyRetryUsed = false
+        // TASK T1 part C2: a remembered-owner join landed — refresh the record.
+        if (joiningViaRememberedOwner) {
+            joiningViaRememberedOwner = false
+            rememberedOwnerPolicy?.noteSuccess()
+        }
         takeoverDeadlineMs = null
         // Peer updates are ignored while in a group (rule a), so the stored list
         // would go stale; drop it so a later re-search starts from fresh data.
@@ -619,6 +666,11 @@ class AutoMeshController(
             // Join target vanished (or our own BUSY cleanup ran): re-search without
             // backoff — discovery was still running and peers will tell us the rest.
             is AutoMeshState.Joining, is AutoMeshState.Creating -> {
+                // TASK T1 part C2: a remembered-owner target vanishing counts as a failed attempt.
+                if (joiningViaRememberedOwner) {
+                    joiningViaRememberedOwner = false
+                    rememberedOwnerPolicy?.noteFailure()
+                }
                 enterSearching(now)
                 emptyList()
             }
@@ -669,6 +721,11 @@ class AutoMeshController(
 
     private fun failAttempt(reason: String, now: Long): List<AutoMeshAction> {
         consecutiveFailures += 1
+        // TASK T1 part C2: a failed remembered-owner attempt counts against the record.
+        if (joiningViaRememberedOwner) {
+            joiningViaRememberedOwner = false
+            rememberedOwnerPolicy?.noteFailure()
+        }
         state = AutoMeshState.Backoff(now + autoMeshFailureDelayMs(consecutiveFailures, random), reason)
         // A timed-out or failed manual connect settles its pause (TASK S1 part 2); no-op otherwise.
         manualPausePolicy?.noteConnectSettled(now, connected = false)
@@ -678,6 +735,7 @@ class AutoMeshController(
     private fun enterSearching(now: Long) {
         state = AutoMeshState.Searching(now)
         takeoverDeadlineMs = null
+        joiningViaRememberedOwner = false // any remembered join ended without a settled outcome
         if (lostGroupUnexpectedly) {
             // Post-loss grace (TASK M1 part 4): for a short while after an
             // unexpected loss we only join visible owners and never create.
@@ -728,5 +786,6 @@ class AutoMeshController(
     private fun enterIdle() {
         state = AutoMeshState.Idle
         takeoverDeadlineMs = null
+        joiningViaRememberedOwner = false // paused/switched off mid-join: the attempt is abandoned
     }
 }
