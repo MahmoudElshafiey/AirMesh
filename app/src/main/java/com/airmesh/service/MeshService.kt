@@ -146,6 +146,16 @@ class MeshService : Service() {
     /** Persistence behind [mergeGroupsEnabled]; created in [onCreate]. */
     private lateinit var mergeFlagStore: MergeGroupsFlagStore
 
+    /** Whether the experimental recovery supervisor may act (Debug card switch). Persisted, default off. */
+    private val _recoverySupervisorEnabled = MutableStateFlow(RecoverySupervisorFlagStore.DEFAULT_ENABLED)
+    val recoverySupervisorEnabled: StateFlow<Boolean> = _recoverySupervisorEnabled.asStateFlow()
+
+    /** Persistence behind [recoverySupervisorEnabled]; created in [onCreate]. */
+    private lateinit var recoverySupervisorFlagStore: RecoverySupervisorFlagStore
+
+    /** When we became owner of the current group (TASK S1 part 1); null when not owning one. */
+    private var ownGroupFormedAtMs: Long? = null
+
     /** Monotonic startup-to-neighbor-up timeline recorder. */
     private val timelineRecorder = TimelineRecorder(SystemClock::elapsedRealtime)
 
@@ -157,7 +167,16 @@ class MeshService : Service() {
      * run their level-3 cycles in lockstep. Lazy because the seed needs [node], set in onCreate.
      */
     private val recoverySupervisor by lazy {
-        RecoverySupervisor({ System.currentTimeMillis() }, Random(node.localNodeId.toLong()))
+        // TASK S1 part 1: the supervisor never removes ANY group, gives our own fresh owner group
+        // a 10-minute grace (with or without clients), and never acts while a connect/create/merge
+        // is in flight. The old defaults stay available to the existing tests.
+        RecoverySupervisor(
+            clock = { System.currentTimeMillis() },
+            random = Random(node.localNodeId.toLong()),
+            allowGroupRemoval = false,
+            ownerGraceMs = RECOVERY_OWNER_GRACE_MS,
+            blockWhileInFlight = true,
+        )
     }
 
     /** This device's mesh id; set in [onCreate]. */
@@ -389,6 +408,9 @@ class MeshService : Service() {
         // Merging separate groups is on by default (TASK M1); the Advanced card persists it.
         mergeFlagStore = SharedPreferencesMergeGroupsFlagStore(this)
         _mergeGroupsEnabled.value = mergeFlagStore.load()
+        // The recovery supervisor stays off until the user opts in from the Debug card (TASK S1 part 1).
+        recoverySupervisorFlagStore = SharedPreferencesRecoverySupervisorFlagStore(this)
+        _recoverySupervisorEnabled.value = recoverySupervisorFlagStore.load()
 
         // The election ranks by (node id, tie-break token); our own Wi-Fi Direct
         // address is not used at all — on many devices it stays a placeholder that
@@ -616,18 +638,31 @@ class MeshService : Service() {
                 // live neighbor exists; each returned action maps to an existing call site (the
                 // supervisor never creates a group itself).
                 val cs = connector.state.value
-                for (action in recoverySupervisor.tick(
-                    RecoverySupervisor.Snapshot(
-                        autoMeshOn = _autoMeshEnabled.value,
-                        p2pEnabled = cs.p2pEnabled != false,
-                        liveNeighborCount = liveNeighborCount,
-                        state = controller?.state ?: AutoMeshState.Idle,
-                        groupFormed = cs.groupFormed,
-                        myClients = if (cs.role == P2pRole.GROUP_OWNER) liveNeighborCount else 0,
-                    ),
-                )) {
-                    _eventLog.log("recovery: supervisor ${describeRecoveryAction(action)}")
-                    executeRecoveryAction(action)
+                // TASK S1 part 1: the supervisor only runs when opted in from the Debug card.
+                if (_recoverySupervisorEnabled.value) {
+                    // How long we have owned the current group; feeds the owner grace window.
+                    ownGroupFormedAtMs = if (cs.groupFormed && cs.role == P2pRole.GROUP_OWNER) {
+                        ownGroupFormedAtMs ?: System.currentTimeMillis()
+                    } else {
+                        null
+                    }
+                    val nowMs = System.currentTimeMillis()
+                    for (action in recoverySupervisor.tick(
+                        RecoverySupervisor.Snapshot(
+                            autoMeshOn = _autoMeshEnabled.value,
+                            p2pEnabled = cs.p2pEnabled != false,
+                            liveNeighborCount = liveNeighborCount,
+                            state = controller?.state ?: AutoMeshState.Idle,
+                            groupFormed = cs.groupFormed,
+                            myClients = if (cs.role == P2pRole.GROUP_OWNER) liveNeighborCount else 0,
+                            // TASK S1 part 2 will pass the manual pause policy's state here.
+                            paused = false,
+                            ownerGroupAgeMs = ownGroupFormedAtMs?.let { nowMs - it },
+                        ),
+                    )) {
+                        _eventLog.log("recovery: supervisor ${describeRecoveryAction(action)}")
+                        executeRecoveryAction(action)
+                    }
                 }
             }
         }
@@ -838,6 +873,15 @@ class MeshService : Service() {
         syncAutoUi(controller)
         _eventLog.log("auto: merge flag ${if (enabled) "on" else "off"} => ${actions.joinToString(", ") { describeAction(it) }}")
         actions.forEach(::executeAutoAction)
+    }
+
+    /** Debug card switch (TASK S1 part 1): opt the experimental recovery supervisor in/out. */
+    fun setRecoverySupervisorEnabled(enabled: Boolean) {
+        if (_recoverySupervisorEnabled.value == enabled) return
+        _recoverySupervisorEnabled.value = enabled
+        recoverySupervisorFlagStore.save(enabled)
+        if (!enabled) recoverySupervisor.reset() // no stale episode may fire on re-enable
+        _eventLog.log("recovery: supervisor ${if (enabled) "on" else "off"}")
     }
 
     private fun applyAutoMeshEnabled(enabled: Boolean, persist: Boolean) {
@@ -1212,6 +1256,8 @@ class MeshService : Service() {
         private const val KEY_MESSAGE_NOTIFICATIONS_ENABLED = "message_notifications_enabled"
         /** Network tab switch: whether auto-mesh is on (default true). */
         private const val KEY_AUTO_MESH_ENABLED = "auto_mesh_enabled"
+        /** TASK S1 part 1: no supervisor action while we own a group younger than this. */
+        private const val RECOVERY_OWNER_GRACE_MS = 600_000L
         /** Ensures the initial DNS-SD strategy configuration is logged once per process. */
         private val loggedStartupStrategy = java.util.concurrent.atomic.AtomicBoolean(false)
     }

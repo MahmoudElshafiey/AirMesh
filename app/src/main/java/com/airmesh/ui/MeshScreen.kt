@@ -165,6 +165,9 @@ fun MeshScreen(
     // Discovery diagnostics shown as the banner's small second line.
     discoveryStrategy: Int = 1,
     rawCallbackCount: Int = 0,
+    // Debug card switch (TASK S1 part 1): opt in to the experimental recovery supervisor.
+    recoverySupervisorEnabled: Boolean = false,
+    onSetRecoverySupervisorEnabled: (Boolean) -> Unit = {},
     // Debuggable builds only: per-screen recomposition counts and UI state emissions are
     // reported to the event log every 30 s while the UI is visible (TASK U4 part 3).
     showPerfCounters: Boolean = false,
@@ -612,6 +615,8 @@ fun MeshScreen(
                         // Discovery diagnostics for the Debug card (debuggable builds only).
                         discoveryStrategy = discoveryStrategy,
                         rawCallbackCount = rawCallbackCount,
+                        recoverySupervisorEnabled = recoverySupervisorEnabled,
+                        onSetRecoverySupervisorEnabled = onSetRecoverySupervisorEnabled,
                         profiles = profiles,
                         // Classic route parameters are Strings; "true" only comes from the hint.
                         advancedInitiallyExpanded = entry.arguments?.getString(ARG_EXPAND_ADVANCED) == "true",

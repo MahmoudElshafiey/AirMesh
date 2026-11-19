@@ -17,12 +17,20 @@ import java.util.Random
  *    strategy order.
  *
  * No level fires while a connect/createGroup is in flight (a Joining/Creating/Yielding younger than
- * [AUTO_JOIN_TIMEOUT_MS]); an older one counts as stuck and unblocks us. An episode resets whenever
- * a live neighbor appears, auto-mesh turns off, or Wi-Fi Direct goes down.
+ * [AUTO_JOIN_TIMEOUT_MS]); an older one counts as stuck and unblocks us — unless constructed with
+ * [blockWhileInFlight], which waits no matter how old the attempt gets. An episode resets whenever
+ * a live neighbor appears, auto-mesh turns off or is paused, Wi-Fi Direct goes down, or we own a
+ * group younger than [ownerGraceMs].
  */
 class RecoverySupervisor(
     private val clock: () -> Long = System::currentTimeMillis,
     private val random: Random = Random(),
+    /** Level 2 may remove our own client-less group. The real service passes false (TASK S1 part 1). */
+    private val allowGroupRemoval: Boolean = true,
+    /** No action at all while we own a group younger than this; 0 disables the grace. */
+    private val ownerGraceMs: Long = 0L,
+    /** Never act while Joining/Creating/Yielding, even past [AUTO_JOIN_TIMEOUT_MS]. */
+    private val blockWhileInFlight: Boolean = false,
 ) {
 
     /** One input snapshot per tick; the service builds it from controller + connector state. */
@@ -34,6 +42,10 @@ class RecoverySupervisor(
         val groupFormed: Boolean,
         /** Our client count (phones in our group); 0 unless we are the owner. */
         val myClients: Int,
+        /** True while auto-mesh is temporarily paused by a manual action (TASK S1 part 2). */
+        val paused: Boolean = false,
+        /** Age of our own formed group; null when we do not own one (no grace applies). */
+        val ownerGroupAgeMs: Long? = null,
     )
 
     /** True after any level fired in the current episode; cleared when the episode resets. */
@@ -54,8 +66,16 @@ class RecoverySupervisor(
      */
     fun tick(snapshot: Snapshot): List<RecoveryAction> {
         val now = clock()
-        if (!snapshot.autoMeshOn || !snapshot.p2pEnabled || snapshot.liveNeighborCount > 0) {
+        if (!snapshot.autoMeshOn || snapshot.paused || !snapshot.p2pEnabled || snapshot.liveNeighborCount > 0) {
             resetEpisode() // not our situation (or it just ended): start clean next time
+            return emptyList()
+        }
+
+        // Owner grace (TASK S1 part 1): a fresh group of our own is healthy by definition, so the
+        // level clock does not even run while it is younger than [ownerGraceMs].
+        val ownerAge = snapshot.ownerGroupAgeMs
+        if (ownerAge != null && ownerGraceMs > 0L && ownerAge < ownerGraceMs) {
+            resetEpisode()
             return emptyList()
         }
 
@@ -67,6 +87,11 @@ class RecoverySupervisor(
             creatingSinceMs = null
         }
         creatingSinceMs = if (snapshot.state is AutoMeshState.Creating) creatingSinceMs ?: now else null
+
+        // TASK S1 part 1: with [blockWhileInFlight] the supervisor waits out ANY connect/create/
+        // merge attempt — even one older than the controller's own timeout — instead of acting on
+        // top of it. The episode clock keeps running, so levels fire as soon as it settles.
+        if (blockWhileInFlight && inFlightState(snapshot.state)) return emptyList()
 
         // Never act while a connect/createGroup is in flight; the controller's own 40 s timeout
         // bounds that, so an older one counts as stuck and unblocks us.
@@ -95,7 +120,8 @@ class RecoverySupervisor(
             actions += RecoveryAction.ResetTcpRetry
             actions += RecoveryAction.ResetGroupPresence
             // Only a client-less group of our own may be removed; never one with clients in it.
-            if (snapshot.groupFormed && snapshot.liveNeighborCount == 0 && snapshot.myClients == 0) {
+            // The real service disables removal entirely (TASK S1 part 1).
+            if (allowGroupRemoval && snapshot.groupFormed && snapshot.liveNeighborCount == 0 && snapshot.myClients == 0) {
                 actions += RecoveryAction.RemoveOwnGroup
             }
         }
@@ -121,6 +147,17 @@ class RecoverySupervisor(
         creatingSinceMs = null
         didAct = false
     }
+
+    /** True while a connect, group creation or merge is in flight. */
+    private fun inFlightState(state: AutoMeshState): Boolean = when (state) {
+        is AutoMeshState.Joining -> true
+        is AutoMeshState.Creating -> true
+        is AutoMeshState.Yielding -> true
+        else -> false
+    }
+
+    /** Abandon the current episode so a stale one cannot fire after the supervisor is switched off. */
+    fun reset() = resetEpisode()
 
     companion object {
         /** Level 1 (stale peers + re-register + scan burst) fires after this much isolation. */

@@ -85,6 +85,9 @@ fun MeshNetworkTab(
     // Discovery diagnostics for the Debug card; that card only exists in debuggable builds.
     discoveryStrategy: Int = 1,
     rawCallbackCount: Int = 0,
+    // Debug card switch (TASK S1 part 1): opt in to the experimental recovery supervisor.
+    recoverySupervisorEnabled: Boolean = false,
+    onSetRecoverySupervisorEnabled: (Boolean) -> Unit = {},
     // Display names learned from the mesh; unknown neighbors fall back to "User #id".
     profiles: Map<Int, ProfileInfo> = emptyMap(),
     // TASK U4 part 1: true when entered via the chats home's "Manual connect" hint, so the
@@ -151,6 +154,8 @@ fun MeshNetworkTab(
                 onSetUseTestLocation = onSetUseTestLocation,
                 discoveryStrategy = discoveryStrategy,
                 rawCallbackCount = rawCallbackCount,
+                recoverySupervisorEnabled = recoverySupervisorEnabled,
+                onSetRecoverySupervisorEnabled = onSetRecoverySupervisorEnabled,
             )
         }
     }
@@ -487,6 +492,8 @@ private fun DebugCard(
     onSetUseTestLocation: (Boolean) -> Unit,
     discoveryStrategy: Int,
     rawCallbackCount: Int,
+    recoverySupervisorEnabled: Boolean = false,
+    onSetRecoverySupervisorEnabled: (Boolean) -> Unit = {},
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -503,6 +510,19 @@ private fun DebugCard(
                     )
                 }
                 Switch(checked = useTestLocation, onCheckedChange = onSetUseTestLocation)
+            }
+            // TASK S1 part 1: the supervisor is opt-in; off by default so its level schedule
+            // never runs unless a tester asks for it.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Recovery supervisor (experimental)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Escalating recovery while isolated; never removes a group",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = recoverySupervisorEnabled, onCheckedChange = onSetRecoverySupervisorEnabled)
             }
             // Pure helper from transport; the exact wording is unit-tested there.
             Text(

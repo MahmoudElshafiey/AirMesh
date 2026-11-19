@@ -225,6 +225,7 @@ class MeshActivity : ComponentActivity() {
                         val events by service.uiEvents.collectAsStateWithLifecycle()
                         val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsStateWithLifecycle()
                         val mergeGroupsEnabled by service.mergeGroupsEnabled.collectAsStateWithLifecycle()
+                        val recoverySupervisorEnabled by service.recoverySupervisorEnabled.collectAsStateWithLifecycle()
                         val autoMeshState by service.autoMeshState.collectAsStateWithLifecycle()
                         val autoIdleReason by service.autoIdleReason.collectAsStateWithLifecycle()
                         val airMeshPeers by service.airMeshPeers.collectAsStateWithLifecycle()
@@ -300,6 +301,8 @@ class MeshActivity : ComponentActivity() {
                             onSetAutoMeshEnabled = service::setAutoMeshEnabled,
                             discoveryStrategy = discoveryStrategy,
                             rawCallbackCount = rawCallbackCount,
+                            recoverySupervisorEnabled = recoverySupervisorEnabled,
+                            onSetRecoverySupervisorEnabled = service::setRecoverySupervisorEnabled,
                             permissionsGranted = wifiDirectGranted.value,
                             // Radar indicator self-check lines go to the same Log tab.
                             onUiEventLog = ::log,
