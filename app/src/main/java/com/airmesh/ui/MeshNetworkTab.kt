@@ -92,6 +92,9 @@ fun MeshNetworkTab(
     // Debug card switch (TASK S1 part 1): opt in to the experimental recovery supervisor.
     recoverySupervisorEnabled: Boolean = false,
     onSetRecoverySupervisorEnabled: (Boolean) -> Unit = {},
+    // Debug card switch (TASK T1 part C3): owner discoverability probe experiment.
+    ownerProbeEnabled: Boolean = false,
+    onSetOwnerProbeEnabled: (Boolean) -> Unit = {},
     // Display names learned from the mesh; unknown neighbors fall back to "User #id".
     profiles: Map<Int, ProfileInfo> = emptyMap(),
     // TASK U4 part 1: true when entered via the chats home's "Manual connect" hint, so the
@@ -164,6 +167,8 @@ fun MeshNetworkTab(
                 rawCallbackCount = rawCallbackCount,
                 recoverySupervisorEnabled = recoverySupervisorEnabled,
                 onSetRecoverySupervisorEnabled = onSetRecoverySupervisorEnabled,
+                ownerProbeEnabled = ownerProbeEnabled,
+                onSetOwnerProbeEnabled = onSetOwnerProbeEnabled,
             )
         }
     }
@@ -526,6 +531,8 @@ private fun DebugCard(
     rawCallbackCount: Int,
     recoverySupervisorEnabled: Boolean = false,
     onSetRecoverySupervisorEnabled: (Boolean) -> Unit = {},
+    ownerProbeEnabled: Boolean = false,
+    onSetOwnerProbeEnabled: (Boolean) -> Unit = {},
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -555,6 +562,19 @@ private fun DebugCard(
                     )
                 }
                 Switch(checked = recoverySupervisorEnabled, onCheckedChange = onSetRecoverySupervisorEnabled)
+            }
+            // TASK T1 part C3: while an empty owner stays empty for 10 s it re-scans with
+            // strategy 3 (discoverPeers then services) every 20 s — the evidence-(1) experiment.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Owner discoverability probe (experimental)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Empty owner re-scans with discoverPeers + services every 20 s",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = ownerProbeEnabled, onCheckedChange = onSetOwnerProbeEnabled)
             }
             // Pure helper from transport; the exact wording is unit-tested there.
             Text(

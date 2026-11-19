@@ -171,6 +171,9 @@ fun MeshScreen(
     // Debug card switch (TASK S1 part 1): opt in to the experimental recovery supervisor.
     recoverySupervisorEnabled: Boolean = false,
     onSetRecoverySupervisorEnabled: (Boolean) -> Unit = {},
+    // Debug card switch (TASK T1 part C3): owner discoverability probe experiment.
+    ownerProbeEnabled: Boolean = false,
+    onSetOwnerProbeEnabled: (Boolean) -> Unit = {},
     // Debuggable builds only: per-screen recomposition counts and UI state emissions are
     // reported to the event log every 30 s while the UI is visible (TASK U4 part 3).
     showPerfCounters: Boolean = false,
@@ -623,6 +626,8 @@ fun MeshScreen(
                         rawCallbackCount = rawCallbackCount,
                         recoverySupervisorEnabled = recoverySupervisorEnabled,
                         onSetRecoverySupervisorEnabled = onSetRecoverySupervisorEnabled,
+                        ownerProbeEnabled = ownerProbeEnabled,
+                        onSetOwnerProbeEnabled = onSetOwnerProbeEnabled,
                         profiles = profiles,
                         // Classic route parameters are Strings; "true" only comes from the hint.
                         advancedInitiallyExpanded = entry.arguments?.getString(ARG_EXPAND_ADVANCED) == "true",

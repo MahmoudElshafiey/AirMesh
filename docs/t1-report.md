@@ -118,7 +118,40 @@ Status per part is updated as work progresses; final state in Part E.
     failure is not counted), 45 s+jitter pacing after a failure, the 3-attempt cap clearing the
     store, success refreshing the record so numbering restarts at #1, auto-off gating, and a
     non-AVAILABLE peer never triggering. Existing AutoMeshControllerTest stays green: 43/43.
-- C3 ownerProbe experiment + 25 s watchdog: PENDING
+- C3 ownerProbe experiment + 25 s watchdog: DONE (commit hash filled in Part E)
+  - DiscoveryCoordinator (pure): new optional ctor param `stuckCycleMs: Long = STUCK_CYCLE_MS`
+    (between burstOffsetsMs and clock; the old 90 s default keeps every other caller unchanged)
+    used by releaseStuckCycleIfAny. New public `var ownerProbeActive` + private lastProbeAtMs:
+    while set, tick() issues one-shot strategy-3 scans (discoverPeers then services — the
+    DnsSdRefreshSequencer plan for 3) on their own OWNER_PROBE_INTERVAL_MS=20 s cadence, ahead of
+    the merge-scan gate and the burst/refresh branches; each scan releases the radio on completion
+    so the next firing starts a fresh cycle. CycleComplete / refreshIfDue / rotateIfSilent got the
+    matching `|| ownerProbeActive` special cases (rotation never issues its own scan in probe mode,
+    like it does not in gate mode); stopService() clears both probe fields. A just-released stuck
+    cycle is re-issued on the same tick because its 20 s interval has already elapsed.
+  - MeshService: passes `stuckCycleMs = 25_000L` at coordinator construction (evidence 5: one lost
+    callback kept an empty owner silent for over 94 s). New OwnerProbeFlagStore (interface +
+    SharedPreferences impl, "airmesh_service" prefs, key "owner_probe_enabled", default OFF) copying
+    the recovery-supervisor pattern; `_ownerProbeEnabled` StateFlow + setOwnerProbeEnabled(). The 1 s
+    tick loop tracks an empty-owner period: probeWanted = flag && auto on && group formed && role
+    OWNER && liveNeighborCount == 0 (gated on the auto switch so a manually created group is never
+    touched); after OWNER_PROBE_MIN_EMPTY_MS=10 s it sets coordinator.ownerProbeActive and logs
+    "dnssd: owner probe started/stopped"; activation also calls setDiscovering(true) (idempotent —
+    makes sure the directory's 5 s loop runs). Deactivation only clears the flag, so the previous
+    cadence resumes untouched.
+  - UI: Debug card switch "Owner discoverability probe (experimental)" threaded
+    MeshService -> MeshActivity -> MeshScreen -> MeshNetworkTab -> DebugCard (debuggable builds only),
+    same pattern as the recovery-supervisor switch.
+  - Tests: DiscoveryCoordinatorOwnerProbeTest 4/4 — probe cadence on the 5 s directory grid
+    (scans at exactly 0/20k/40k/60k/80k/100k, all strategy=3, six "dnssd: owner probe cycle" lines);
+    probe beats the merge-scan gate (20 s cadence + forced strategy 3 instead of the gate's 15 s /
+    strategy 2); a stuck addServiceRequest is released at exactly the custom 25_000L boundary and
+    re-issued on the same tick, then back to the 20 s cadence; stopService leaves probe mode.
+    Existing DiscoveryCoordinatorTest 16/16 and DiscoveryCoordinatorOwnerScanTest 4/4 stay green
+    (default stuckCycleMs = old 90 s behavior). :app:compileDebugKotlin clean.
+- End of Part C full suite: 1070 tests, 1 failure — the known pre-existing S2 baseline
+  TcpMeshTransportKeepaliveTest.keepaliveHellosNeverReachIncoming (pending user decision; T1 adds
+  zero new failures). Count check: 1042 at end of B + 7 (C1) + 17 (C2) + 4 (C3) = 1070.
 
 ## Part D — keepalive and flapping
 - D0 findings (max 25 lines): PENDING

@@ -226,6 +226,7 @@ class MeshActivity : ComponentActivity() {
                         val messageNotificationsEnabled by service.messageNotificationsEnabled.collectAsStateWithLifecycle()
                         val mergeGroupsEnabled by service.mergeGroupsEnabled.collectAsStateWithLifecycle()
                         val recoverySupervisorEnabled by service.recoverySupervisorEnabled.collectAsStateWithLifecycle()
+                        val ownerProbeEnabled by service.ownerProbeEnabled.collectAsStateWithLifecycle()
                         val autoMeshState by service.autoMeshState.collectAsStateWithLifecycle()
                         val autoIdleReason by service.autoIdleReason.collectAsStateWithLifecycle()
                         // TASK S1 part 2: countdown for the "Auto connect paused" banner.
@@ -307,6 +308,8 @@ class MeshActivity : ComponentActivity() {
                             rawCallbackCount = rawCallbackCount,
                             recoverySupervisorEnabled = recoverySupervisorEnabled,
                             onSetRecoverySupervisorEnabled = service::setRecoverySupervisorEnabled,
+                            ownerProbeEnabled = ownerProbeEnabled,
+                            onSetOwnerProbeEnabled = service::setOwnerProbeEnabled,
                             permissionsGranted = wifiDirectGranted.value,
                             // Radar indicator self-check lines go to the same Log tab.
                             onUiEventLog = ::log,

@@ -76,6 +76,9 @@ class DiscoveryCoordinator(
         DiscoveryStrategySelector(NoDiscoveryStrategyStore),
     /** Offsets from entering Searching for the initial scan burst (+0.5 s, +6 s, +14 s). */
     private val burstOffsetsMs: List<Long> = DEFAULT_BURST_OFFSETS_MS,
+    // TASK T1 part C3: MeshService passes 25 s so a stuck cycle frees the radio quickly;
+    // the default keeps the old 90 s for every other caller.
+    private val stuckCycleMs: Long = STUCK_CYCLE_MS,
     // Clock stays last: existing callers use `DiscoveryCoordinator(backend) { now }`.
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -119,6 +122,17 @@ class DiscoveryCoordinator(
      * by [stopService].
      */
     var ownerScanGate: ((Long) -> Boolean)? = null
+
+    /**
+     * Owner discoverability probe (TASK T1 part C3): while set, [tick] issues one-shot
+     * strategy-3 scans (discoverPeers then services) on their own [OWNER_PROBE_INTERVAL_MS]
+     * cadence instead of the gate or the burst/refresh cadence. Each scan releases the radio
+     * on completion so the next firing starts a fresh cycle. Cleared by [stopService].
+     */
+    var ownerProbeActive: Boolean = false
+
+    /** When the last probe cycle was issued; null before the first one. */
+    private var lastProbeAtMs: Long? = null
 
     /**
      * Arms the startup scan burst (+0.5 s, +6 s, +14 s) when entering Searching,
@@ -188,9 +202,9 @@ class DiscoveryCoordinator(
 
             DnsSdRefreshAction.CycleComplete -> {
                 log("dnssd: service cycle complete")
-                // In owner merge-scan mode each scan is one-shot: release the radio
-                // so the next gate firing issues a fresh clear → add → discover.
-                if (ownerScanGate != null) serviceDiscoveryActive = false
+                // In owner merge-scan mode and probe mode each scan is one-shot: release the
+                // radio so the next gate/probe firing issues a fresh clear → add → discover.
+                if (ownerScanGate != null || ownerProbeActive) serviceDiscoveryActive = false
             }
             DnsSdRefreshAction.Ignored -> Unit
         }
@@ -233,9 +247,10 @@ class DiscoveryCoordinator(
 
     /** Re-issue the cycle when a burst offset or [DISCOVERY_REFRESH_MS] is due. */
     fun refreshIfDue(nowMs: Long): Boolean {
-        // Owner merge-scan mode paces its own scans through the gate; the 60 s
-        // cadence must not bypass it (e.g. while a gated cycle is still active).
-        if (ownerScanGate != null) return false
+        // Owner merge-scan mode paces its own scans through the gate and probe mode through
+        // its 20 s interval; the 60 s cadence must not bypass either (e.g. while one of
+        // their cycles is still active).
+        if (ownerScanGate != null || ownerProbeActive) return false
         if (burstOriginMs != null) {
             return if (!peerScanActive) advanceBurstIfDue(nowMs) else false
         }
@@ -276,19 +291,31 @@ class DiscoveryCoordinator(
         }
         if (!peerScanActive) {
             releaseStuckCycleIfAny(nowMs) // a cycle that never completes must not hold the radio forever
-            val gate = ownerScanGate
-            if (gate != null) {
-                // Owner merge-scan mode: the gate paces every scan — no startup
-                // burst, no 60 s refresh. A cycle already running owns the radio.
-                if (!serviceDiscoveryActive && gate(nowMs)) {
-                    issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
+            if (ownerProbeActive) {
+                // Owner probe mode: one-shot strategy-3 scans on their own 20 s cadence,
+                // ahead of the gate and the burst/refresh branches. A just-released stuck
+                // cycle is re-issued on this same tick because its interval has elapsed.
+                val last = lastProbeAtMs
+                if (!serviceDiscoveryActive && (last == null || nowMs - last >= OWNER_PROBE_INTERVAL_MS)) {
+                    log("dnssd: owner probe cycle")
+                    lastProbeAtMs = nowMs
+                    issueServiceCycleWithStrategy(OWNER_PROBE_STRATEGY, nowMs)
                 }
-            } else if (burstOriginMs != null) {
-                advanceBurstIfDue(nowMs)
-            } else if (!serviceDiscoveryActive) {
-                issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
             } else {
-                refreshIfDue(nowMs)
+                val gate = ownerScanGate
+                if (gate != null) {
+                    // Owner merge-scan mode: the gate paces every scan — no startup
+                    // burst, no 60 s refresh. A cycle already running owns the radio.
+                    if (!serviceDiscoveryActive && gate(nowMs)) {
+                        issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
+                    }
+                } else if (burstOriginMs != null) {
+                    advanceBurstIfDue(nowMs)
+                } else if (!serviceDiscoveryActive) {
+                    issueServiceCycleWithStrategy(strategySelector.strategy, nowMs)
+                } else {
+                    refreshIfDue(nowMs)
+                }
             }
             // A strategy whose scan stayed silent for the window rotates to the next fallback.
             rotateIfSilent(nowMs)
@@ -321,10 +348,11 @@ class DiscoveryCoordinator(
         lastCycleAtMs = null
         burstOriginMs = null
         burstIndex = 0
-        if (ownerScanGate != null) {
+        if (ownerScanGate != null || ownerProbeActive) {
             // Gate mode: rotation must not issue a scan of its own — that would
             // bypass the gate's pacing. The next gate-allowed firing uses the new
-            // strategy, so a broken variant is still learned around.
+            // strategy, so a broken variant is still learned around. Probe mode is
+            // the same: the next probe firing re-issues strategy 3 on its own cadence.
             serviceDiscoveryActive = false
             return
         }
@@ -336,14 +364,14 @@ class DiscoveryCoordinator(
      * Watchdog (TASK S1 part 3): a service cycle whose steps never complete — a lost framework
      * callback, or a step failing on every retry — would otherwise hold [serviceDiscoveryActive]
      * forever. In owner merge-scan mode the gate path then issues no further scans at all, which
-     * is why an empty owner stopped scanning after its first scan. After [STUCK_CYCLE_MS] we
+     * is why an empty owner stopped scanning after its first scan. After [stuckCycleMs] we
      * abandon the cycle; the rest of this same tick re-issues a fresh one (the 60 s refresh or
      * the next gate firing paces it). Healthy cycles complete within seconds, so this only ever
      * touches genuinely stuck ones.
      */
     private fun releaseStuckCycleIfAny(nowMs: Long) {
         val last = lastCycleAtMs ?: return
-        if (!serviceDiscoveryActive || nowMs - last < STUCK_CYCLE_MS) return
+        if (!serviceDiscoveryActive || nowMs - last < stuckCycleMs) return
         log("dnssd: service cycle stuck for ${nowMs - last}ms — releasing the radio")
         sequencer.reset() // abandon in-flight steps and their retries, like a manual scan does
         serviceDiscoveryActive = false
@@ -360,6 +388,8 @@ class DiscoveryCoordinator(
         burstIndex = 0
         peerScanStartedAtMs = null
         ownerScanGate = null // leaving merge-scan mode; the next start re-arms it
+        ownerProbeActive = false // leaving probe mode; the service's tick loop re-arms it if still wanted
+        lastProbeAtMs = null
     }
 
     /**
@@ -381,6 +411,12 @@ class DiscoveryCoordinator(
 
         /** A service cycle not complete after this long is stuck and gets released (TASK S1 part 3). */
         const val STUCK_CYCLE_MS = 90_000L
+
+        /** Owner probe mode: one strategy-3 scan per interval (TASK T1 part C3). */
+        const val OWNER_PROBE_INTERVAL_MS = 20_000L
+
+        /** The probe's scan variant: discoverPeers first, then the DNS-SD service scan. */
+        const val OWNER_PROBE_STRATEGY = 3
 
         /** Burst scans use only strategy 1 or 2 (no discoverPeers and no service re-registration). */
         fun burstStrategy(strategy: Int): Int = if (strategy == 1) 1 else 2

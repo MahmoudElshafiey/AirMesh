@@ -174,8 +174,18 @@ class MeshService : Service() {
     /** Persistence behind [recoverySupervisorEnabled]; created in [onCreate]. */
     private lateinit var recoverySupervisorFlagStore: RecoverySupervisorFlagStore
 
+    /** Whether the experimental owner discoverability probe may act (Debug card switch). Persisted, default off. */
+    private val _ownerProbeEnabled = MutableStateFlow(OwnerProbeFlagStore.DEFAULT_ENABLED)
+    val ownerProbeEnabled: StateFlow<Boolean> = _ownerProbeEnabled.asStateFlow()
+
+    /** Persistence behind [ownerProbeEnabled]; created in [onCreate]. */
+    private lateinit var ownerProbeFlagStore: OwnerProbeFlagStore
+
     /** TASK T1 part C1: remembers the owner we last joined, for reconnection when DNS-SD is silent. */
     private lateinit var rememberedOwnerStore: RememberedOwnerStore
+
+    /** When the current empty-owner period started (TASK T1 part C3); null while not an empty owner. */
+    private var ownerZeroClientsSinceMs: Long? = null
 
     /** When we became owner of the current group (TASK S1 part 1); null when not owning one. */
     private var ownGroupFormedAtMs: Long? = null
@@ -427,6 +437,9 @@ class MeshService : Service() {
             // and the directory's own state, so the sequencer needs no locking.
             schedule = { ms, block -> serviceScope.launch { delay(ms); block() } },
             strategySelector = selector,
+            // TASK T1 part C3: a stuck cycle frees the radio after 25 s instead of 90 — on device
+            // one lost callback kept an empty owner silent for over 94 s (evidence 5).
+            stuckCycleMs = 25_000L,
         )
         // The ad carries node id + token, not a MAC: our own P2P address is a
         // placeholder on many devices and nothing about advertising needs it.
@@ -459,6 +472,9 @@ class MeshService : Service() {
         // The recovery supervisor stays off until the user opts in from the Debug card (TASK S1 part 1).
         recoverySupervisorFlagStore = SharedPreferencesRecoverySupervisorFlagStore(this)
         _recoverySupervisorEnabled.value = recoverySupervisorFlagStore.load()
+        // TASK T1 part C3: the owner probe stays off until a tester opts in from the Debug card.
+        ownerProbeFlagStore = SharedPreferencesOwnerProbeFlagStore(this)
+        _ownerProbeEnabled.value = ownerProbeFlagStore.load()
         // TASK T1 part C1: the remembered-owner record survives restarts (SharedPreferences).
         rememberedOwnerStore = RememberedOwnerStore(SharedPreferencesRememberedOwnerStorage(this))
 
@@ -728,6 +744,24 @@ class MeshService : Service() {
                 // live neighbor exists; each returned action maps to an existing call site (the
                 // supervisor never creates a group itself).
                 val cs = connector.state.value
+                // TASK T1 part C3: owner discoverability probe — while an empty owner stays empty
+                // for OWNER_PROBE_MIN_EMPTY_MS, re-scan with strategy 3 (discoverPeers then
+                // services) every 20 s instead of the normal cadence. Gated on the auto switch so
+                // a manually created group is never touched; the coordinator owns all pacing.
+                val probeWanted = _ownerProbeEnabled.value && _autoMeshEnabled.value &&
+                    cs.groupFormed && cs.role == P2pRole.GROUP_OWNER && liveNeighborCount == 0
+                if (probeWanted) {
+                    ownerZeroClientsSinceMs = ownerZeroClientsSinceMs ?: System.currentTimeMillis()
+                } else {
+                    ownerZeroClientsSinceMs = null
+                }
+                val probeActive = probeWanted &&
+                    System.currentTimeMillis() - (ownerZeroClientsSinceMs ?: 0L) >= OWNER_PROBE_MIN_EMPTY_MS
+                if (probeActive != discoveryCoordinator.ownerProbeActive) {
+                    _eventLog.log("dnssd: owner probe ${if (probeActive) "started" else "stopped"}")
+                    discoveryCoordinator.ownerProbeActive = probeActive
+                    if (probeActive) peerDirectory.setDiscovering(true) // make sure the 5 s loop is running
+                }
                 // TASK S1 part 1: the supervisor only runs when opted in from the Debug card.
                 if (_recoverySupervisorEnabled.value) {
                     // How long we have owned the current group; feeds the owner grace window.
@@ -1030,6 +1064,14 @@ class MeshService : Service() {
         recoverySupervisorFlagStore.save(enabled)
         if (!enabled) recoverySupervisor.reset() // no stale episode may fire on re-enable
         _eventLog.log("recovery: supervisor ${if (enabled) "on" else "off"}")
+    }
+
+    /** Debug card switch for the owner discoverability probe (TASK T1 part C3). */
+    fun setOwnerProbeEnabled(enabled: Boolean) {
+        if (_ownerProbeEnabled.value == enabled) return
+        _ownerProbeEnabled.value = enabled
+        ownerProbeFlagStore.save(enabled)
+        _eventLog.log("dnssd: owner probe switch ${if (enabled) "on" else "off"}")
     }
 
     private fun applyAutoMeshEnabled(enabled: Boolean, persist: Boolean) {
@@ -1419,6 +1461,8 @@ class MeshService : Service() {
         private const val REMEMBER_OWNER_WAIT_MS = 15_000L
         /** TASK T1 part C1: poll interval while waiting for both pieces of the record. */
         private const val REMEMBER_OWNER_POLL_MS = 500L
+        /** TASK T1 part C3: an empty owner must stay empty this long before the probe starts. */
+        private const val OWNER_PROBE_MIN_EMPTY_MS = 10_000L
         /** Ensures the initial DNS-SD strategy configuration is logged once per process. */
         private val loggedStartupStrategy = java.util.concurrent.atomic.AtomicBoolean(false)
     }
