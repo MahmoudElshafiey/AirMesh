@@ -2,6 +2,7 @@ package com.airmesh.node
 
 import android.content.Context
 import com.airmesh.profile.SharedPrefsProfileStorage
+import com.airmesh.routing.SequenceKeeper
 import com.airmesh.storage.createRoomBackedStore
 import com.airmesh.transport.TcpMeshTransport
 import kotlinx.coroutines.CoroutineDispatcher
@@ -46,5 +47,8 @@ fun createAirMeshNode(
         profileStorage = SharedPrefsProfileStorage(context),
         profileAnnounceIntervalMs = profileAnnounceIntervalMs,
         announceWithoutName = announceWithoutName,
+        // TASK T1 part B2: the origin sequence resumes above the persisted high-water mark,
+        // so a restarted node never reuses a seq a peer's dedup window may still hold.
+        sequenceKeeper = SequenceKeeper(SharedPreferencesSequenceStorage(context)),
     )
 }

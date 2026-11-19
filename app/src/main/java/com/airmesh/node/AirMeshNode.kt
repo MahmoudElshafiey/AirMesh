@@ -18,6 +18,7 @@ import com.airmesh.routing.DedupCache
 import com.airmesh.routing.FramePolicy
 import com.airmesh.routing.ReplayTrigger
 import com.airmesh.routing.Router
+import com.airmesh.routing.SequenceKeeper
 import com.airmesh.routing.StoreAndForward
 import com.airmesh.transport.ReceivedPacket
 import com.airmesh.transport.TcpMeshTransport
@@ -192,6 +193,9 @@ class AirMeshNode(
     // behavior; node tests shorten them to stay fast on real time.
     private val profileBurstDelaysMs: List<Long> = ProfileAnnouncePlanner.DEFAULT_BURST_DELAYS_MS,
     private val profileNewOriginJitterRangeMs: LongRange = ProfileAnnouncePlanner.DEFAULT_NEW_ORIGIN_JITTER_RANGE_MS,
+    // TASK T1 part B2: persistent origin sequence. Null (the default) keeps the historical
+    // start-at-1 behavior; MeshService passes a SharedPreferences-backed keeper.
+    private val sequenceKeeper: SequenceKeeper? = null,
 ) {
 
     companion object {
@@ -398,7 +402,17 @@ class AirMeshNode(
             clock = clock,
             log = eventLog::log,
             policy = directFramePolicy,
+            // TASK T1 part B2: resume the origin sequence from the persisted high-water mark
+            // and feed every allocation back so the keeper can persist it.
+            initialSeq = sequenceKeeper?.initialSeq ?: 0,
+            onSeqAllocated = { seq -> sequenceKeeper?.onAllocated(seq) },
         )
+
+        sequenceKeeper?.let { keeper ->
+            if (keeper.initialSeq > 0) {
+                eventLog.log("seq: resuming origin sequence at ${keeper.initialSeq + 1}")
+            }
+        }
     }
 
     /** Starts the transport and the collectors. Idempotent and restartable. */
@@ -448,6 +462,9 @@ class AirMeshNode(
 
         oldScope?.cancel()
         transport.stop()
+        // TASK T1 part B2: clean stop persists the sequence mark (crashes rely on the
+        // periodic persist instead).
+        sequenceKeeper?.stop()
         eventLog.log("node $localNodeId stopped")
     }
 

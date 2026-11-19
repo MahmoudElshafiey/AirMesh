@@ -32,8 +32,38 @@ Status per part is updated as work progresses; final state in Part E.
   existing test; the one-line mechanical fix would be `store.summaries.collect { s -> ... }`.
 
 ## Part B — persistent origin sequence
-- B1 Router E1: PENDING
-- B2 SequenceKeeper + wire-in + localhost node test: PENDING
+- B1 Router E1: DONE (commit 685e058). Two optional constructor params appended after `policy`:
+  `initialSeq: Int = 0` and `onSeqAllocated: (Int) -> Unit = {}`; defaults reproduce today's
+  behavior. nextSeq() reports every allocation through the callback. New RouterInitialSeqTest
+  (5 tests): default start at 1, resume after stored value, wrap-around at 65535, callback fires
+  for every allocation in order, initialSeq must fit 16 bits. All existing Router test classes
+  unchanged and green.
+- B2 SequenceKeeper + wire-in + localhost node test: DONE (commit hash filled in Part E).
+  - routing/SequenceKeeper.kt (pure): stored value is a HIGH-WATER MARK running PERSIST_MARGIN=32
+    ahead of the last allocated seq. Resume = stored + START_GAP=64, so the first post-restart
+    frame is at least 82 numbers beyond the last used one — never inside any peer's 1024-slot
+    dedup window, modulo 65536. Persists (current+32) every PERSIST_EVERY=16 allocations and on a
+    clean stop(). Missing/corrupt/out-of-range storage starts at seq 1 exactly as before; a stored
+    mark of 0 is treated as valid (it is what a wrapped persist writes).
+  - node/SharedPreferencesSequenceStorage.kt: SharedPreferences adapter ("airmesh_node" prefs, key
+    "seq_high_water_mark", decimal string, commit() so the mark is on disk before a crash can lose it).
+  - AirMeshNode: new optional `sequenceKeeper: SequenceKeeper? = null` (default = old behavior);
+    passes keeper.initialSeq to the Router and feeds every allocation back; logs
+    "seq: resuming origin sequence at N" when resuming above 0; stop() persists via keeper.stop().
+  - AirMeshNodeFactory.createAirMeshNode now constructs the keeper with the SharedPreferences
+    storage, so MeshService (the only caller) gets it without any change there.
+  - Tests: SequenceKeeperTest (7 tests, fake in-memory storage + fake clock): missing/corrupt/
+    out-of-range start at 1; clean-stop restart never reuses a number; crash without stop still
+    starts above the last used; wrap-around keeps the resume ahead of the high-water mark modulo
+    65536 (runs across 65535->0 and checks the first post-restart seq is outside the newest-1024
+    window); persist cadence every 16 with margin + fake-clock stamps; clean stop persists even
+    without new allocations. AirMeshNodeSequenceRestartTest: real localhost sockets, node A sends
+    20 messages + a DM (acked), stops cleanly and is rebuilt with the SAME storage, reconnects to
+    B (never restarted, so its dedup window still holds every phase-1 seq) and sends 5 more + a
+    second DM; asserts all 25 delivered exactly once, both DMs acked, zero "dropped duplicate"
+    lines for node=1. Without the keeper A would restart at seq 1 and B drops the whole batch —
+    this is the exact failure of evidence (2). All green: SequenceKeeperTest 7/7,
+    AirMeshNodeSequenceRestartTest 1/1; :app:compileDebugKotlin clean.
 
 ## Part C — remembered-owner reconnection
 - C1 RememberedOwnerStore: PENDING
