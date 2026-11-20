@@ -27,6 +27,8 @@ fun createAirMeshNode(
     // TASK U5 part 5 pass-throughs; 0/0 keeps today's transport behavior (no keepalive).
     keepAliveIntervalMs: Long = 0L,
     deadAfterMs: Long = 0L,
+    // TASK T1 part D2 pass-through; null keeps today's drop-on-silence behavior.
+    silenceGraceCheck: (() -> Boolean)? = null,
 ): AirMeshNode {
     // Share the node's event log with the transport so socket events (connect
     // phases, HELLO exchange, accept loop) show up in the on-device log.
@@ -36,6 +38,7 @@ fun createAirMeshNode(
         eventLog = eventLog,
         keepAliveIntervalMs = keepAliveIntervalMs,
         deadAfterMs = deadAfterMs,
+        silenceGraceCheck = silenceGraceCheck,
     )
     return AirMeshNode(
         localNodeId = nodeId,

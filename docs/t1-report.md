@@ -212,7 +212,41 @@ Status per part is updated as work progresses; final state in Part E.
   - Result: new class 2/2 green; existing TcpMeshTransportKeepaliveTest 5/6 with ONLY the known
     baseline failure keepaliveHellosNeverReachIncoming ("timed out after 10000ms waiting for
     keepalive HELLOs flowed both ways"); :app:compileDebugKotlin clean. Zero new failures.
-- D2 tolerant defaults + grace write + flap guard: PENDING
+- D2 tolerant defaults + grace write + flap guard: DONE (commit hash filled in Part E)
+  - MeshService defaults: keepAliveIntervalMs 8 s -> 5 s, deadAfterMs 24 s -> 40 s. New optional
+    ctor param silenceGraceCheck: (() -> Boolean)? = null on TcpMeshTransport (pass-through added
+    to AirMeshNodeFactory); MeshService passes "group formed AND p2p interface has its mesh
+    address" (connector.state.value.groupFormed && NetworkDiagnostics.hasGroupAddress(enumerate()),
+    evaluated lazily at silence time — long after connector exists).
+  - Grace: on a full-deadline silence the reader records the timeout, then if the check says true
+    logs "link to #id silent for Xs but the group is still formed; one keepalive and 5 s more",
+    writes ONE keepalive (counted in that socket's sent counter) and waits SILENCE_GRACE_WAIT_MS=5 s
+    for an answer. Any frame arriving inside the window is processed normally and the link lives on;
+    otherwise the EXACT old line "link to #id timed out (no data for Xs)" is logged and the reader
+    ends through the usual close path. null/false check = today's immediate drop, byte-for-byte.
+  - Flap guard: per node id (kept across reconnects on purpose — the flap pattern is timeout ->
+    close -> reconnect -> timeout again), monotonic-nano stamps inside FLAP_GUARD_WINDOW_MS=5 min;
+    more than FLAP_GUARD_THRESHOLD=3 timeouts in the window raises that peer's effective deadline to
+    flapGuardRaisedTimeout(base) = base*3/2 capped at FLAP_GUARD_MAX_DEAD_AFTER_MS=90 s (pure top-
+    level fun for unit tests); when the count cools back down it returns to base. The reader applies
+    deadAfterMsFor(id) before every blocking read, so a raised deadline takes effect from the next
+    silence episode and is reflected in its "no data for Xs" line; each raise transition is logged
+    ("flap guard: peer #id timed out 4+ times in 5 min; dead timeout raised to Xs").
+  - New TcpMeshTransportSilenceGraceTest (real loopback sockets, port 0, condition waits):
+    (1) flapGuardRaisesDeadTimeoutAfterRepeatedSilence — base 2 s; five silent raw-peer episodes:
+        exactly four "no data for 2s" drops, the raise log line, deadAfterMsFor(99)==3_000L and a
+        fifth drop logged as "no data for 3s". (2) flapGuardRaiseIsFiftyPercentCappedAtNinetySeconds
+        — pure: 8 s->12 s, 45 s->67.5 s, 70 s capped at 90 s. (3) graceKeepaliveKeepsLinkWhenPeer-
+        AnswersLate — check {true}, peer silent past the 2 s deadline then one MSG at +2.5 s via a
+        scheduled coroutine: link still up at +8 s, no "timed out" line, grace line logged, frame in
+        incoming. (4) graceFailsWhenPeerStaysSilent — dropped at ~deadline+5 s with the exact
+        timeout line and the logged grace attempt. (5) graceCheckFalseDropsImmediatelyWithoutGrace —
+        no grace line, plain-deadline drop. Spec checklist mapping: "default parameters behave as
+        before" = existing keepalive tests (b)/(d) with null check; "peer that goes silent after the
+        handshake is dropped after the dead timeout" = existing (b).
+  - Result: new class 5/5 green; TcpMeshTransportKeepaliveTest still 5/6 (only the known baseline
+    failure); TcpMeshTransportPerSocketKeepaliveTest still 2/2; :app:compileDebugKotlin clean. Zero
+    new failures.
 - D3 re-registration coalescing: PENDING
 
 ## Part E — final verification

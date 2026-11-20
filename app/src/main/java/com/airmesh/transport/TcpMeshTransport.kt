@@ -126,6 +126,14 @@ class TcpMeshTransport(
      * 0 (default) = off: readers block forever, as before.
      */
     private val deadAfterMs: Long = 0L,
+    /**
+     * TASK T1 part D2: optional check consulted when a link hits its silence deadline but before it
+     * is declared dead. When it returns true (e.g. the Wi-Fi Direct group is still formed and the
+     * p2p interface is up), one keepalive is written and [SILENCE_GRACE_WAIT_MS] more are waited
+     * for an answer; only a second full silence drops the link. null (default) = no grace: exactly
+     * today's behavior.
+     */
+    private val silenceGraceCheck: (() -> Boolean)? = null,
 ) : Transport {
 
     private companion object {
@@ -143,6 +151,9 @@ class TcpMeshTransport(
 
         /** Default timeout for the HELLO handshake phase. */
         const val DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000L
+
+        /** TASK T1 part D2: how long to wait for an answer after the grace keepalive write. */
+        const val SILENCE_GRACE_WAIT_MS = 5_000L
     }
 
     init {
@@ -183,6 +194,13 @@ class TcpMeshTransport(
     /** Keepalive HELLO frames received since start (they still count as link liveness). */
     val keepAliveCount: Long
         get() = keepAliveReceived.get()
+
+    // TASK T1 part D2: flap guard state, keyed by node id and deliberately kept across reconnects —
+    // the flapping pattern is timeout -> close -> reconnect -> timeout again. Stamps are monotonic
+    // nanos; entries older than FLAP_GUARD_WINDOW_MS expire on the next recordSilenceTimeout call.
+    private val flapLock = Any()
+    private val flapTimeoutStamps = HashMap<Int, ArrayDeque<Long>>()
+    private val raisedDeadAfterMs = HashMap<Int, Long>()
 
     private val helloBytes: ByteArray = FrameCodec.encode(
         Frame(
@@ -594,22 +612,53 @@ class TcpMeshTransport(
         (remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: "?"
 
     private suspend fun readFrames(remoteId: Int, peer: PeerConnection) {
-        if (deadAfterMs > 0L) {
-            // TASK U5 part 5: silence detection. Each blocking read gets a fresh deadline, so any
-            // received byte resets the clock; only deadAfterMs of total silence throws below.
-            peer.applyReadTimeout(deadAfterMs.toInt())
-        }
         while (true) {
-            val bytes = try {
+            // TASK U5 part 5 / T1 part D2: silence detection. Each blocking read gets a fresh
+            // deadline — the possibly flap-guard-raised one for this peer — so any received byte
+            // resets the clock; only that much total silence is handled below.
+            val deadlineMs = if (deadAfterMs > 0L) deadAfterMsFor(remoteId) else 0L
+            if (deadlineMs > 0L) {
+                peer.applyReadTimeout(deadlineMs.toInt())
+            }
+            var timedOut = false
+            var bytes: ByteArray? = try {
                 peer.readFrame()
             } catch (error: SocketTimeoutException) {
-                // No bytes at all for deadAfterMs: the link is dead even though TCP never noticed.
-                // End the reader normally; the caller's finally block removes the neighbor and
-                // closes the socket through the usual path.
-                log("link to #$remoteId timed out (no data for ${deadAfterMs / 1000}s)")
-                return
-            } ?: return
-            val frame = FrameCodec.decode(bytes).getOrNull()
+                timedOut = true
+                null
+            }
+            if (timedOut && deadlineMs > 0L) {
+                // No bytes at all for the full deadline. TASK T1 part D2: before declaring the link
+                // dead, give it one last chance while Wi-Fi Direct is demonstrably still up — write
+                // one keepalive and wait SILENCE_GRACE_WAIT_MS more for an answer.
+                recordSilenceTimeout(remoteId)
+                if (silenceGraceCheck?.invoke() == true) {
+                    log(
+                        "link to #$remoteId silent for ${deadlineMs / 1000}s but the group is still formed; " +
+                            "one keepalive and ${SILENCE_GRACE_WAIT_MS / 1000} s more",
+                    )
+                    if (runCatching { peer.write(helloBytes) }.isSuccess) {
+                        peer.noteKeepaliveSent()
+                    }
+                    peer.applyReadTimeout(SILENCE_GRACE_WAIT_MS.toInt())
+                    bytes = try {
+                        peer.readFrame()
+                    } catch (error: SocketTimeoutException) {
+                        null
+                    }
+                }
+                if (bytes == null) {
+                    // The link is dead even though TCP never noticed. End the reader normally; the
+                    // caller's finally block removes the neighbor and closes the socket through the
+                    // usual path.
+                    log("link to #$remoteId timed out (no data for ${deadlineMs / 1000}s)")
+                    return
+                }
+            } else if (bytes == null) {
+                return // clean end of stream
+            }
+            val frameBytes = bytes ?: return
+            val frame = FrameCodec.decode(frameBytes).getOrNull()
             if (frame == null) {
                 corruptFrames.incrementAndGet()
                 // Bytes arrived, so the peer is active even though we could not decode them.
@@ -628,8 +677,44 @@ class TcpMeshTransport(
                 continue
             }
             peer.noteIncomingData()
-            log("recv frame type=${frame.type} len=${bytes.size} from $remoteId")
-            _incoming.emit(ReceivedPacket(senderId = remoteId, bytes = bytes))
+            log("recv frame type=${frame.type} len=${frameBytes.size} from $remoteId")
+            _incoming.emit(ReceivedPacket(senderId = remoteId, bytes = frameBytes))
+        }
+    }
+
+    /** TASK T1 part D2: effective silence deadline for [neighborId] — raised while its flap guard is active. */
+    fun deadAfterMsFor(neighborId: Int): Long = synchronized(flapLock) {
+        raisedDeadAfterMs[neighborId] ?: deadAfterMs
+    }
+
+    /**
+     * TASK T1 part D2: records one full-deadline silence for [neighborId]. More than
+     * FLAP_GUARD_THRESHOLD timeouts inside FLAP_GUARD_WINDOW_MS raise this peer's effective dead
+     * timeout by 50 % (capped at FLAP_GUARD_MAX_DEAD_AFTER_MS); when the count cools back down it
+     * returns to the base value. The raise is logged once per transition.
+     */
+    private fun recordSilenceTimeout(neighborId: Int) {
+        var justRaised = false
+        var newDeadlineMs = deadAfterMs
+        synchronized(flapLock) {
+            val now = System.nanoTime()
+            val windowNanos = TimeUnit.MILLISECONDS.toNanos(FLAP_GUARD_WINDOW_MS)
+            val stamps = flapTimeoutStamps.getOrPut(neighborId) { ArrayDeque() }
+            stamps.addLast(now)
+            while (stamps.isNotEmpty() && now - stamps.first() > windowNanos) stamps.removeFirst()
+            newDeadlineMs = if (stamps.size > FLAP_GUARD_THRESHOLD) {
+                flapGuardRaisedTimeout(deadAfterMs)
+            } else {
+                deadAfterMs
+            }
+            justRaised = newDeadlineMs > (raisedDeadAfterMs[neighborId] ?: deadAfterMs)
+            raisedDeadAfterMs[neighborId] = newDeadlineMs
+        }
+        if (justRaised) {
+            log(
+                "flap guard: peer #$neighborId timed out ${FLAP_GUARD_THRESHOLD + 1}+ times in " +
+                    "${FLAP_GUARD_WINDOW_MS / 60_000L} min; dead timeout raised to ${newDeadlineMs / 1000}s",
+            )
         }
     }
 
@@ -806,3 +891,17 @@ data class PeerKeepaliveStats(
     val received: Long,
     val maxSilenceMs: Long,
 )
+
+// TASK T1 part D2: flap guard tuning. File-level so the pure [flapGuardRaisedTimeout] below and
+// the unit tests use exactly the same values as the transport.
+const val FLAP_GUARD_WINDOW_MS = 300_000L
+const val FLAP_GUARD_THRESHOLD = 3
+const val FLAP_GUARD_MAX_DEAD_AFTER_MS = 90_000L
+
+/**
+ * TASK T1 part D2 flap-guard math, kept pure for unit tests: one 50 % raise of the base silence
+ * deadline, capped at [FLAP_GUARD_MAX_DEAD_AFTER_MS]. Not cumulative — repeated flapping keeps the
+ * same raised value until the timeout count cools back down.
+ */
+fun flapGuardRaisedTimeout(baseMs: Long): Long =
+    (baseMs * 3L / 2L).coerceAtMost(FLAP_GUARD_MAX_DEAD_AFTER_MS)

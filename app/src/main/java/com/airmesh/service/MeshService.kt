@@ -58,6 +58,7 @@ import com.airmesh.transport.DiscoveryStrategyStore
 import com.airmesh.transport.FreshnessRules
 import com.airmesh.transport.ManualPauseAction
 import com.airmesh.transport.ManualPausePolicy
+import com.airmesh.transport.NetworkDiagnostics
 import com.airmesh.transport.OwnerScanPolicy
 import com.airmesh.transport.P2pRole
 import com.airmesh.transport.PeerDirectory
@@ -360,10 +361,19 @@ class MeshService : Service() {
             // history) and fall back to "User #id" so a nameless node still shows.
             profileAnnounceIntervalMs = 45_000L,
             announceWithoutName = true,
-            // TASK U5 part 5: probe idle direct links every 8 s and declare one dead after
-            // 24 s of total silence (no bytes in either direction).
-            keepAliveIntervalMs = 8_000L,
-            deadAfterMs = 24_000L,
+            // TASK T1 part D2: probe idle direct links every 5 s and declare one dead after
+            // 40 s of total silence (no bytes in either direction) — more tolerant than the old
+            // 8 s / 24 s, which left zero margin for Wi-Fi Direct jitter on an idle link.
+            keepAliveIntervalMs = 5_000L,
+            deadAfterMs = 40_000L,
+            // TASK T1 part D2: before dropping a silent link, give it one last chance while the
+            // Wi-Fi Direct group is demonstrably still formed and the p2p interface has its mesh
+            // address. Evaluated lazily at silence time, long after [connector] exists.
+            silenceGraceCheck = {
+                connector.state.value.groupFormed &&
+                    runCatching { NetworkDiagnostics.hasGroupAddress(NetworkDiagnostics.enumerate()) }
+                        .getOrDefault(false)
+            },
         )
         connector = WifiDirectConnector(applicationContext, node.transport, _eventLog)
 
