@@ -23,6 +23,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -205,32 +206,47 @@ class TcpMeshTransport(
             )
             checkNotNull(scope)
         }
-        // TASK U5 part 5: the keepalive writer lives in this start's scope, so a
-        // stop()/start() cycle restarts it against the fresh peer set.
-        if (keepAliveIntervalMs > 0L) {
-            owner.launch { keepAliveLoop() }
+        // TASK T1 part D1: there is no global writer here anymore — each live peer gets its own
+        // keepalive loop, launched from [register] into this start's scope (so a stop()/start()
+        // cycle restarts them against the fresh peer set).
+    }
+
+    /**
+     * TASK T1 part D1: one keepalive writer per socket, on the transport dispatcher.
+     *
+     * The old single global loop ticked every interval/2 over ALL peers; a slow or blocked write to
+     * one socket delayed the others, and its wall-clock stamps could be distorted by NTP jumps or
+     * suspend/wake. Now each live peer runs this coroutine: delay a full [keepAliveIntervalMs], then
+     * write a HELLO when this socket's last activity is at least one interval old — so the gap
+     * between two writes on one socket is bounded by about 2 x interval.
+     *
+     * The gate stays "any traffic in either direction" (see [PeerConnection]): a peer that is
+     * actively sending real frames does not need probing, and incoming keepalive HELLOs never
+     * refresh the gate — otherwise each side would suppress its own writer on the other's probes and
+     * one side could go silent forever while the sender's reader starves (TASK T1 evidence 3). The
+     * HELLO is consumed by the peer's reader and never reaches [incoming].
+     */
+    private suspend fun keepAliveLoopFor(neighborId: Int, peer: PeerConnection) {
+        val intervalNanos = TimeUnit.MILLISECONDS.toNanos(keepAliveIntervalMs)
+        while (currentCoroutineContext().isActive && !peer.isClosed()) {
+            delay(keepAliveIntervalMs)
+            if (peers[neighborId] !== peer || peer.isClosed()) return // replaced or removed mid-tick
+            val now = System.nanoTime()
+            if (now - peer.lastActivityAtNanos >= intervalNanos) {
+                if (writeToPeer(neighborId, peer, helloBytes)) {
+                    peer.noteKeepaliveSent()
+                }
+            }
         }
     }
 
     /**
-     * TASK U5 part 5: every tick, send a HELLO to each live peer whose last activity is at least
-     * [keepAliveIntervalMs] old. Any traffic in either direction refreshes the timestamp (see
-     * [PeerConnection]), so active links never see a keepalive write; only idle ones do. The
-     * HELLO is consumed by the peer's reader and never reaches [incoming].
+     * Per-socket keepalive counters for the service's 60 s "tcp: stats" line (TASK T1 part D1).
+     * [PeerKeepaliveStats.maxSilenceMs] is the largest gap between two consecutive successful
+     * writes on that socket.
      */
-    private suspend fun keepAliveLoop() {
-        // Half-interval ticks bound worst-case extra silence to one tick (the 50 ms floor keeps
-        // the CPU cost negligible).
-        val tickMs = (keepAliveIntervalMs / 2L).coerceAtLeast(50L)
-        while (true) {
-            delay(tickMs)
-            val now = System.currentTimeMillis()
-            for ((neighborId, peer) in peers.entries.toList()) {
-                if (now - peer.lastActivityMs >= keepAliveIntervalMs) {
-                    writeToPeer(neighborId, peer, helloBytes)
-                }
-            }
-        }
+    fun peerKeepaliveStats(): List<PeerKeepaliveStats> = peers.entries.toList().map { (id, peer) ->
+        peer.keepaliveStats(id)
     }
 
     /** Closes the listener and every socket, then clears [neighbors]. */
@@ -596,16 +612,22 @@ class TcpMeshTransport(
             val frame = FrameCodec.decode(bytes).getOrNull()
             if (frame == null) {
                 corruptFrames.incrementAndGet()
+                // Bytes arrived, so the peer is active even though we could not decode them.
+                peer.noteIncomingData()
                 log("dropped frame from $remoteId: corrupt (CRC or decode failed)")
                 continue
             }
             // Handshake traffic is transport-internal and never routed. A post-handshake HELLO is
-            // the 8 s keepalive probe: any received byte resets the read deadline, so it counts as
-            // link liveness — expected and silent, only counted (TASK S2 item 1).
+            // the keepalive probe: any received byte resets the read deadline, so it counts as link
+            // liveness — expected and silent, only counted (TASK S2 item 1). It must NOT refresh
+            // this socket's write gate (TASK T1 part D1): if each side suppressed its own writer on
+            // the other's probes, one side could go permanently silent while the sender starves.
             if (frame.type == FrameType.HELLO) {
                 keepAliveReceived.incrementAndGet()
+                peer.noteKeepaliveReceived()
                 continue
             }
+            peer.noteIncomingData()
             log("recv frame type=${frame.type} len=${bytes.size} from $remoteId")
             _incoming.emit(ReceivedPacket(senderId = remoteId, bytes = bytes))
         }
@@ -620,12 +642,19 @@ class TcpMeshTransport(
      */
     private fun register(remoteId: Int, peer: PeerConnection): Boolean {
         var previous: PeerConnection? = null
+        var ownerScope: CoroutineScope? = null
         synchronized(lifecycleLock) {
             if (!running) return false
             previous = peers.put(remoteId, peer)
             _neighbors.value = peers.keys.toSet()
+            ownerScope = scope
         }
-        previous?.close()
+        // TASK T1 part D1: the replaced socket's keepalive writer is done for good.
+        previous?.let { it.keepAliveJob?.cancel(); it.close() }
+        if (keepAliveIntervalMs > 0L) {
+            val s = ownerScope ?: return true // stop() won the race; nothing else to do here
+            peer.keepAliveJob = s.launch { keepAliveLoopFor(remoteId, peer) }
+        }
         return true
     }
 
@@ -637,7 +666,11 @@ class TcpMeshTransport(
                 _neighbors.value = peers.keys.toSet()
             }
         }
-        if (removed) peer.close()
+        if (removed) {
+            // TASK T1 part D1: stop this socket's keepalive writer before closing it.
+            peer.keepAliveJob?.cancel()
+            peer.close()
+        }
     }
 
     private fun Socket.closeQuietly() {
@@ -660,12 +693,46 @@ class TcpMeshTransport(
         private val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
         private val writeMutex = Mutex()
         private val closed = AtomicBoolean(false)
-        /** TASK U5 part 5: last time this link saw traffic in either direction. */
-        private val lastActivityAt = AtomicLong(System.currentTimeMillis())
 
-        /** Wall-clock ms of the most recent successful read or write on this socket. */
-        val lastActivityMs: Long
-            get() = lastActivityAt.get()
+        /**
+         * TASK T1 part D1: monotonic nanos of the last activity that may suppress this socket's
+         * keepalive writer — a successful own write or an incoming NON-HELLO frame. Incoming
+         * keepalive HELLOs deliberately never touch it (see [noteKeepaliveReceived]). Monotonic so
+         * NTP steps and suspend/wake can never distort the cadence.
+         */
+        private val activityAtNanos = AtomicLong(System.nanoTime())
+
+        /** Monotonic nanos of the last activity that may suppress this socket's writer. */
+        val lastActivityAtNanos: Long
+            get() = activityAtNanos.get()
+
+        /** TASK T1 part D1: per-socket keepalive counters for the 60 s "tcp: stats" line. */
+        val keepAliveSentCount = AtomicLong(0)
+        val keepAliveRecvCount = AtomicLong(0)
+
+        /** Largest gap between two consecutive successful writes on this socket (nanos). */
+        private val lastWriteAtNanos = AtomicLong(System.nanoTime())
+        private val maxWriteGapNanos = AtomicLong(0L)
+
+        /** This socket's keepalive writer coroutine, owned by [register]/[removePeer]. */
+        var keepAliveJob: Job? = null
+
+        fun isClosed(): Boolean = closed.get()
+
+        /** A keepalive HELLO arrived: counted for stats only — it never refreshes the gate. */
+        fun noteKeepaliveReceived() {
+            keepAliveRecvCount.incrementAndGet()
+        }
+
+        /** This socket's own keepalive write succeeded: counted for stats and the gate. */
+        fun noteKeepaliveSent() {
+            keepAliveSentCount.incrementAndGet()
+        }
+
+        /** Real (non-HELLO) or undecodable data arrived from the peer: refreshes the gate. */
+        fun noteIncomingData() {
+            activityAtNanos.set(System.nanoTime())
+        }
 
         suspend fun write(bytes: ByteArray) {
             if (bytes.size > MAX_FRAME_SIZE) {
@@ -676,7 +743,12 @@ class TcpMeshTransport(
                 output.writeShort(bytes.size)
                 output.write(bytes)
                 output.flush()
-                lastActivityAt.set(System.currentTimeMillis())
+                val now = System.nanoTime()
+                // TASK T1 part D1: track the largest gap between consecutive writes. Writers on one
+                // socket are serialized by [writeMutex], so a plain set is race-free here.
+                maxWriteGapNanos.updateAndGet { maxOf(it, now - lastWriteAtNanos.get()) }
+                lastWriteAtNanos.set(now)
+                activityAtNanos.set(now)
             }
         }
 
@@ -684,7 +756,8 @@ class TcpMeshTransport(
          * Reads one length-prefixed frame body.
          *
          * Returns null on a clean end of stream. Zero or oversized lengths are
-         * malformed and throw, so the caller closes the socket.
+         * malformed and throw, so the caller closes the socket. The caller decides whether this
+         * read refreshes the keepalive gate ([noteIncomingData] vs [noteKeepaliveReceived]).
          */
         fun readFrame(): ByteArray? {
             val high = input.read()
@@ -699,7 +772,6 @@ class TcpMeshTransport(
 
             val bytes = ByteArray(size)
             input.readFully(bytes)
-            lastActivityAt.set(System.currentTimeMillis())
             return bytes
         }
 
@@ -713,5 +785,24 @@ class TcpMeshTransport(
                 socket.closeQuietly()
             }
         }
+
+        /** Snapshot of this socket's keepalive counters for [peerKeepaliveStats]. */
+        fun keepaliveStats(neighborId: Int): PeerKeepaliveStats = PeerKeepaliveStats(
+            neighborId = neighborId,
+            sent = keepAliveSentCount.get(),
+            received = keepAliveRecvCount.get(),
+            maxSilenceMs = TimeUnit.NANOSECONDS.toMillis(maxWriteGapNanos.get()),
+        )
     }
 }
+
+/**
+ * Per-socket keepalive counters reported in the service's 60 s "tcp: stats" line (TASK T1 part D1).
+ * [maxSilenceMs] is the largest gap between two consecutive successful writes on that socket.
+ */
+data class PeerKeepaliveStats(
+    val neighborId: Int,
+    val sent: Long,
+    val received: Long,
+    val maxSilenceMs: Long,
+)

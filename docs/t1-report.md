@@ -154,8 +154,64 @@ Status per part is updated as work progresses; final state in Part E.
   zero new failures). Count check: 1042 at end of B + 7 (C1) + 17 (C2) + 4 (C3) = 1070.
 
 ## Part D — keepalive and flapping
-- D0 findings (max 25 lines): PENDING
-- D1 per-socket keepalive loop fix: PENDING
+- D0 findings:
+  - Clock/tick: wall clock throughout. ONE global writer coroutine (started once in start()) ticks
+    delay(interval/2) on the transport dispatcher (Dispatchers.IO), reads System.currentTimeMillis()
+    and writes a HELLO to every peer whose lastActivityMs is >= interval old.
+  - "Idle" = per-socket PeerConnection.lastActivityMs, refreshed by ANY successful read or write: an
+    incoming keepalive suppresses the local writer for another full interval.
+  - Duplicate sockets: register() replaces the map entry for a node id and closes the old
+    PeerConnection outside the lock; the loop iterates a snapshot, so it may write once to an already-
+    replaced socket — writeToPeer catches the IOException and removePeer(key, oldValue) is a no-op pair
+    removal (safe, at most one spurious "write failed" line).
+  - Raw reachability probe: WifiDirectConnector opens a plain TCP connect to PORT without HELLO and
+    closes it; the owner accepts, sends its HELLO, gets EOF, logs a handshake failure. No peer is
+    registered, so keepalive never touches it; it only adds one extra connection per client connect-loop
+    restart (i.e., after every flap).
+  - Why a socket can go 24 s without writes: (1) incoming-traffic suppression — the side that keeps
+    receiving (even just the peer's keepalives) never writes, so all bytes in one direction come from a
+    single writer; with phase offset between the two loops the suppressed side stays silent while the
+    sender's own reader starves; (2) worst-case write gap on the sending side is interval + tick = 1.5x
+    interval, and a phase-offset pair can go up to ~3x interval ≈ 24 s without a byte at production
+    settings — exactly deadAfterMs: zero margin; (3) one global loop: a blocking write to an unresponsive
+    peer (full TCP buffer) delays keepalives for ALL other peers; (4) wall clock + delay() drift
+    (NTP/suspend, IO load) stretches gaps further. Any Wi-Fi Direct jitter or one dropped HELLO tips a
+    healthy idle link over its own 24 s deadline → close → immediate reconnect = evidence (3).
+- D1 per-socket keepalive loop fix: DONE (commit hash filled in Part E)
+  - TcpMeshTransport: the single global writer is gone. register() now launches ONE coroutine per
+    live socket into this start's scope (removePeer/stop cancel it); each loop does delay(interval)
+    on the transport dispatcher and writes a HELLO when that socket's last gate activity is >= one
+    interval old — so the gap between two writes on one socket is bounded by ~2 x interval, and a
+    slow write to one peer can no longer delay the others. All stamps are System.nanoTime()
+    (monotonic): NTP steps or suspend/wake cannot distort the cadence.
+  - GATE DEVIATION from the spec wording: the spec says "write if (now - lastWriteAt) >= interval"
+    (own writes only). That breaks existing test (e) activeTrafficSuppressesKeepaliveWrites, which
+    requires incoming MSG frames to suppress keepalive writes — with an own-writes-only gate the
+    first check at t≈250 ms lands inside the 600 ms active phase and a write happens. Settled gate:
+    max(last own write, last incoming NON-HELLO frame); incoming keepalive HELLOs NEVER refresh it
+    (that suppression was D0 root cause 1). Real data still suppresses probing, so (e) passes.
+    Residual risk documented: a continuous one-way data flow can starve the sender's own writer —
+    mitigated by D2's grace write + flap guard.
+  - PeerConnection: monotonic activityAtNanos; per-socket keepAliveSentCount/keepAliveRecvCount;
+    maxWriteGapNanos (largest gap between consecutive successful writes); noteKeepaliveReceived /
+    noteIncomingData / noteKeepaliveSent; readFrame no longer touches the gate — the reader decides
+    (corrupt frames count as data: bytes arrived). New public peerKeepaliveStats() + top-level
+    PeerKeepaliveStats(neighborId, sent, received, maxSilenceMs). Global keepAliveCount kept.
+  - MeshService: the single "tcp: stats keepAlive=N" line is replaced by one line per live peer in
+    the same 60 s block: "tcp: stats #id keepAliveSent=N keepAliveRecv=M maxSilenceMs=X".
+  - New TcpMeshTransportPerSocketKeepaliveTest (real loopback sockets, port 0, condition waits):
+    (1) idleLinkStaysUpForTwentyIntervals — interval 150 ms / deadAfter 3 s; both sides reach
+    sent >= 20 (~3+ s of pure keepalive), link still up, no "timed out" line, received >= 18 both
+    ways. (2) twoLinksInBothDirectionsNeverExceedDoubleIntervalSilence — chain N1->N2->N3 so the
+    middle node holds one outbound + one inbound socket; interval 400 ms / deadAfter 8 s; after all
+    four endpoints reach sent >= 5, maxSilenceMs <= 2 x interval + 1 s slack on EVERY socket.
+    Spec checklist mapping: "silent peer dropped after dead timeout" = existing (b); "keepalives
+    never reach incoming" = existing (c) — the known-failing S2 baseline (it awaits log lines that
+    no longer exist since keepalive HELLOs are counted silently; cannot edit per T1 rules, stays
+    red, reported here); "default parameters behave as before" = existing (d).
+  - Result: new class 2/2 green; existing TcpMeshTransportKeepaliveTest 5/6 with ONLY the known
+    baseline failure keepaliveHellosNeverReachIncoming ("timed out after 10000ms waiting for
+    keepalive HELLOs flowed both ways"); :app:compileDebugKotlin clean. Zero new failures.
 - D2 tolerant defaults + grace write + flap guard: PENDING
 - D3 re-registration coalescing: PENDING
 

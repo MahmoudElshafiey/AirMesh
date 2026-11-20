@@ -733,12 +733,17 @@ class MeshService : Service() {
                 _manualPauseRemainingMs.value = manualPausePolicy.pauseRemainingMs(System.currentTimeMillis())
                 // TASK R3 part 1: periodic "STILL NOT CONNECTED" diagnostic while an episode is active.
                 recoveryRecorder.tick(buildRecoverySnapshot())
-                // TASK S2 item 1: keepalive HELLOs are silent in the transport; report their count
-                // once per minute, like the directory's "dnssd: stats" line.
+                // TASK T1 part D1: keepalive is per-socket now, so report one line per live peer —
+                // sent/received counters and the largest write gap on that socket.
                 val nowMs = System.currentTimeMillis()
                 if (nowMs - lastTcpStatsAtMs >= 60_000L) {
                     lastTcpStatsAtMs = nowMs
-                    _eventLog.log("tcp: stats keepAlive=${node.transport.keepAliveCount}")
+                    for (stats in node.transport.peerKeepaliveStats()) {
+                        _eventLog.log(
+                            "tcp: stats #${stats.neighborId} keepAliveSent=${stats.sent} " +
+                                "keepAliveRecv=${stats.received} maxSilenceMs=${stats.maxSilenceMs}",
+                        )
+                    }
                 }
                 // TASK R3 part 3: escalating recovery while auto-mesh is on, Wi-Fi Direct is up and no
                 // live neighbor exists; each returned action maps to an existing call site (the
