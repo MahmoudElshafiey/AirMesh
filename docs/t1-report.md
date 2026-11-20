@@ -5,7 +5,7 @@ Branch: `fix/t1-seq-reconnect-log` (tag `before-t1`). Evidence: docs/evidence/ru
 Status per part is updated as work progresses; final state in Part E.
 
 ## Part A — Event log screen
-- Status: DONE
+- Status: DONE (commit 4dd4ba7)
 - Root cause of the blank screen (evidence 4): MeshLogTab rendered rows only in the branch
   `else if (visible.isEmpty()) { items(visible, ...) }` — i.e. exactly when there was nothing to
   show. With 613 lines the toolbar counted them but the list body never composed any row.
@@ -38,7 +38,7 @@ Status per part is updated as work progresses; final state in Part E.
   (5 tests): default start at 1, resume after stored value, wrap-around at 65535, callback fires
   for every allocation in order, initialSeq must fit 16 bits. All existing Router test classes
   unchanged and green.
-- B2 SequenceKeeper + wire-in + localhost node test: DONE (commit hash filled in Part E).
+- B2 SequenceKeeper + wire-in + localhost node test: DONE (commit 8e7f013).
   - routing/SequenceKeeper.kt (pure): stored value is a HIGH-WATER MARK running PERSIST_MARGIN=32
     ahead of the last allocated seq. Resume = stored + START_GAP=64, so the first post-restart
     frame is at least 82 numbers beyond the last used one — never inside any peer's 1024-slot
@@ -66,7 +66,7 @@ Status per part is updated as work progresses; final state in Part E.
     AirMeshNodeSequenceRestartTest 1/1; :app:compileDebugKotlin clean.
 
 ## Part C — remembered-owner reconnection
-- C1 RememberedOwnerStore: DONE (commit hash filled in Part E)
+- C1 RememberedOwnerStore: DONE (commit a6a9964)
   - transport/RememberedOwnerStore.kt (pure): Record(deviceAddress, nodeId, recordedAtMs,
     failedAttempts, nextAllowedAttemptAtMs); one pipe-separated string on disk so ANY corruption
     reads as "no record"; cleared after MAX_FAILED_ATTEMPTS=3 failures or once older than
@@ -83,7 +83,7 @@ Status per part is updated as work progresses; final state in Part E.
     expiry boundary exactly at 24 h + self-clearing; 3-failure clear; refreshSuccess reset of
     count/pacing/timestamp; noteAttempt stamp; corrupt inputs -> null; mutating methods are no-ops
     without a record). :app:compileDebugKotlin clean.
-- C2 RememberedOwnerPolicy in AutoMeshController: DONE (commit hash filled in Part E)
+- C2 RememberedOwnerPolicy in AutoMeshController: DONE (commit dc11d87)
   - transport/RadioPeer.kt (pure): deviceAddress + raw WifiP2pDevice status; constants
     AVAILABLE=1 / CONNECTED=3 mirroring the framework values.
   - transport/RememberedOwnerPolicy.kt (pure, fake clock + seeded Random): consider() returns a
@@ -118,7 +118,7 @@ Status per part is updated as work progresses; final state in Part E.
     failure is not counted), 45 s+jitter pacing after a failure, the 3-attempt cap clearing the
     store, success refreshing the record so numbering restarts at #1, auto-off gating, and a
     non-AVAILABLE peer never triggering. Existing AutoMeshControllerTest stays green: 43/43.
-- C3 ownerProbe experiment + 25 s watchdog: DONE (commit hash filled in Part E)
+- C3 ownerProbe experiment + 25 s watchdog: DONE (commit 38fde68)
   - DiscoveryCoordinator (pure): new optional ctor param `stuckCycleMs: Long = STUCK_CYCLE_MS`
     (between burstOffsetsMs and clock; the old 90 s default keeps every other caller unchanged)
     used by releaseStuckCycleIfAny. New public `var ownerProbeActive` + private lastProbeAtMs:
@@ -177,7 +177,7 @@ Status per part is updated as work progresses; final state in Part E.
     peer (full TCP buffer) delays keepalives for ALL other peers; (4) wall clock + delay() drift
     (NTP/suspend, IO load) stretches gaps further. Any Wi-Fi Direct jitter or one dropped HELLO tips a
     healthy idle link over its own 24 s deadline → close → immediate reconnect = evidence (3).
-- D1 per-socket keepalive loop fix: DONE (commit hash filled in Part E)
+- D1 per-socket keepalive loop fix: DONE (commit d0799c8)
   - TcpMeshTransport: the single global writer is gone. register() now launches ONE coroutine per
     live socket into this start's scope (removePeer/stop cancel it); each loop does delay(interval)
     on the transport dispatcher and writes a HELLO when that socket's last gate activity is >= one
@@ -212,7 +212,7 @@ Status per part is updated as work progresses; final state in Part E.
   - Result: new class 2/2 green; existing TcpMeshTransportKeepaliveTest 5/6 with ONLY the known
     baseline failure keepaliveHellosNeverReachIncoming ("timed out after 10000ms waiting for
     keepalive HELLOs flowed both ways"); :app:compileDebugKotlin clean. Zero new failures.
-- D2 tolerant defaults + grace write + flap guard: DONE (commit hash filled in Part E)
+- D2 tolerant defaults + grace write + flap guard: DONE (commit 386c3d1)
   - MeshService defaults: keepAliveIntervalMs 8 s -> 5 s, deadAfterMs 24 s -> 40 s. New optional
     ctor param silenceGraceCheck: (() -> Boolean)? = null on TcpMeshTransport (pass-through added
     to AirMeshNodeFactory); MeshService passes "group formed AND p2p interface has its mesh
@@ -247,7 +247,7 @@ Status per part is updated as work progresses; final state in Part E.
   - Result: new class 5/5 green; TcpMeshTransportKeepaliveTest still 5/6 (only the known baseline
     failure); TcpMeshTransportPerSocketKeepaliveTest still 2/2; :app:compileDebugKotlin clean. Zero
     new failures.
-- D3 re-registration coalescing: DONE (commit hash filled in Part E)
+- D3 re-registration coalescing: DONE (commit 7048e73)
   - New AdvertReregisterCoalescer in AirMeshAdvert.kt (pure, fake-clock testable): a new client count
     must be STABLE for stableMs (= ADVERT_REREGISTER_MIN_INTERVAL_MS = 10 s by default) before the
     local service is removed and re-added; any other observed value restarts its stability clock (and
@@ -279,6 +279,41 @@ Status per part is updated as work progresses; final state in Part E.
     registered value drops the pending one; re-appearance starts a fresh stability clock.
   - Result: new class 6/6 green; existing AirMeshAdvertTest still 46/46 (shouldReRegisterAdvert and
     its tests untouched); :app:compileDebugKotlin clean. Zero new failures.
+- Part D final check (after the D3 commit, on the final tree): full suite redirected to
+  build/gradle.log — **1083 tests completed, exactly 1 failed**: the known S2 baseline
+  TcpMeshTransportKeepaliveTest.keepaliveHellosNeverReachIncoming (it awaits "type=HELLO ... from N"
+  log lines that no longer exist since S2 item 1 counts keepalive HELLOs silently; stale vs current
+  behavior, cannot be edited per T1 rules — reported here, stays red). Zero new failures. New socket
+  test classes run 5 times in a row (forced re-run): TcpMeshTransportPerSocketKeepaliveTest 5/5 runs
+  green (2 tests each = 10/10); TcpMeshTransportSilenceGraceTest 5/5 runs green (5 tests each =
+  25/25). AdvertReregisterCoalescerTest is deterministic fake-clock — one run suffices (6/6).
 
 ## Part E — final verification
-- PENDING
+- Per-part status (all DONE, no SKIPPED sub-parts): A = 4dd4ba7, B1 = 685e058, B2 = 8e7f013,
+  C1 = a6a9964, C2 = dc11d87, C3 = 38fde68, D1 = d0799c8, D2 = 386c3d1, D3 = 7048e73.
+- Full suite (run after the last code commit 7048e73; output in build/gradle.log): **1083 tests
+  completed, exactly 1 failed** — TcpMeshTransportKeepaliveTest.keepaliveHellosNeverReachIncoming,
+  the known S2 baseline described above. Zero new failures vs the pre-T1 red baseline (1070 tests,
+  same single failure). Totals taken from app/build/test-results/testDebugUnitTest XML files; only
+  that one class has failures > 0.
+- :app:assembleDebug — BUILD SUCCESSFUL.
+- git status --short after this commit: empty except the pre-existing ` M AGENTS.md` (modified before
+  T1 started, never staged by T1).
+- git diff --diff-filter=M --name-only before-t1 -- app/src/test — EMPTY: no existing test was
+  edited; all test changes are new files. No @Ignore added anywhere since before-t1.
+- Commit messages of the nine T1 commits contain no attribution trailers.
+- Manual mode untouched (no change to manual connect paths); nothing pushed; branch only.
+
+### Device checks (manual — NOT run here, no device available in this environment)
+Run on two phones with the debug build from this branch; expected results:
+1. Both phones connected; swipe-close one app and reopen it → expect an "auto: remembered-owner
+   attempt" line and a reconnection within ~25 s (C1+C2).
+2. Send a direct message FROM the restarted phone → delivered and acked on the other side, with no
+   "dropped duplicate" lines for its node id (B1+B2).
+3. Leave two connected phones idle for 10 minutes → no "link timed out" lines; the per-peer
+   "tcp: stats #id keepAliveSent=... keepAliveRecv=..." lines show moving counters (D1+D2).
+4. Open the Event log screen → it shows lines (the blank-screen fix, Part A), including a
+   "ui: log screen lines=N rendered=M" line on open.
+5. Owner probe experiment: with an empty owner group, compare the Debug-card flag ON vs OFF —
+   ON should show the strategy-3 re-scan every 20 s while the group stays empty (C3).
+
