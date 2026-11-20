@@ -755,6 +755,10 @@ class MeshService : Service() {
                         )
                     }
                 }
+                // TASK T1 part D3: the coalescer only sees stability while the count keeps being
+                // reported, so feed it every tick (same values included); a no-op unless we are an
+                // owner with a live ad and the pending value has been stable for 10 s.
+                peerDirectory.updateClientCount(liveNeighborCount)
                 // TASK R3 part 3: escalating recovery while auto-mesh is on, Wi-Fi Direct is up and no
                 // live neighbor exists; each returned action maps to an existing call site (the
                 // supervisor never creates a group itself).

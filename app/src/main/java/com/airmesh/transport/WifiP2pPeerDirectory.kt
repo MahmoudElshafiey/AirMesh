@@ -55,16 +55,16 @@ class WifiP2pPeerDirectory(
     private var advertisedOwnerFlag: Boolean? = null
     /** The service info we registered, so removeLocalService can match it. */
     private var serviceInfo: WifiP2pDnsSdServiceInfo? = null
-    /** Client count in the instance name currently registered (0 for a fresh ad). */
-    private var advertisedClients = 0
-    /** When the last client-count re-registration happened; 0 = never. */
-    private var lastClientReRegisterAtMs = 0L
+    // TASK T1 part D3: client-count re-registrations are coalesced — a new count must be stable for
+    // ADVERT_REREGISTER_MIN_INTERVAL_MS before the local service is removed and re-added, so an
+    // oscillating count can never flap the registration. The role switch itself stays immediate.
+    private val advertCoalescer = AdvertReregisterCoalescer()
 
     /** Owner flag of the ad currently registered (false when not advertising); recovery diagnostics (TASK R3 part 1). */
     val currentAdvertOwner: Boolean get() = advertisedOwnerFlag == true
 
     /** Client count in the instance name currently registered; recovery diagnostics (TASK R3 part 1). */
-    val currentAdvertClients: Int get() = advertisedClients
+    val currentAdvertClients: Int get() = advertCoalescer.registeredCount
 
     /** Whether we own a live group right now; controls peer-table ageing speed (TASK R3 part 2). */
     var ourGroupPresent: Boolean = false
@@ -182,8 +182,7 @@ class WifiP2pPeerDirectory(
         // A fresh registration always advertises 0 clients; updateClientCount
         // re-registers with the live count afterwards, so an owner's group size
         // shows up in its instance name without touching the role switch.
-        advertisedClients = 0
-        lastClientReRegisterAtMs = 0L
+        advertCoalescer.onFreshRegistration(0)
         registerLocalService(isGroupOwner, 0)
         ensureLoop()
     }
@@ -220,17 +219,18 @@ class WifiP2pPeerDirectory(
 
     /**
      * Re-advertise our instance name with the new live client count. Only an owner
-     * with a live registration acts (clients never carry a count), and at most one
-     * re-registration per [ADVERT_REREGISTER_MIN_INTERVAL_MS] for real changes only.
+     * with a live registration acts (clients never carry a count). TASK T1 part D3:
+     * re-registration is coalesced — the new count must be stable for
+     * [ADVERT_REREGISTER_MIN_INTERVAL_MS] before the local service is removed and
+     * re-added, so an oscillating count can never flap it. The caller feeds this
+     * periodically (same values included) because stability needs repeated observations.
      */
     override fun updateClientCount(clients: Int) {
         if (advertisedOwnerFlag != true || serviceInfo == null) return
         val nowMs = System.currentTimeMillis()
-        if (!shouldReRegisterAdvert(advertisedClients, lastClientReRegisterAtMs, clients, nowMs)) return
-        advertisedClients = clients.coerceIn(0, 99)
-        lastClientReRegisterAtMs = nowMs
+        if (!advertCoalescer.onUpdate(clients, nowMs)) return
         channel?.let { ch -> removeLocalServiceQuietly(ch) } ?: log("dnssd: cannot re-register — no P2P channel")
-        registerLocalService(true, advertisedClients)
+        registerLocalService(true, advertCoalescer.registeredCount)
     }
 
     override fun setDiscovering(enabled: Boolean) {
@@ -477,8 +477,7 @@ class WifiP2pPeerDirectory(
         channel = null
         advertisedOwnerFlag = null
         serviceInfo = null
-        advertisedClients = 0
-        lastClientReRegisterAtMs = 0L
+        advertCoalescer.reset()
         publishedPeers = emptyList()
         _peers.value = emptyList()
         loopJob?.cancel()

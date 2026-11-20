@@ -142,3 +142,75 @@ fun shouldReRegisterAdvert(
     minIntervalMs: Long = ADVERT_REREGISTER_MIN_INTERVAL_MS,
 ): Boolean =
     newCount != lastCount && (lastAtMs == 0L || nowMs - lastAtMs >= minIntervalMs)
+
+/**
+ * TASK T1 part D3: coalesces client-count re-registrations of the owner's DNS-SD service.
+ *
+ * The plain gate above fired on every real change as soon as the spacing had elapsed — a count
+ * that oscillates (2 -> 3 -> 2 -> 3 ...) removed and re-added the local service on every flip,
+ * which is exactly what DNS-SD does not like. Now a new value must be STABLE for [stableMs] before
+ * it is registered; while it is pending, any other observed value restarts its stability clock (and
+ * wins if it stabilizes first). Two actual registrations are still at least [minIntervalMs] apart
+ * through [shouldReRegisterAdvert], so the service is never removed and re-added within one window.
+ * Pure and fake-clock testable; the caller feeds it periodically (same values included) — stability
+ * can only be observed while the count keeps being reported.
+ */
+class AdvertReregisterCoalescer(
+    private val stableMs: Long = ADVERT_REREGISTER_MIN_INTERVAL_MS,
+    private val minIntervalMs: Long = ADVERT_REREGISTER_MIN_INTERVAL_MS,
+) {
+    /** Count in the instance name currently registered (0..99). */
+    var registeredCount: Int = 0
+        private set
+
+    /** New value waiting to become stable; -1 = nothing pending. */
+    private var pendingCount: Int = -1
+    private var pendingSinceMs: Long = 0L
+    /** When the last actual re-registration happened; 0 = "never" (first change waits only stability). */
+    private var lastRegisteredAtMs: Long = 0L
+
+    /**
+     * Feed one observation of the live client count. Returns true exactly when a new local-service
+     * registration with [newCount] must happen now. A value equal to [registeredCount] clears any
+     * pending change and returns false — an unchanged count never removes and re-adds the service.
+     */
+    fun onUpdate(newCount: Int, nowMs: Long): Boolean {
+        val clamped = newCount.coerceIn(0, 99)
+        if (clamped == registeredCount) {
+            pendingCount = -1
+            return false
+        }
+        if (pendingCount != clamped) {
+            // A different value was seen: restart the stability clock for this one.
+            pendingCount = clamped
+            pendingSinceMs = nowMs
+            return false
+        }
+        if (nowMs - pendingSinceMs < stableMs) return false
+        // Stable long enough — still subject to the plain spacing gate between real registrations.
+        if (!shouldReRegisterAdvert(registeredCount, lastRegisteredAtMs, clamped, nowMs, minIntervalMs)) {
+            return false
+        }
+        registeredCount = clamped
+        pendingCount = -1
+        lastRegisteredAtMs = nowMs
+        return true
+    }
+
+    /** A fresh registration just happened with [count] (startAdvertising): re-anchor the state. */
+    fun onFreshRegistration(count: Int) {
+        registeredCount = count.coerceIn(0, 99)
+        pendingCount = -1
+        // "Never" — matches today's lastClientReRegisterAtMs = 0 reset, so the first real change
+        // after a fresh registration waits only for stability, not another full interval.
+        lastRegisteredAtMs = 0L
+    }
+
+    /** stop(): forget everything. */
+    fun reset() {
+        registeredCount = 0
+        pendingCount = -1
+        pendingSinceMs = 0L
+        lastRegisteredAtMs = 0L
+    }
+}

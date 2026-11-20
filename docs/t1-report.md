@@ -247,7 +247,38 @@ Status per part is updated as work progresses; final state in Part E.
   - Result: new class 5/5 green; TcpMeshTransportKeepaliveTest still 5/6 (only the known baseline
     failure); TcpMeshTransportPerSocketKeepaliveTest still 2/2; :app:compileDebugKotlin clean. Zero
     new failures.
-- D3 re-registration coalescing: PENDING
+- D3 re-registration coalescing: DONE (commit hash filled in Part E)
+  - New AdvertReregisterCoalescer in AirMeshAdvert.kt (pure, fake-clock testable): a new client count
+    must be STABLE for stableMs (= ADVERT_REREGISTER_MIN_INTERVAL_MS = 10 s by default) before the
+    local service is removed and re-added; any other observed value restarts its stability clock (and
+    wins if it stabilizes first); a value equal to the registered one clears the pending change — an
+    unchanged count never removes and re-adds the service. Two actual registrations are still at least
+    minIntervalMs apart through the existing tested shouldReRegisterAdvert, so the service is never
+    removed and re-added within one window. onFreshRegistration(count) (startAdvertising) re-anchors:
+    lastRegisteredAtMs = 0 ("never"), matching today's reset, so the first real change after a fresh
+    registration waits only for stability. The role switch itself stays immediate — only client-count
+    changes go through the coalescer.
+  - WifiP2pPeerDirectory: advertisedClients/lastClientReRegisterAtMs replaced by one AdvertReregister-
+    Coalescer instance; currentAdvertClients now reads advertCoalescer.registeredCount (recovery
+    diagnostics unchanged); startAdvertising calls onFreshRegistration(0); updateClientCount gates on
+    onUpdate(clients, now) and registers with the coalescer's registeredCount; stop() calls reset().
+  - MeshService: stability can only be observed while the count keeps being reported, so the 1 s tick
+    loop now feeds peerDirectory.updateClientCount(liveNeighborCount) every tick (same values
+    included); the existing change-driven call in the neighbors collector stays. No-op unless we are
+    an owner with a live ad and the pending value has been stable for 10 s.
+  - New AdvertReregisterCoalescerTest (pure fake clock, no sockets): (1) firstChangeRegistersOnly-
+    AfterStability — default consts; count 2 fed every second from t=1 s: nothing before t=11 s,
+    registers at exactly t=11 s, unchanged feeds never re-register. (2) oscillatingCountNeverRe-
+    Registers — flips 2/3 every 5 s for a minute: zero registrations. (3) twoChangesWithinWindow-
+    CoalesceToOne — count 2 anchored t=1 s, jumps to 3 at t=5 s before 2 stabilizes: exactly ONE
+    registration of the FINAL value 3 at t=15 s. (4) minIntervalGateBlocksSecondRegistration — custom
+    stableMs=2 s/minIntervalMs=10 s: first change registers at t=3 s, second (stable since t=6 s) is
+    held by the spacing gate until exactly t=13 s. (5) freshRegistrationReAnchorsSpacing — after a
+    real registration 8 s earlier in wall time, onFreshRegistration lets the next stable change
+    register after stability alone (t=23 s). (6) sameValueClearsPendingChange — returning to the
+    registered value drops the pending one; re-appearance starts a fresh stability clock.
+  - Result: new class 6/6 green; existing AirMeshAdvertTest still 46/46 (shouldReRegisterAdvert and
+    its tests untouched); :app:compileDebugKotlin clean. Zero new failures.
 
 ## Part E — final verification
 - PENDING
